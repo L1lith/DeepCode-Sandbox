@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Deepsand - a Docker-contained DeepCode desktop sandbox",
   "type": "module",
-  "license": "MIT",
+  "license": "ESMV",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
