@@ -1,0 +1,55 @@
+# Line-ending policy.
+#
+# Deepsand's source is developed on Windows but half of it executes inside a
+# Linux container. CRLF there is not cosmetic: a shell script whose shebang is
+# `#!/usr/bin/env bash\r` fails with
+#
+#   /usr/bin/env: 'bash\r': No such file or directory
+#
+# and the container never starts. Forcing LF on checkout makes that impossible
+# regardless of the developer's `core.autocrlf` setting.
+#
+# See runtime/README.md and docs/SECURITY.md.
+
+* text=auto eol=lf
+
+# Everything that is read or executed by Linux, plus all project sources.
+*.sh            text eol=lf
+*.bash          text eol=lf
+*.mjs           text eol=lf
+*.js            text eol=lf
+*.cjs           text eol=lf
+*.json          text eol=lf
+*.jsonc         text eol=lf
+*.md            text eol=lf
+*.rs            text eol=lf
+*.toml          text eol=lf
+*.lock          text eol=lf
+*.ts            text eol=lf
+*.tsx           text eol=lf
+*.css           text eol=lf
+*.html          text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+Dockerfile      text eol=lf
+.dockerignore   text eol=lf
+.gitattributes  text eol=lf
+.gitignore      text eol=lf
+
+# Windows shell scripts and batch files genuinely want CRLF.
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
+
+# Binary assets must never be line-ending translated.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.icns  binary
+*.exe   binary
+*.dll   binary
+*.pdb   binary
+*.lib   binary
+*.so    binary
+*.dylib binary

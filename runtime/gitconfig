@@ -1,0 +1,70 @@
+# Deepsand sandbox: system-wide git configuration.
+#
+# Installed as /etc/gitconfig at image build time. It has to be the *system*
+# config rather than ~/.gitconfig, because the sandbox user's home directory sits
+# on the read-only image layer (the writable volume is mounted one level down, at
+# /home/deepcode/.deepcode). `git config --global` inside the sandbox therefore
+# fails with a read-only filesystem error, and anything written to $HOME would be
+# lost on every container recreation anyway.
+#
+# ---------------------------------------------------------------------------
+# safe.directory
+#
+# /workspace is a bind mount. On Docker Desktop the host files arrive through a
+# grpcfuse bridge whose reported ownership does not match the sandbox uid, so git
+# refuses to touch the repository:
+#
+#   fatal: detected dubious ownership in repository at '/workspace'
+#
+# That breaks status, log, diff, add and commit -- every git operation, in every
+# mounted project. The check exists so that a repository belonging to *another
+# user* cannot get you to execute its config or hooks as yourself. That model does
+# not apply inside this sandbox: the only repositories present are the ones the
+# operator deliberately mounted, and the sandbox exists precisely to run untrusted
+# code against them. Trusting the mount is the intended posture, and the
+# alternative is a git that does not work.
+#
+# `*` rather than a path list because the agent legitimately creates repositories
+# elsewhere too (cloning into a subdirectory, working under /tmp or /grants), and
+# a path list that silently misses one produces the same confusing failure.
+# ---------------------------------------------------------------------------
+[safe]
+	directory = *
+
+# ---------------------------------------------------------------------------
+# Committer identity
+#
+# Without this, `git commit` aborts with "Author identity unknown". The identity
+# deliberately does not impersonate the operator: commits made by the agent should
+# be attributable to the agent, not forged under the operator's name, which would
+# be misleading in `git log` and would attach to their account if they push.
+#
+# ".invalid" is reserved by RFC 2606 and can never resolve, so this address cannot
+# quietly become a real mailbox.
+#
+# A project that wants the operator's own name and address on commits can override
+# both keys; see docs/ for the per-project passthrough.
+# ---------------------------------------------------------------------------
+[user]
+	name = DeepCode (Deepsand sandbox)
+	email = deepcode@deepsand.invalid
+
+# `git init` would otherwise warn about the default branch name on every run.
+[init]
+	defaultBranch = main
+
+# A pager in a terminal-emulating sandbox is a way to hang: the agent's output
+# collection waits for the process to exit, and the pager waits for a keypress.
+# Cat is the safe default for a machine-readable environment.
+[core]
+	pager = cat
+
+# Keep the agent's output free of advisory noise it cannot act on.
+[advice]
+	detachedHead = false
+
+# Never inherit or offer a credential helper. Deepsand injects credentials as
+# environment variables for the tools that need them; a helper that prompts would
+# hang the session, and the sandbox deliberately has no operator keychain to read.
+[credential]
+	helper =

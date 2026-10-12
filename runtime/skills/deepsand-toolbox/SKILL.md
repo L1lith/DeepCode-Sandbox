@@ -1,0 +1,121 @@
+---
+name: deepsand-toolbox
+description: What tools this Deepsand sandbox has, what it could have, and how to get one, plus how to use the operator's saved secrets. Use when a command fails with "not found" for a program, when you are about to install something with a package manager, when you need to know whether a compiler or runtime is available, when you need an API key or other credential, before telling the user that a language or tool is unsupported, or before printing any value that came from the environment.
+---
+
+# What is in the box
+
+This sandbox's container image was built for this project, with the tools the operator selected. That set is fixed while the sandbox runs. You cannot add to it by installing: anything you `apt-get install`, `npm install -g` or `cargo install` lives only in the running container and is discarded when Deepsand recreates it — which happens whenever a permission is granted.
+
+## Check before you assume
+
+Call **`deepsand_sandbox_info`**. It lists the tools this sandbox was built with. That output is the truth; do not infer from what a typical machine has, and do not assume a tool is missing just because a command failed — read the error.
+
+Note that a tool being absent is not an accident or an oversight. The operator chose the set, and the image is deliberately small.
+
+## Asking for a tool
+
+Use **`deepsand_request_tool`**:
+
+```
+tools:   ["python"]
+purpose: "running the project's build script"
+```
+
+Ask for everything you know you need in one request. `tools` takes a list, and three separate requests for three tools waste three of the operator's decisions.
+
+An approved tool is added to the project's image. **It is not installed yet.** The image has to be rebuilt and the sandbox restarted, which the operator does from the Tools tab. The reply says so explicitly. Do not retry the command that needed it, and do not try to install it yourself in the meantime — report that it is approved and pending a rebuild, and carry on with something else.
+
+## The catalogue
+
+These are the ids. Anything not in this list does not exist as far as Deepsand is concerned.
+
+**Usually present already** — the operator gets these by default:
+
+| id | what it is |
+|---|---|
+| `git` | version control, with a sane sandbox identity configured |
+| `jq` | JSON processing |
+| `ripgrep` | fast recursive search — prefer it to `grep -r` |
+| `curl` | HTTP client |
+| `zip` | `zip` and `unzip` |
+| `htmlq` | CSS-selector queries over HTML |
+
+**Available on request:**
+
+| id | what it is | notes |
+|---|---|---|
+| `node` | Node.js | already in the base image; enabling pins a current line |
+| `npm` | npm | |
+| `python` | Python 3 with pip and venv | |
+| `cargo` | Rust toolchain via rustup | large; the first build is slow |
+| `go` | Go toolchain | |
+| `apt` | let you install Debian packages yourself | the widest of these; it can install almost anything, so it is off unless asked for |
+| `brew` | Homebrew on Linux | |
+| `nix` | Nix with flakes | large |
+
+**Not available here:** `apk`. It is Alpine's package manager and this image is Debian, so it could never install anything. If you see it greyed out, that is why.
+
+## Secrets in the environment
+
+The operator can store credentials for this project: an API key, a database URL, a
+deploy token. They arrive as **environment variables**, so you do not need a file and
+you should not ask for one.
+
+Read them the ordinary way for your language:
+
+- shell: `"$MY_API_KEY"`
+- Python: `os.environ["MY_API_KEY"]`
+- Node: `process.env.MY_API_KEY`
+
+`deepsand_sandbox_info` lists which secret *names* are present. It never shows values,
+and neither does Deepsand's own interface: there is no way to read one back, only to
+replace it.
+
+### Never print a secret
+
+Do not echo, log, print, or pass a secret where the command line shows it. Deepsand
+redacts values it recognises from your terminal output, but treat that as a backstop
+rather than a licence: redaction works per output chunk, so it is not a guarantee, and
+it does not cover anything you write into a file in the workspace.
+
+In particular:
+
+- Do not commit a secret, and do not write one into a `.env`, a config file, or a test
+  fixture. It is already in the environment, so putting it in the workspace converts a
+  managed secret into one that gets pushed to a remote.
+- Do not paste a secret into a message, an issue, or a comment.
+- Do not run `env` or `printenv` to see what is available. That prints every secret at
+  once. To check for presence rather than value, test it:
+
+  ```
+  [ -n "$MY_API_KEY" ] && echo "MY_API_KEY is set"
+  ```
+
+### If a secret is missing
+
+Missing means the operator has not added it, or the sandbox has not been restarted
+since they did. Say which name you need and what for. Do not invent a placeholder and
+do not fall back to a public test key: a silent fallback hides the problem until it
+fails somewhere worse.
+
+### Secrets and the network
+
+A secret is only useful to you if its destination is reachable, and a broad egress
+rule is the way a secret leaves. If you need both, ask for the narrowest host that
+works. The operator is warned when an allowlist entry is wide enough to make
+exfiltration easy, and that warning is about exactly this.
+
+## Working with what you have
+
+- **`git` is preconfigured.** The sandbox has its own committer identity, deliberately not the operator's — commits you make are attributed to the agent, not forged under their name. `safe.directory` is set so git works on the bind-mounted workspace.
+- **There is no `sudo`, no Docker socket, and no way to become root.** Every tool installs into the sandbox user's home.
+- **`ripgrep` is faster and is the expected choice** for searching. Prefer it to `grep -r` and to `find`.
+- **`jq` is the expected way to read JSON**, including API responses.
+
+## What not to do
+
+- Do not run `apt-get install` and then rely on it. It will appear to work and then vanish.
+- Do not report a language as unavailable before calling `deepsand_sandbox_info`. It may already be there.
+- Do not request a package manager to install something that is already in the catalogue. Ask for the tool.
+- Do not request tools "just in case". Each one enlarges the image and the operator has to decide about it.

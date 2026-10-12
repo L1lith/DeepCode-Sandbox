@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = ["crates/deepsand-core", "src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "ESMV"
+authors = ["L1lith", "Deepsand contributors"]
+repository = "https://github.com/L1lith/DeepCode-Sandbox"
+
+[workspace.dependencies]
+deepsand-core = { path = "crates/deepsand-core" }
+
+# --- serialization -----------------------------------------------------------
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# --- errors ------------------------------------------------------------------
+anyhow = "1"
+thiserror = "2"
+
+# --- async / concurrency -----------------------------------------------------
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs"] }
+
+# --- filesystem watching -----------------------------------------------------
+notify = "8"
+
+# --- misc --------------------------------------------------------------------
+uuid = { version = "1", features = ["v4", "serde"] }
+time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+directories = "6"
+dunce = "1"
+sha2 = "0.10"
+rand = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# --- pty ---------------------------------------------------------------------
+portable-pty = "0.9"
+regex = "1"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+chacha20poly1305 = "0.10"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+getrandom = "0.2"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

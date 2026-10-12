@@ -1,0 +1,39 @@
+{
+  "name": "deepsand",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Deepsand - a Docker-contained DeepCode desktop sandbox",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "app:dev": "tauri dev",
+    "app:build": "tauri build",
+    "core:test": "cargo test -p deepsand-core",
+    "core:check": "cargo check --workspace",
+    "test:bridge": "node runtime/scripts/test-mcp-bridge.mjs",
+    "test": "npm run core:test && npm run test:bridge",
+    "runtime:build": "node runtime/scripts/build-image.mjs",
+    "runtime:icons": "tauri icon assets/icon.png",
+    "icon:generate-from-code": "node runtime/scripts/make-icon.mjs && tauri icon assets/icon.png"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.12.3",
+    "@tauri-apps/plugin-dialog": "^2.8.2",
+    "@tauri-apps/plugin-opener": "^2.7.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-search": "^0.16.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/xterm": "^6.0.0",
+    "solid-js": "^1.9.17"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.2",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.4",
+    "vite-plugin-solid": "^2.11.14"
+  }
+}

@@ -1,0 +1,1011 @@
+//! Serializable domain types shared by the desktop app, the headless CLI and
+//! every on-disk artefact Deepsand writes.
+
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+/// Bumped when the meaning of a stored default changes.
+///
+/// 2: hardening became the default. Stores written before this are migrated once, because
+/// the old value was the default nobody chose and running without the seccomp profile is
+/// what made the vsock escape reachable.
+pub const STATE_VERSION: u32 = 2;
+
+/// How a shared host path is exposed inside the sandbox.
+///
+/// Serialises as `"read"` / `"write"` so it matches the vocabulary the
+/// in-container MCP bridge uses with the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Access {
+    #[default]
+    #[serde(rename = "read")]
+    ReadOnly,
+    #[serde(rename = "write")]
+    ReadWrite,
+}
+
+impl Access {
+    pub fn is_write(self) -> bool {
+        matches!(self, Access::ReadWrite)
+    }
+
+    /// The `:ro` suffix Docker expects, or an empty string.
+    pub fn volume_suffix(self) -> &'static str {
+        if self.is_write() {
+            ""
+        } else {
+            ":ro"
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        if self.is_write() {
+            "read-write"
+        } else {
+            "read-only"
+        }
+    }
+}
+
+/// Egress policy for a sandbox.
+///
+/// `Internet` is the default the operator asked for: anything that is not on
+/// the local network. `Restricted` routes all egress through Deepsand's
+/// allowlisting proxy. `Full` is an explicit opt-out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum NetworkPolicy {
+    /// `--network none`.
+    None,
+    /// Public egress allowed; host, LAN, link-local and metadata blocked.
+    Internet,
+    /// Only DNS and the egress allowlist proxy are reachable.
+    Restricted {
+        #[serde(default)]
+        allow: Vec<String>,
+    },
+    /// No policy applied at all, including the host's own network.
+    Full,
+}
+
+impl Default for NetworkPolicy {
+    /// Default-deny: a new project may reach the model endpoint, its enabled tools'
+    /// hosts, and the global allowlist (the package registries), and nothing else.
+    ///
+    /// This is the default because the alternative is a sandbox that can reach the
+    /// operator's whole network by accident. `Internet` is still one click away and
+    /// is the honest choice for work that genuinely needs the open web; the point is
+    /// that it should be chosen rather than inherited.
+    ///
+    /// Projects created before this change keep whatever mode they were stored with,
+    /// so nothing silently starts being blocked.
+    fn default() -> Self {
+        NetworkPolicy::Restricted { allow: Vec::new() }
+    }
+}
+
+impl NetworkPolicy {
+    pub fn mode_str(&self) -> &'static str {
+        match self {
+            NetworkPolicy::None => "none",
+            NetworkPolicy::Internet => "internet",
+            NetworkPolicy::Restricted { .. } => "restricted",
+            NetworkPolicy::Full => "full",
+        }
+    }
+
+    /// Whether the container needs `CAP_NET_ADMIN` so the entrypoint can
+    /// install kernel-level rules.
+    /// Whether the in-container egress rules have to be installed.
+    ///
+    /// `none` is included: it no longer means "no interfaces", it means "only the
+    /// model API", and enforcing that needs the same rules as restricted mode.
+    pub fn needs_netfilter(&self) -> bool {
+        matches!(
+            self,
+            NetworkPolicy::None | NetworkPolicy::Internet | NetworkPolicy::Restricted { .. }
+        )
+    }
+
+    /// Whether egress goes through the Deepsand proxy running on the host.
+    ///
+    /// True for `none` as well as `restricted`, because a sandbox that may reach
+    /// exactly one destination reaches it the same way it reaches many.
+    /// Whether this mode needs the allowlisting egress proxy.
+    ///
+    /// Only `restricted` does. `none` means "the model API and nothing else", which the
+    /// model's own addresses already express, and the proxy cannot deliver the model
+    /// anyway: the client builds its own dispatcher and ignores `HTTP_PROXY`.
+    pub fn uses_proxy(&self) -> bool {
+        matches!(self, NetworkPolicy::Restricted { .. })
+    }
+
+    /// Whether the project's own allowlist is consulted on top of the mandatory
+    /// hosts. `none` deliberately ignores it: that mode means the model API and
+    /// nothing else, whatever the project has listed.
+    pub fn honours_allowlist(&self) -> bool {
+        matches!(self, NetworkPolicy::Restricted { .. })
+    }
+
+    pub fn allowlist(&self) -> &[String] {
+        match self {
+            NetworkPolicy::Restricted { allow } => allow,
+            _ => &[],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialSource {
+    /// Read `~/.deepcode/settings.json` from the operator's machine each start.
+    InheritHost,
+    /// Use the credentials stored on the project.
+    Project,
+}
+
+impl Default for CredentialSource {
+    fn default() -> Self {
+        CredentialSource::InheritHost
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Credentials {
+    #[serde(default)]
+    pub source: CredentialSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Extra variables merged into the generated `settings.json` `env` block.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra_env: BTreeMap<String, String>,
+}
+
+impl Credentials {
+    pub fn has_api_key(&self) -> bool {
+        self.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+    }
+
+    /// Never log or display a key in full.
+    pub fn masked_api_key(&self) -> Option<String> {
+        let key = self.api_key.as_deref()?.trim();
+        if key.is_empty() {
+            return None;
+        }
+        let tail: String = key.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+        Some(format!("****{tail}"))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResourceLimits {
+    pub memory_mb: u64,
+    /// Fractional CPUs, e.g. `2.0`.
+    pub cpus: f32,
+    pub pids_limit: u32,
+    pub tmpfs_mb: u64,
+    pub stop_timeout_s: u32,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            memory_mb: 4096,
+            cpus: 2.0,
+            pids_limit: 512,
+            tmpfs_mb: 2048,
+            stop_timeout_s: 10,
+        }
+    }
+}
+
+/// How strict DeepCode's own in-container permission prompts should be.
+///
+/// The container is the real boundary, so `AllowAll` is the sane default and
+/// keeps the TUI free of prompts that cannot actually protect anything the
+/// sandbox boundary does not already protect. `Strict` surfaces DeepCode's
+/// native prompts in the terminal pane for operators who want the extra
+/// friction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeepCodeMode {
+    AllowAll,
+    Strict,
+}
+
+impl Default for DeepCodeMode {
+    fn default() -> Self {
+        DeepCodeMode::AllowAll
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    /// Not thinking at all. Serialised as `none`, which is what the operator asked
+    /// for; the CLI expresses it as `thinkingEnabled: false` rather than as an effort
+    /// value, so [`Self::as_str`] returns something the CLI would reject as an effort
+    /// and the settings writer translates it instead.
+    Off,
+    Low,
+    High,
+    Max,
+    /// Defer to the host's `settings.json`. The switch stops deciding.
+    Default,
+}
+
+impl Default for ReasoningEffort {
+    fn default() -> Self {
+        // Deferring, so a project nobody has touched behaves the way the operator's
+        // own DeepCode installation does.
+        ReasoningEffort::Default
+    }
+}
+
+impl ReasoningEffort {
+    /// Every state, in the order the switch presents them: least to most thinking.
+    pub const ALL: [ReasoningEffort; 5] = [
+        ReasoningEffort::Off,
+        ReasoningEffort::Low,
+        ReasoningEffort::High,
+        ReasoningEffort::Max,
+        ReasoningEffort::Default,
+    ];
+
+    /// The wire and storage value. `none` is not a `reasoningEffort` the CLI accepts;
+    /// it is `thinkingEnabled: false`. See [`Self::is_thinking`].
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReasoningEffort::Off => "none",
+            ReasoningEffort::Low => "low",
+            ReasoningEffort::High => "high",
+            ReasoningEffort::Max => "max",
+            ReasoningEffort::Default => "default",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" | "off" => Some(ReasoningEffort::Off),
+            "low" => Some(ReasoningEffort::Low),
+            "high" => Some(ReasoningEffort::High),
+            "max" => Some(ReasoningEffort::Max),
+            "default" => Some(ReasoningEffort::Default),
+            _ => None,
+        }
+    }
+
+    /// Whether thinking happens at all. `none` is the only state where it does not.
+    pub fn is_thinking(self) -> bool {
+        !matches!(self, ReasoningEffort::Off)
+    }
+
+    /// Whether the switch decides, or defers to the host's settings file.
+    pub fn is_deferring(self) -> bool {
+        matches!(self, ReasoningEffort::Default)
+    }
+
+    /// The `reasoningEffort` to write. Only meaningful when thinking is on; when it
+    /// is off the value is ignored by the CLI, so the cheapest valid one is written.
+    pub fn effort_value(self) -> &'static str {
+        match self {
+            ReasoningEffort::Low => "low",
+            ReasoningEffort::Max => "max",
+            // `none` is not a valid effort, and `default` is resolved before it gets
+            // here. `high` is the documented fallback.
+            ReasoningEffort::Off | ReasoningEffort::High | ReasoningEffort::Default => "high",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ReasoningEffort::Off => "Off",
+            ReasoningEffort::Low => "Quick",
+            ReasoningEffort::High => "Balanced",
+            ReasoningEffort::Max => "Deep",
+            ReasoningEffort::Default => "Default",
+        }
+    }
+
+    /// A sentence for the tooltip, because "Default" alone does not say what it does.
+    pub fn description(self) -> &'static str {
+        match self {
+            ReasoningEffort::Off => "Do not think before answering. Fastest, and least careful.",
+            ReasoningEffort::Low => "A little thinking. Good for small, well-specified edits.",
+            ReasoningEffort::High => "Moderate thinking. The sensible default for real work.",
+            ReasoningEffort::Max => "Think as hard as the model can. Slowest and most expensive.",
+            ReasoningEffort::Default => {
+                "Leave it to your DeepCode settings.json. Falls back to Balanced if that file \
+                 says nothing."
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// How hard the model is asked to think before answering.
+///
+/// The three values are DeepCode's own (`ReasoningEffort = "low" | "high" | "max"`),
+/// not an invented scale, so the switch in the GUI maps onto the setting the CLI
+/// actually reads rather than onto something Deepsand would have to translate.
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    /// Docker-safe short name used for container, volume and network names.
+    pub slug: String,
+    /// Canonical absolute host path that becomes `/workspace`.
+    pub root_dir: String,
+    pub created_at_ms: i64,
+    #[serde(default)]
+    pub network: NetworkPolicy,
+    #[serde(default)]
+    pub limits: ResourceLimits,
+    #[serde(default)]
+    pub credentials: Credentials,
+    #[serde(default)]
+    pub deepcode_mode: DeepCodeMode,
+    /// Optional pre-declared roots. When a requested path falls inside one of
+    /// these the grant is applied without a container restart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_roots: Vec<String>,
+    /// How hard the model should think. Read when the sandbox's configuration is
+    /// generated, so a change takes effect for the next session.
+    #[serde(default)]
+    pub reasoning_effort: ReasoningEffort,
+    /// Tool ids switched on for this project's image.
+    ///
+    /// `None` means "the catalogue defaults". An explicit list is honoured as given,
+    /// including an empty one, so switching every tool off is expressible rather
+    /// than being indistinguishable from never having chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
+}
+
+impl Project {
+    pub fn container_name(&self) -> String {
+        format!("deepsand-{}", self.slug)
+    }
+
+    pub fn state_volume(&self) -> String {
+        format!("deepsand-state-{}", self.slug)
+    }
+
+    pub fn network_name(&self) -> String {
+        format!("deepsand-net-{}", self.slug)
+    }
+
+    /// The container path that arbitrary DeepCode generated names never land in.
+    pub fn workspace_mount() -> &'static str {
+        "/workspace"
+    }
+
+    /// True when `path` falls inside a pre-declared root, which means granting
+    /// it needs no new bind mount and therefore no container recreation.
+    pub fn path_is_predeclared(&self, path: &std::path::Path) -> bool {
+        self.allowed_roots
+            .iter()
+            .any(|root| crate::paths::is_within(std::path::Path::new(root), path))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantSource {
+    /// Added by the operator from the settings panel.
+    User,
+    /// Approved by the operator in response to a DeepCode request.
+    Request,
+    /// Derived from a pre-declared allowed root.
+    AllowedRoot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Grant {
+    pub id: String,
+    pub project_id: String,
+    /// Canonical absolute host path.
+    pub host_path: String,
+    /// Where it appears inside the sandbox, always under `/grants`.
+    pub container_path: String,
+    pub slug: String,
+    #[serde(default)]
+    pub access: Access,
+    /// Short human label shown in the UI.
+    #[serde(default)]
+    pub label: String,
+    /// Why it was granted, shown in the permissions panel.
+    #[serde(default)]
+    pub purpose: String,
+    #[serde(default = "Grant::default_source")]
+    pub source: GrantSource,
+    pub created_at_ms: i64,
+    /// Set for time-boxed grants; the broker revokes them once past.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<i64>,
+}
+
+impl Grant {
+    fn default_source() -> GrantSource {
+        GrantSource::User
+    }
+
+    pub fn is_expired(&self, now_ms: i64) -> bool {
+        self.expires_at_ms.is_some_and(|t| now_ms >= t)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeccompProfile {
+    /// Whatever the container runtime ships by default.
+    Default,
+    /// Deepsand's additive denylist, from `runtime/seccomp-hardened.json`.
+    Hardened,
+}
+
+impl Default for SeccompProfile {
+    /// Hardened.
+    ///
+    /// This is what a store without the field deserialises to, so leaving it on
+    /// `Default` would have quietly kept the permissive profile for every existing
+    /// project however the struct literal was written.
+    fn default() -> Self {
+        SeccompProfile::Hardened
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecuritySettings {
+    #[serde(default)]
+    pub seccomp: SeccompProfile,
+    /// Mount the root filesystem read-only. Turning this off is a downgrade.
+    #[serde(default = "yes")]
+    pub read_only_rootfs: bool,
+    /// Refuse to start a sandbox if the kernel-level egress policy could not be
+    /// applied.
+    #[serde(default = "yes")]
+    pub netfilter_required: bool,
+    #[serde(default = "yes")]
+    pub no_new_privileges: bool,
+    /// Ask the runtime for an AppArmor profile. Only meaningful on Linux hosts.
+    #[serde(default = "yes")]
+    pub apparmor: bool,
+    /// Mount `/tmp` with `noexec`. Off by default because some toolchains
+    /// execute from temporary directories.
+    #[serde(default)]
+    pub tmpfs_noexec: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for SecuritySettings {
+    fn default() -> Self {
+        Self {
+            // Hardened, not Docker's default. This control is what denies AF_VSOCK and
+            // the non-IP socket families, and a default installation was running without
+            // it -- which is how the sandbox in the assessment could open a vsock socket
+            // and reach the VM's root shell. A security control that is off unless
+            // somebody turns it on is not a control.
+            seccomp: SeccompProfile::Hardened,
+            read_only_rootfs: true,
+            netfilter_required: true,
+            no_new_privileges: true,
+            apparmor: true,
+            tmpfs_noexec: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppSettings {
+    /// Runtime image tag.
+    #[serde(default = "default_image")]
+    pub image: String,
+    #[serde(default)]
+    pub default_network: NetworkPolicy,
+    #[serde(default)]
+    pub default_limits: ResourceLimits,
+    #[serde(default)]
+    pub security: SecuritySettings,
+    /// Hosts the `Restricted` network mode's proxy is allowed to reach.
+    #[serde(default = "default_egress_allowlist")]
+    pub egress_allowlist: Vec<String>,
+    /// Restart the sandbox automatically when a new grant is approved.
+    #[serde(default = "yes")]
+    pub auto_restart_on_grant: bool,
+    /// Show a desktop notification when DeepCode asks for something.
+    #[serde(default = "yes")]
+    pub notify_on_request: bool,
+    /// Default API base URL when neither the project nor the host config sets one.
+    #[serde(default = "default_base_url")]
+    pub default_base_url: String,
+    #[serde(default = "default_model")]
+    pub default_model: String,
+    /// Directory Deepsand keeps its own state in. `None` means the platform
+    /// default data directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_dir: Option<String>,
+    /// Servers that expose this GUI over HTTP, and how much each may do.
+    #[serde(default)]
+    pub remote: crate::remote::RemoteAccessSettings,
+    /// Start Deepsand when the operator logs in.
+    ///
+    /// Off by default, and deliberately independent of
+    /// `remote.persist_across_restarts`: wanting the app ready when you sit down is
+    /// a different intention from wanting a network-reachable control plane that is
+    /// already listening.
+    #[serde(default)]
+    pub start_at_login: bool,
+}
+
+fn default_image() -> String {
+    "deepsand/runtime:0.1.0".to_string()
+}
+
+fn default_base_url() -> String {
+    "https://api.deepseek.com".to_string()
+}
+
+fn default_model() -> String {
+    "deepseek-v4-flash".to_string()
+}
+
+/// Registries the contained DeepCode plausibly needs, plus the model API.
+fn default_egress_allowlist() -> Vec<String> {
+    vec![
+        "api.deepseek.com".to_string(),
+        "registry.npmjs.org".to_string(),
+        "pypi.org".to_string(),
+        "files.pythonhosted.org".to_string(),
+        "github.com".to_string(),
+        "codeload.github.com".to_string(),
+        "raw.githubusercontent.com".to_string(),
+        "objects.githubusercontent.com".to_string(),
+        "registry-1.docker.io".to_string(),
+    ]
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            image: default_image(),
+            default_network: NetworkPolicy::default(),
+            default_limits: ResourceLimits::default(),
+            security: SecuritySettings::default(),
+            egress_allowlist: default_egress_allowlist(),
+            auto_restart_on_grant: true,
+            notify_on_request: true,
+            default_base_url: default_base_url(),
+            default_model: default_model(),
+            data_dir: None,
+            remote: crate::remote::RemoteAccessSettings::default(),
+            start_at_login: false,
+        }
+    }
+}
+
+/// The complete persisted state of the Deepsand installation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreDocument {
+    #[serde(default = "default_state_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub settings: AppSettings,
+    #[serde(default)]
+    pub projects: Vec<Project>,
+    /// project id -> grants
+    #[serde(default)]
+    pub grants: BTreeMap<String, Vec<Grant>>,
+}
+
+fn default_state_version() -> u32 {
+    STATE_VERSION
+}
+
+impl Default for StoreDocument {
+    fn default() -> Self {
+        Self {
+            version: STATE_VERSION,
+            settings: AppSettings::default(),
+            projects: Vec::new(),
+            grants: BTreeMap::new(),
+        }
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Data created by, or shown to, the sandbox                                  */
+/* ------------------------------------------------------------------------- */
+
+/// What a running sandbox is allowed to know about itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxSnapshot {
+    pub project_id: String,
+    pub project_name: String,
+    pub container_name: String,
+    pub image: String,
+    pub workspace_mount: String,
+    pub network_mode: String,
+    pub egress_allowlist: Vec<String>,
+    /// Tools this sandbox's image was built with, so the agent can check what it has
+    /// instead of guessing or trying to install something itself.
+    #[serde(default)]
+    pub tools: Vec<String>,
+    pub started_at_ms: i64,
+    pub grants: Vec<SandboxGrant>,
+    /// Requests currently awaiting an operator decision.
+    #[serde(default)]
+    pub open_requests: Vec<String>,
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+/// The subset of a grant the sandbox is told about.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxGrant {
+    pub host_path: String,
+    pub container_path: String,
+    pub access: Access,
+    pub label: String,
+}
+
+impl From<&Grant> for SandboxGrant {
+    fn from(grant: &Grant) -> Self {
+        Self {
+            host_path: grant.host_path.clone(),
+            container_path: grant.container_path.clone(),
+            access: grant.access,
+            label: if grant.label.is_empty() {
+                grant.slug.clone()
+            } else {
+                grant.label.clone()
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrantsSnapshot {
+    pub project_id: String,
+    pub generated_at_ms: i64,
+    pub grants: Vec<SandboxGrant>,
+}
+
+/* ------------------------------------------------------------------------- */
+/* Permission requests coming out of the sandbox                              */
+/* ------------------------------------------------------------------------- */
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestKind {
+    /// "DeepCode is trying to access <path>"
+    DirectoryAccess,
+    /// "DeepCode is requesting access to <thing>", location unknown
+    LocateResource,
+    /// "DeepCode is asking to reach <host>"
+    NetworkAccess,
+    /// "DeepCode is asking for a tool to be installed"
+    ToolInstall,
+}
+
+impl RequestKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RequestKind::DirectoryAccess => "directory_access",
+            RequestKind::LocateResource => "locate_resource",
+            RequestKind::NetworkAccess => "network_access",
+            RequestKind::ToolInstall => "tool_install",
+        }
+    }
+}
+
+/// A validated request from the sandbox. Never trusted for authorisation: the
+/// fields are only used to prefill the dialog the operator has to confirm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionRequest {
+    pub id: String,
+    pub kind: RequestKind,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub project: String,
+    #[serde(default)]
+    pub workspace: String,
+    #[serde(default)]
+    pub args: serde_json::Value,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub pid: Option<u32>,
+}
+
+impl PermissionRequest {
+    /// Path the sandbox claims it wants, if it named one. Display only.
+    pub fn claimed_host_path(&self) -> Option<&str> {
+        self.args
+            .get("host_path")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Plain-language description of what is wanted.
+    pub fn description(&self) -> String {
+        let from = |key: &str| {
+            self.args
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        match self.kind {
+            RequestKind::DirectoryAccess => self
+                .claimed_host_path()
+                .map(str::to_string)
+                .or_else(|| from("description"))
+                .unwrap_or_else(|| "(unspecified location)".to_string()),
+            RequestKind::LocateResource => from("description")
+                .or_else(|| self.claimed_host_path().map(str::to_string))
+                .unwrap_or_else(|| "(unspecified resource)".to_string()),
+            RequestKind::NetworkAccess => {
+                let patterns = self.requested_patterns();
+                if patterns.is_empty() {
+                    from("description").unwrap_or_else(|| "(unspecified destination)".to_string())
+                } else {
+                    patterns.join(", ")
+                }
+            }
+            RequestKind::ToolInstall => {
+                let tools = self.requested_tools();
+                if tools.is_empty() {
+                    from("description").unwrap_or_else(|| "(unspecified tool)".to_string())
+                } else {
+                    tools.join(", ")
+                }
+            }
+        }
+    }
+
+    pub fn purpose(&self) -> Option<String> {
+        self.args
+            .get("purpose")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+
+    /// What the sandbox asked for, defaulting to the safe option.
+    pub fn requested_access(&self) -> Access {
+        match self.args.get("access").and_then(|v| v.as_str()) {
+            Some("write") => Access::ReadWrite,
+            _ => Access::ReadOnly,
+        }
+    }
+
+    /// Hosts or patterns a network request asks to reach.
+    ///
+    /// Read from untrusted input, so they are only ever *offered* to the operator.
+    /// The host still validates whatever it is handed before it becomes a rule.
+    pub fn requested_patterns(&self) -> Vec<String> {
+        self.string_list("patterns")
+    }
+
+    /// Tool ids a tool request asks for.
+    pub fn requested_tools(&self) -> Vec<String> {
+        self.string_list("tools")
+    }
+
+    fn string_list(&self, key: &str) -> Vec<String> {
+        match self.args.get(key) {
+            Some(serde_json::Value::Array(items)) => items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect(),
+            // A single value is accepted too, because a model that forgot the array
+            // form should produce a usable dialog rather than an empty one.
+            Some(serde_json::Value::String(one)) => {
+                let one = one.trim();
+                if one.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![one.to_string()]
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Why the agent says it needs this, shown in the dialog.
+    pub fn justification(&self) -> Option<String> {
+        self.purpose()
+    }
+
+    pub fn requested_kind(&self) -> &str {
+        match self.args.get("kind").and_then(|v| v.as_str()) {
+            Some("file") => "file",
+            _ => "directory",
+        }
+    }
+}
+
+/// The operator's answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrantSpec {
+    pub host_path: String,
+    pub container_path: String,
+    pub access: Access,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionResponse {
+    pub v: u32,
+    pub id: String,
+    /// `allow` or `deny`.
+    pub decision: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<GrantSpec>,
+    #[serde(default)]
+    pub restart_required: bool,
+    pub answered_at_ms: i64,
+}
+
+impl PermissionResponse {
+    pub fn allow(id: impl Into<String>, message: impl Into<String>, grant: Option<GrantSpec>, restart_required: bool) -> Self {
+        Self {
+            v: 1,
+            id: id.into(),
+            decision: "allow".to_string(),
+            message: message.into(),
+            grant,
+            restart_required,
+            answered_at_ms: crate::now_ms(),
+        }
+    }
+
+    pub fn deny(id: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            v: 1,
+            id: id.into(),
+            decision: "deny".to_string(),
+            message: message.into(),
+            grant: None,
+            restart_required: false,
+            answered_at_ms: crate::now_ms(),
+        }
+    }
+}
+
+/// Hosts the egress proxy refused, so the operator can allowlist them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockedEgress {
+    pub host: String,
+    pub port: u16,
+    pub at_ms: i64,
+    pub reason: String,
+}
+
+/// Result of probing the local Docker installation.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DockerStatus {
+    pub available: bool,
+    pub client_version: String,
+    pub server_version: String,
+    pub operating_system: String,
+    /// True for Docker Desktop, where host paths are not visible to the daemon
+    /// and therefore `--security-opt seccomp=<host path>` cannot be used.
+    pub desktop: bool,
+    pub image_present: bool,
+    pub detail: String,
+}
+
+
+#[cfg(test)]
+mod reasoning_effort_tests {
+    use super::ReasoningEffort;
+
+    #[test]
+    fn every_state_round_trips_through_its_wire_value() {
+        for state in ReasoningEffort::ALL {
+            assert_eq!(
+                ReasoningEffort::parse(state.as_str()),
+                Some(state),
+                "{} did not round trip",
+                state.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn the_five_wire_values_are_the_documented_ones() {
+        let values: Vec<&str> = ReasoningEffort::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(values, ["none", "low", "high", "max", "default"]);
+    }
+
+    /// `none` is not a `reasoningEffort` the CLI accepts. Writing it would produce a
+    /// settings file where thinking silently stays on.
+    #[test]
+    fn off_is_never_written_as_an_effort() {
+        assert_ne!(ReasoningEffort::Off.effort_value(), "none");
+        for state in ReasoningEffort::ALL {
+            let value = state.effort_value();
+            assert!(
+                ["low", "high", "max"].contains(&value),
+                "{} produced '{}', which the CLI would discard",
+                state.as_str(),
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn off_is_the_only_state_that_stops_thinking() {
+        assert!(!ReasoningEffort::Off.is_thinking());
+        for state in ReasoningEffort::ALL.iter().filter(|s| **s != ReasoningEffort::Off) {
+            assert!(state.is_thinking(), "{} should think", state.as_str());
+        }
+    }
+
+    #[test]
+    fn only_default_defers() {
+        assert!(ReasoningEffort::Default.is_deferring());
+        for state in ReasoningEffort::ALL.iter().filter(|s| **s != ReasoningEffort::Default) {
+            assert!(!state.is_deferring(), "{} should not defer", state.as_str());
+        }
+    }
+
+    /// The operator asked for `high` as the fallback, not the CLI's `max`.
+    #[test]
+    fn the_fallback_is_high_not_max() {
+        assert_eq!(ReasoningEffort::Default.effort_value(), "high");
+    }
+
+    #[test]
+    fn a_new_project_defers() {
+        assert_eq!(ReasoningEffort::default(), ReasoningEffort::Default);
+    }
+
+    #[test]
+    fn lowercase_and_padded_values_are_accepted() {
+        assert_eq!(ReasoningEffort::parse("  MAX "), Some(ReasoningEffort::Max));
+        assert_eq!(ReasoningEffort::parse("None"), Some(ReasoningEffort::Off));
+    }
+
+    #[test]
+    fn a_value_the_cli_cannot_use_is_rejected_rather_than_guessed() {
+        for bad in ["", "medium", "highest", "true", "1", "off-the-record"] {
+            assert_eq!(ReasoningEffort::parse(bad), None, "{bad} should not parse");
+        }
+    }
+
+    #[test]
+    fn every_state_has_a_label_and_an_explanation() {
+        for state in ReasoningEffort::ALL {
+            assert!(!state.label().trim().is_empty());
+            assert!(
+                state.description().len() > 20,
+                "{} needs a real explanation for the tooltip",
+                state.as_str()
+            );
+        }
+    }
+}

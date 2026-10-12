@@ -1,0 +1,51 @@
+[package]
+name = "deepsand-app"
+description = "Deepsand desktop application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+# Named distinctly from the package so the library and the binary do not produce
+# colliding `.pdb` artefacts on Windows.
+name = "deepsand_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+auto-launch = "0.5"
+# TLS termination for the remote-access server, and a self-signed
+# certificate generator for the case where there is no reverse proxy.
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rcgen = "0.13"
+deepsand-core = { workspace = true }
+
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+# One Deepsand at a time: two would fight over container names.
+tauri-plugin-single-instance = "2"
+tauri-plugin-opener = "2"
+
+serde.workspace = true
+serde_json.workspace = true
+base64 = "0.22"
+anyhow.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "sync", "time"] }
+uuid.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+directories.workspace = true
+axum = "0.8.9"
+tower-http = { version = "0.7.1", features = ["fs"] }
+futures-util = "0.3.34"
+
+[features]
+# Deepsand is a local, single-user desktop app; the Tauri devtools are kept
+# behind a feature so release builds carry no debug surface.
+default = []
+devtools = ["tauri/devtools"]

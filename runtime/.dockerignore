@@ -1,0 +1,7 @@
+# Keep the build context to exactly what the Dockerfile copies. The scripts and
+# docs here are host-side tooling and have no business being in the image.
+scripts/
+README.md
+.dockerignore
+**/.DS_Store
+**/Thumbs.db

@@ -1,0 +1,38 @@
+[package]
+name = "deepsand-core"
+description = "Sandbox planning, permission brokering and container orchestration for Deepsand"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "deepsand_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "deepsandctl"
+path = "src/bin/deepsandctl.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+directories.workspace = true
+dunce.workspace = true
+sha2.workspace = true
+rand.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+portable-pty.workspace = true
+regex.workspace = true
+zeroize.workspace = true
+base64 = "0.22"
+chacha20poly1305.workspace = true
+keyring.workspace = true
+getrandom.workspace = true

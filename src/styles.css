@@ -1,0 +1,1241 @@
+/* ==========================================================================
+   Deepsand
+   A dark, low-chrome shell: the terminal is the point, everything else is a
+   thin frame around it. All sizing is in rem so the whole UI scales with the
+   user's font size.
+   ========================================================================== */
+
+:root {
+  --bg: #0b0d13;
+  --bg-raised: #12151d;
+  --bg-panel: #161a24;
+  --bg-input: #0e1118;
+  --border: #232838;
+  --border-strong: #2f3650;
+
+  --text: #e6e9f2;
+  --text-dim: #98a0b8;
+  --text-faint: #6b7288;
+
+  --accent: #4d6bfe;
+  --accent-soft: #4d6bfe22;
+  --accent-text: #a9b8ff;
+
+  --ok: #3ddc97;
+  --ok-soft: #3ddc9718;
+  --warn: #ffc857;
+  --warn-soft: #ffc85718;
+  --danger: #ff6b6b;
+  --danger-soft: #ff6b6b18;
+
+  --radius: 10px;
+  --radius-sm: 6px;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+code,
+pre,
+.mono {
+  font-family: var(--mono);
+  font-size: 0.86em;
+}
+
+/* --------------------------------------------------------------------------
+   Layout
+   -------------------------------------------------------------------------- */
+
+.shell {
+  display: grid;
+  grid-template-columns: 17rem 1fr;
+  height: 100vh;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-raised);
+  border-right: 1px solid var(--border);
+}
+
+.sidebar-head {
+  padding: 1rem 1rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.brand h1 {
+  margin: 0;
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+}
+
+.brand span {
+  color: var(--text-faint);
+  font-size: 0.75rem;
+}
+
+.brand-tagline {
+  margin: 0.35rem 0 0.75rem;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.project-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.project-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.project-item:hover {
+  background: var(--bg-panel);
+}
+
+.project-item[aria-current="true"] {
+  background: var(--accent-soft);
+  border-color: var(--border-strong);
+}
+
+.project-item .row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.project-item .name {
+  font-weight: 600;
+  font-size: 0.86rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.project-item .path {
+  margin-top: 0.15rem;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+
+.sidebar-foot {
+  border-top: 1px solid var(--border);
+  padding: 0.65rem 0.85rem;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.header {
+  border-bottom: 1px solid var(--border);
+  padding: 0.85rem 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  background: var(--bg-raised);
+}
+
+.header-top {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.header h2 {
+  margin: 0;
+  font-size: 1rem;
+  letter-spacing: -0.01em;
+}
+
+.header-sub {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40vw;
+}
+
+.header-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--border);
+  padding: 0 1.1rem;
+  background: var(--bg-raised);
+}
+
+.tab {
+  border: none;
+  background: transparent;
+  padding: 0.55rem 0.75rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  font-size: 0.83rem;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab[aria-selected="true"] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.tab .count {
+  margin-left: 0.35rem;
+  background: var(--danger);
+  color: #fff;
+  border-radius: 999px;
+  padding: 0 0.4rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.panel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1.1rem;
+}
+
+.panel-flush {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* --------------------------------------------------------------------------
+   Terminal
+   -------------------------------------------------------------------------- */
+
+.terminal-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background: #0a0c11;
+  padding: 0.5rem 0.25rem 0.25rem 0.65rem;
+}
+
+.terminal-host {
+  width: 100%;
+  height: 100%;
+}
+
+.terminal-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.85rem;
+  text-align: center;
+  padding: 2rem;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(2px);
+}
+
+.terminal-overlay h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.terminal-overlay p {
+  margin: 0;
+  max-width: 34rem;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+/* --------------------------------------------------------------------------
+   Building blocks
+   -------------------------------------------------------------------------- */
+
+.btn {
+  border: 1px solid var(--border-strong);
+  background: var(--bg-panel);
+  color: var(--text);
+  padding: 0.4rem 0.75rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 0.82rem;
+  white-space: nowrap;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--border);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: #5d79ff;
+}
+
+.btn-danger {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.btn-ok {
+  border-color: var(--ok);
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.btn-ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-panel);
+}
+
+.btn-sm {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.76rem;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.12rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.badge-ok {
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.badge-warn {
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.badge-danger {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.badge-accent {
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+.card {
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  border-radius: var(--radius);
+  padding: 0.9rem 1rem;
+  margin-bottom: 0.85rem;
+}
+
+.card h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.9rem;
+}
+
+.card p {
+  margin: 0.25rem 0;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+}
+
+.card-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.field label {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.field .hint {
+  font-size: 0.74rem;
+  color: var(--text-faint);
+}
+
+input[type="text"],
+input[type="password"],
+input[type="number"],
+select,
+textarea {
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.55rem;
+  width: 100%;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: 2px solid var(--accent-soft);
+  border-color: var(--accent);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 4.5rem;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+}
+
+.row-inline {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.row-inline > * {
+  flex: none;
+}
+
+.row-inline > .grow {
+  flex: 1;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+th {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 700;
+}
+
+td.path {
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  word-break: break-all;
+}
+
+.tag {
+  font-family: var(--mono);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.05rem 0.35rem;
+  font-size: 0.72rem;
+}
+
+pre.output {
+  margin: 0;
+  padding: 0.75rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  max-height: 32rem;
+  overflow-y: auto;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  white-space: pre;
+}
+
+.empty {
+  color: var(--text-faint);
+  font-size: 0.84rem;
+  padding: 1.6rem 0.5rem;
+  text-align: center;
+}
+
+.muted {
+  color: var(--text-dim);
+}
+
+.faint {
+  color: var(--text-faint);
+}
+
+.small {
+  font-size: 0.78rem;
+}
+
+/* --------------------------------------------------------------------------
+   Modal
+   -------------------------------------------------------------------------- */
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: #05070cbb;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  z-index: 50;
+}
+
+.modal {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  width: min(46rem, 100%);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 64px #000000a0;
+}
+
+.modal-wide {
+  width: min(60rem, 100%);
+}
+
+.modal-head {
+  padding: 1rem 1.15rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-head h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.modal-head p {
+  margin: 0.35rem 0 0;
+  color: var(--text-dim);
+  font-size: 0.84rem;
+}
+
+.modal-body {
+  padding: 1.15rem;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.modal-foot {
+  padding: 0.85rem 1.15rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.modal-foot .left {
+  margin-right: auto;
+  color: var(--text-faint);
+  font-size: 0.76rem;
+}
+
+/* --------------------------------------------------------------------------
+   Permission request dialog
+   -------------------------------------------------------------------------- */
+
+.request-title {
+  font-size: 1.08rem;
+  font-weight: 600;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.request-path {
+  font-family: var(--mono);
+  font-size: 0.84rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.6rem;
+  word-break: break-all;
+}
+
+.access-choice {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+
+.access-option {
+  border: 1px solid var(--border-strong);
+  background: var(--bg-panel);
+  border-radius: var(--radius-sm);
+  padding: 0.6rem 0.7rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.access-option[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.access-option strong {
+  display: block;
+  font-size: 0.84rem;
+}
+
+.access-option span {
+  display: block;
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  margin-top: 0.15rem;
+}
+
+.callout {
+  border-radius: var(--radius-sm);
+  padding: 0.6rem 0.7rem;
+  font-size: 0.82rem;
+  border: 1px solid;
+}
+
+.callout-danger {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: var(--danger-soft);
+  color: #ffd0d0;
+}
+
+.callout-warn {
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: var(--warn-soft);
+  color: #ffe9bd;
+}
+
+.callout-info {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: var(--accent-soft);
+  color: #cfd8ff;
+}
+
+.queue-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.5rem 0.75rem;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+
+/* The secrets table. Compact and monospaced in the name column, because these are
+   environment variable names and are easier to check when they line up. */
+.secret-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.86rem;
+}
+
+.secret-table th {
+  text-align: left;
+  font-weight: 600;
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim, inherit);
+}
+
+.secret-table td {
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.secret-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.secret-table th.num,
+.secret-table td.num {
+  text-align: right;
+  width: 4rem;
+}
+
+.secret-table th.actions,
+.secret-table td.actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.secret-table td.actions .btn {
+  margin-left: 0.25rem;
+}
+
+.btn.small {
+  font-size: 0.78rem;
+  padding: 0.15rem 0.5rem;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Tab badges                                                                */
+/* ------------------------------------------------------------------------- */
+
+/* The count beside a tab label. Previously this was bare text, which put a lonely
+   unstyled "0" next to the word Permissions when there was nothing to count. */
+.tab-badge {
+  margin-left: 0.4rem;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Thinking intensity                                                        */
+/* ------------------------------------------------------------------------- */
+
+/* A real range input, so it drags and takes arrow keys. Only the visuals are
+   overridden: the filled part of the track is a gradient whose stop is `--fill`,
+   which is the one thing a native range cannot be told to do. */
+.effort {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-right: 0.35rem;
+}
+
+.effort-value {
+  min-width: 4.6rem;
+  text-align: right;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  cursor: help;
+}
+
+.effort-busy .effort-value {
+  opacity: 0.6;
+}
+
+.effort-track {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.effort-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 8.5rem;
+  height: 1.1rem;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.effort-slider:disabled {
+  cursor: progress;
+}
+
+/* WebView2 is Chromium, so the -webkit- set is what applies. */
+.effort-slider::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent) 0,
+    var(--accent) var(--fill, 0%),
+    var(--border-strong) var(--fill, 0%),
+    var(--border-strong) 100%
+  );
+}
+
+.effort-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: var(--text);
+  border: 2px solid var(--accent);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  transition: transform 0.12s ease;
+}
+
+.effort-slider:hover::-webkit-slider-thumb {
+  transform: scale(1.12);
+}
+
+.effort-slider:focus-visible {
+  outline: none;
+}
+
+.effort-slider:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.effort-slider::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border-strong);
+}
+
+.effort-slider::-moz-range-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.effort-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text);
+  border: 2px solid var(--accent);
+}
+
+/* Tick marks under the track, so the five stops are visible without five labels
+   competing for room in the header. */
+.effort-ticks {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 7px 0;
+  pointer-events: none;
+}
+
+.effort-tick {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+
+.effort-tick.on {
+  background: var(--accent);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Tools                                                                     */
+/* ------------------------------------------------------------------------- */
+
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.35rem;
+}
+
+.card-head h3 {
+  margin: 0;
+}
+
+.tool-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.tool-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 0.85rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.tool-row:first-child {
+  border-top: 0;
+  padding-top: 0.35rem;
+}
+
+.tool-row:last-child {
+  padding-bottom: 0.2rem;
+}
+
+/* A tool the image cannot hold: dimmed, and its switch is genuinely disabled rather
+   than merely styled to look it, so a stray click cannot switch it on. */
+.tool-off {
+  opacity: 0.55;
+}
+
+.tool-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.tool-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.tool-name {
+  font-weight: 600;
+  font-size: 0.94rem;
+}
+
+.tool-desc {
+  margin: 0.25rem 0 0;
+  font-size: 0.84rem;
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+.tool-note {
+  margin: 0.35rem 0 0;
+  font-size: 0.78rem;
+  color: var(--text-faint);
+  line-height: 1.45;
+}
+
+.tool-note-warn {
+  color: var(--warn);
+}
+
+.tool-meta {
+  margin: 0.35rem 0 0;
+  font-size: 0.72rem;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* A pill switch. `role="switch"` with `aria-checked` means it announces itself as a
+   switch rather than as a checkbox, and the visual follows the same attribute. */
+.switch {
+  flex: none;
+  position: relative;
+  width: 2.4rem;
+  height: 1.35rem;
+  margin-top: 0.15rem;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-input);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.switch[aria-checked="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.switch:disabled {
+  cursor: not-allowed;
+}
+
+.switch:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: calc(1.35rem - 6px);
+  height: calc(1.35rem - 6px);
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.switch[aria-checked="true"] .switch-knob {
+  transform: translateX(calc(2.4rem - 1.35rem));
+  background: #fff;
+}
+
+/* Small labelled pills: "default", "needs Alpine", "opens the network". */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  font-size: 0.68rem;
+  line-height: 1.5;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.chip-quiet {
+  background: var(--bg-input);
+}
+
+.chip-accent {
+  border-color: transparent;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.chip-warn {
+  border-color: transparent;
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+/* A row of bulk actions above a list: a label, the buttons, and a count that says why
+   a button might be refused. Laid out on one line where there is room and wrapped where
+   there is not, so a narrow window does not push the count off the card. */
+.bulk-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0 0 0.6rem;
+}
+
+.bulk-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  margin-right: 0.1rem;
+}
+
+.bulk-count {
+  font-size: 0.75rem;
+  color: var(--text-faint);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* The buttons sit directly above a bordered list, so a little breathing room keeps the
+   first row from looking attached to them. */
+.bulk-row + .tool-list .tool-row:first-child {
+  padding-top: 0.5rem;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Runtime image build progress                                              */
+/* ------------------------------------------------------------------------- */
+
+/* Sits above the tab strip, so it is visible whatever the operator is looking at
+   while a first Run installs the tools. */
+.build-bar {
+  margin: 0.75rem 0 0;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+.build-bar-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.build-bar-title {
+  font-weight: 600;
+  font-size: 0.88rem;
+}
+
+.build-bar-pct {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.build-bar-track {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border-strong);
+  overflow: hidden;
+}
+
+.build-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+/* No step reported: slide rather than sit at zero, because a bar frozen at the start
+   is indistinguishable from a hang. */
+.build-bar-indeterminate .build-bar-fill {
+  width: 35% !important;
+  animation: build-bar-sweep 1.4s ease-in-out infinite;
+}
+
+@keyframes build-bar-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
+}
+
+.build-bar-foot {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  margin-top: 0.45rem;
+  font-size: 0.76rem;
+  color: var(--text-faint);
+  min-width: 0;
+}
+
+.build-bar-step {
+  white-space: nowrap;
+}
+
+.build-bar-latest {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* Respect a reduced-motion preference: the bar still moves, it just does not slide. */
+@media (prefers-reduced-motion: reduce) {
+  .build-bar-indeterminate .build-bar-fill {
+    animation: none;
+    width: 100% !important;
+    opacity: 0.5;
+  }
+}
+
+/* Provenance line under a permission request: the request was written by the sandbox,
+   so it is a claim rather than an observation. Quiet, because it is a caveat and not a
+   warning, but present before the buttons. */
+.request-provenance {
+  margin: 0.6rem 0 0;
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--border);
+  line-height: 1.45;
+}

@@ -1,0 +1,167 @@
+{
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "defaultErrnoRet": 1,
+  "archMap": [
+    {
+      "architecture": "SCMP_ARCH_X86_64",
+      "subArchitectures": [
+        "SCMP_ARCH_X86",
+        "SCMP_ARCH_X32"
+      ]
+    },
+    {
+      "architecture": "SCMP_ARCH_AARCH64",
+      "subArchitectures": [
+        "SCMP_ARCH_ARM"
+      ]
+    }
+  ],
+  "syscalls": [
+    {
+      "names": [
+        "mount",
+        "umount",
+        "umount2",
+        "pivot_root",
+        "chroot",
+        "setns",
+        "unshare",
+        "acct",
+        "swapon",
+        "swapoff",
+        "reboot",
+        "sethostname",
+        "setdomainname",
+        "vhangup",
+        "nfsservctl",
+        "quotactl",
+        "lookup_dcookie",
+        "syslog",
+        "_sysctl",
+        "iopl",
+        "ioperm",
+        "init_module",
+        "finit_module",
+        "delete_module",
+        "create_module",
+        "get_kernel_syms",
+        "query_module",
+        "kexec_load",
+        "kexec_file_load",
+        "bpf",
+        "perf_event_open",
+        "add_key",
+        "request_key",
+        "keyctl",
+        "open_by_handle_at",
+        "name_to_handle_at",
+        "userfaultfd",
+        "fanotify_init",
+        "ptrace",
+        "process_vm_readv",
+        "process_vm_writev",
+        "io_uring_setup",
+        "io_uring_enter",
+        "io_uring_register",
+        "clock_settime",
+        "settimeofday",
+        "adjtimex",
+        "clock_adjtime",
+        "move_pages",
+        "mbind",
+        "set_mempolicy",
+        "get_mempolicy",
+        "migrate_pages",
+        "afs_syscall",
+        "vm86",
+        "vm86old"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "names": [
+        "clone3"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 38
+    },
+    {
+      "names": [
+        "socket"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 97,
+      "args": [
+        {
+          "index": 0,
+          "value": 17,
+          "op": "SCMP_CMP_EQ"
+        }
+      ]
+    },
+    {
+      "names": [
+        "socket"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 97,
+      "args": [
+        {
+          "index": 0,
+          "value": 30,
+          "op": "SCMP_CMP_EQ"
+        }
+      ]
+    },
+    {
+      "names": [
+        "socket"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 97,
+      "args": [
+        {
+          "index": 0,
+          "value": 38,
+          "op": "SCMP_CMP_EQ"
+        }
+      ]
+    },
+    {
+      "names": [
+        "socket"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 97,
+      "args": [
+        {
+          "index": 0,
+          "value": 40,
+          "op": "SCMP_CMP_EQ"
+        }
+      ]
+    },
+    {
+      "names": [
+        "socket"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 97,
+      "args": [
+        {
+          "index": 0,
+          "value": 44,
+          "op": "SCMP_CMP_EQ"
+        }
+      ]
+    },
+    {
+      "names": [
+        "socketcall"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 97
+    }
+  ]
+}
