@@ -276,8 +276,13 @@ async function main() {
 
   const info = textOf(await bridge.callTool("deepsand_sandbox_info", {}));
   check("reports the workspace as the pre-existing mount", () => assert.match(info, /\/workspace/));
-  check("reports the egress policy, including what is blocked", () =>
-    assert.match(info, /public internet is reachable[\s\S]*blocked at the kernel level/));
+  check("reports the egress policy, including what is blocked", () => {
+    // The bridge's wording is not the contract; that the mode and the categories
+    // it refuses are both spelled out is. The second assertion is what makes the
+    // word "blocked" in the name mean something.
+    assert.match(info, /public internet is reachable[\s\S]*refused by an address filter/);
+    assert.match(info, /host machine[\s\S]*local\s+network[\s\S]*cloud metadata/);
+  });
   check("lists the existing grant with its host path and access mode", () => {
     assert.match(info, /C:\\src\\shared-theme/);
     assert.match(info, /read-only/);
