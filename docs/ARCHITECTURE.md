@@ -136,7 +136,7 @@ operator approves is validated from scratch on the host.
 | Mode | Container flags | Effect |
 | --- | --- | --- |
 | `internet` (default) | `--cap-add=NET_ADMIN` | Public internet reachable. RFC1918, loopback, link-local, CGNAT, multicast and reserved ranges rejected at the kernel, except DNS to the configured resolvers. |
-| `none` | `--network=none` | Loopback only. DeepCode cannot reach the model API, so this is a deliberate choice rather than a working default. |
+| `none` | normal bridge + in-container rules limited to the proxy | Only the model API is reachable. `--network=none` was dropped deliberately: with no interfaces the sandbox could not reach the proxy on the host, so it could not reach its own model API and the mode was unusable. |
 | `restricted` | project bridge network + `DEEPSAND_PROXY_ADDR` | Only the Deepsand allowlist proxy is reachable. The proxy resolves names itself and refuses anything landing in private address space. |
 | `full` | neither | No restriction, including the host's own services. |
 

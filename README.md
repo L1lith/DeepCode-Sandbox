@@ -18,15 +18,15 @@ Create a project, name it, point it at a working directory:
 ┌─ Deepsand ──────────────────────────────────────────────────────────────┐
 │  Projects            │  my-website                                      │
 │  ▸ my-website  ●run  │  D:\work\my-website → /workspace                 │
-│  ▸ api-server        │  [Terminal] [Permissions 2] [Activity]           │
-│                      │                                                  │
+│  ▸ api-server        │  [Terminal] [Permissions 2] [Tools]              │
+│                      │  [Secrets] [Activity]                            │
 │  [+ New project]     │   Deep Code  v0.4.3                              │
 │                      │   > add a dark mode toggle to the header         │
 │                      │                                                  │
 │                      │   ● DeepCode is trying to access                 │
 │                      │     C:\Users\me\Documents\brand                  │
 │                      │     [Deny]  [Grant access]                       │
-└────────────────────────────────────────────────────────────────────────┘
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 Press **Run** and Deepsand:
@@ -47,6 +47,21 @@ DeepCode knows it cannot see everything, and it has an API for saying so:
 Approving recreates the container with the new mount attached and resumes the
 session, so the conversation continues where it left off. Denying is final and
 DeepCode is told so.
+
+## What you control per project
+
+Every project carries its own policy, so a throwaway repository and a client
+codebase do not have to share one.
+
+| Setting | Where | Notes |
+| --- | --- | --- |
+| Network mode | `deepsandctl network <project> <mode>`, with the app-wide default in **Settings** | `internet` (default), `restricted` with a hostname allowlist, `none`, or `full`. |
+| DeepCode mode | Project settings | `strict` additionally makes DeepCode prompt for network, MCP and out-of-workspace access in the terminal, on top of the container boundary. |
+| Tools | Tools tab | Per-tool switches, plus **Enable all** / **Disable all** for each section and globally. The selection decides how the image is built, so the next Run rebuilds it — with its progress shown. |
+| Thinking intensity | Tools tab | `none` / `low` / `high` / `max`, or deferring to your host `settings.json`. Pushed into a running sandbox as well as saved for the next start. |
+| Secrets | Secrets tab | Per project. Encrypted at rest with the operating system's keystore, injected as environment variables at start. Values travel one way only: the interface shows names and lengths, never the value. |
+| Limits | Project settings | Memory, CPUs, pids. |
+| Credentials | Project settings | Inherit your host DeepCode configuration, or give this project its own model, base URL and key. |
 
 ## Install
 
@@ -120,7 +135,15 @@ depth.
   internet works, your host, your LAN, link-local and cloud metadata
   (`169.254.169.254`) are rejected by the container's own kernel. Switch a
   project to `restricted` for a hostname allowlist through a filtering proxy, or
-  `none` for no network at all.
+  `none` to leave only the model API reachable — package installs, clones and web
+  requests fail, which is a deliberate choice rather than a broken default.
+* **Kernel hardening.** A hardened seccomp profile is **on by default** and
+  attached with `--security-opt=seccomp=`. It denies 63 syscalls, among them
+  `mount`, `unshare`, `setns`, `pivot_root`, `chroot`, `bpf`, `ptrace`, `keyctl`,
+  `init_module`, `open_by_handle_at`, `userfaultfd`, `perf_event_open`,
+  `io_uring_*`, and the exotic socket families (`AF_VSOCK`, `AF_ALG`,
+  `AF_PACKET`, `AF_TIPC`, `AF_XDP`). If the profile cannot be found, no plan is
+  built at all rather than a weaker container being started.
 * **Permissions.** The sandbox can *write* requests and *read* answers. The
   answer directory is mounted read-only, so a compromised sandbox cannot forge
   an approval or rewrite its own grant list. It can only ask.
@@ -132,16 +155,19 @@ which also lists what this does **not** protect against.
 
 ```
 DeepCode-Sandbox/
-├─ crates/deepsand-core/     Rust: path guards, policy, store, broker, proxy, PTY
+├─ AGENTS.md                 how to work on this repository
+├─ crates/deepsand-core/     Rust: path guards, policy, store, broker, proxy, secrets
 │  └─ src/bin/deepsandctl.rs headless driver
-├─ src-tauri/                Tauri app: 30 commands over the core, PTY hosting
-├─ src/                      SolidJS UI: terminal, permission dialogs, settings
+├─ src-tauri/                Tauri app: the commands, PTY hosting, remote server
+├─ src/                      SolidJS UI: terminal, permissions, tools, secrets, activity
 ├─ runtime/                  The in-container half
 │  ├─ Dockerfile
 │  ├─ bin/entrypoint.sh      settings, egress rules, privilege drop
 │  ├─ bin/netfilter.sh       the network policy
 │  ├─ bin/deepsand-mcp-bridge.mjs   the API DeepCode asks through
-│  └─ seccomp-hardened.json  opt-in additive profile
+│  ├─ skills/                Agent Skills installed into the sandbox
+│  └─ seccomp-hardened.json  the hardened profile, attached by default
+├─ probe/                    escape probes to compile and run inside the sandbox
 └─ docs/                     ARCHITECTURE.md, SECURITY.md
 ```
 
@@ -152,13 +178,17 @@ desktop app and the headless CLI cannot behave differently.
 
 ```bash
 npm run app:dev              # app with hot reload
-npm run core:test            # 84 Rust tests: paths, policy, broker, proxy, PTY
-npm run test:bridge          # 40 checks: the permission protocol end to end
+npm run core:test            # 233 Rust tests: paths, policy, broker, proxy, secrets
+npm run test:bridge          # 47 checks: the permission protocol end to end
+npm test                     # both suites
+npm run core:check           # cargo check --workspace
 npm run build                # typecheck + bundle the frontend
 npm run runtime:icons        # regenerate src-tauri/icons from code
 ```
 
-The interesting tests are the ones that assert containment rather than behaviour — `a_plan_never_mounts_a_container_runtime_socket`, `the_reply_channel_can_never_be_written_by_the_sandbox` `symlinks_are_resolved_before_guards_run`. They are listed in [docs/SECURITY.md](docs/SECURITY.md).
+The interesting tests are the ones that assert containment rather than behaviour — `a_plan_never_mounts_a_container_runtime_socket`, `the_reply_channel_can_never_be_written_by_the_sandbox`, `symlinks_are_resolved_before_guards_run`. They are listed in [docs/SECURITY.md](docs/SECURITY.md).
+
+Contributors and coding agents should read [AGENTS.md](AGENTS.md) first: it lists the invariants that are load-bearing, the platform quirks that will otherwise cost you an afternoon, and what counts as done.
 
 ## Credits and licensing
 

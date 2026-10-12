@@ -184,16 +184,27 @@ Being explicit here is more useful than a longer list of things it does.
 
 ### The hardened seccomp profile
 
-`runtime/seccomp-hardened.json` is **opt-in and off by default**. Docker's
-built-in profile is already good, and replacing it with something weaker would be
-a regression, so Deepsand:
+`runtime/seccomp-hardened.json` is **attached by default**. `impl Default for
+SeccompProfile` returns `Hardened`, which is what a store without the field
+deserialises to, so existing projects get hardening rather than Docker's
+permissive built-in profile. Docker's built-in profile is already good, so this
+is an *additive* denylist on top, and `policy::plan_run` attaches it with
+`--security-opt=seccomp=<path>`:
 
-* relies on the built-in profile by default, and
-* offers an *additive* denylist on top: `mount`, `unshare`, `setns`,
-  `pivot_root`, `chroot`, `bpf`, `perf_event_open`, `keyctl`, `kexec_*`,
-  `init_module`, `open_by_handle_at`, `ptrace`, `process_vm_readv/writev`,
-  `userfaultfd`, `io_uring_*`, `reboot`, and friends, plus `clone3` → `ENOSYS` so
-  glibc falls back to the argument-filterable `clone`.
+* 56 syscalls return `EPERM`: `mount`, `unshare`, `setns`, `pivot_root`,
+  `chroot`, `bpf`, `perf_event_open`, `keyctl`, `kexec_*`, `init_module`,
+  `open_by_handle_at`, `ptrace`, `process_vm_readv/writev`, `userfaultfd`,
+  `io_uring_*`, `reboot`, and friends.
+* `clone3` returns `ENOSYS`, so glibc falls back to the argument-filterable
+  `clone`.
+* Five `socket` rules reject exotic address families with `EAFNOSUPPORT`:
+  `AF_PACKET`, `AF_TIPC`, `AF_ALG`, `AF_VSOCK` and `AF_XDP`, with `socketcall`
+  refused outright. `AF_VSOCK` is the one that matters: on some configurations it
+  is how a container reaches the host or the hypervisor.
+
+**It fails closed.** If hardening is requested and the profile cannot be found,
+`plan_run` returns an error instead of a plan, so a missing file stops the sandbox
+rather than quietly weakening it.
 
 **Known deviation, stated plainly.** With `defaultAction: ALLOW` the profile
 cannot express Docker's "deny `clone()` when any `CLONE_NEW*` flag is set" rule,
@@ -203,18 +214,13 @@ The containment argument does not depend on it — a nested user namespace grant
 namespace's view of the same read-only mounts. But it is a deviation, and it is
 documented here rather than glossed over.
 
-Docker Desktop runs the daemon in a VM that cannot read host paths, so
-`--security-opt seccomp=<host file>` is not usable there. Deepsand detects this
-and says so in the plan preview instead of silently pretending the profile was
-applied. The same applies to AppArmor.
-
 ## Verifying the claims
 
 Everything above is asserted by tests you can run:
 
 ```bash
-cargo test -p deepsand-core                   # 84 tests: paths, policy, broker, proxy, session
-node runtime/scripts/test-mcp-bridge.mjs      # 40 checks: the permission protocol end to end
+cargo test -p deepsand-core                   # 233 tests: paths, policy, broker, proxy, secrets
+node runtime/scripts/test-mcp-bridge.mjs      # 47 checks: the permission protocol end to end
 ```
 
 The most load-bearing ones:
