@@ -24,7 +24,7 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 366 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 371 tests |
 | `npm run app:test` | `cargo test -p deepsand-app` — the app crate's own tests, including the zombie guard. Part of `npm test`: it was not, and tests that never run are decoration |
 | `npm run core:check` | `cargo check --workspace` |
 | `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |
@@ -268,6 +268,16 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   emptied *only* when a build that used it failed for a reason that is about the build -- a
   daemon that went away is neither the cache's fault nor the build's, and emptying on one of
   those would throw away minutes of compiling for nothing.
+* **The tool check empties a cache entry; it never builds.** `tool_updates.rs` asks npm and
+  crates.io what they offer for the versions a cache entry recorded when it was filled, and when
+  something has moved it empties that entry -- the next *build* installs the tools again and
+  refills it. It deliberately does not install anything itself: that needs Docker and an image,
+  and a check on a timer has no business starting a build. Two rules keep it honest. A check that
+  reached nothing is not a check, so it does not record one and the next cycle tries again rather
+  than waiting out six hours. And what is compared is the listing the *tools* produced
+  (`npm ls`, `cargo install --list`) at fill time, not what the cache was asked for, so a cache
+  entry that disagrees with its own image is detectable rather than invisible. The DeepCode CLI
+  is excluded on purpose: it is refreshed on every build already.
 * **Hiding is only allowed when there is a way back.** Closing to the tray and starting in the
   background are one feature with the tray icon, not two: `tray::wanted` is the rule and the
   first thing its tests check, because a window that can vanish with no way back is a machine

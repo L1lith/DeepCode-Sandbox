@@ -21,6 +21,7 @@
 
 pub mod commands;
 mod host_config;
+mod tool_updates;
 mod tray;
 mod instance;
 pub mod remote_server;
@@ -331,6 +332,14 @@ pub fn run() {
                     tracing::warn!(%err, "could not put the tray icon in place");
                 }
             }
+            // The tool check: once after startup, then on a timer. It does nothing at all when
+            // the operator has turned it off, and it reads that setting each cycle so turning it
+            // off stops the next one rather than needing a restart.
+            tool_updates::watch(
+                app.handle().clone(),
+                deepsand_core::toolcache::CHECK_INTERVAL,
+            );
+
             if started_hidden {
                 if let Some(window) = tauri::Manager::get_webview_window(app.handle(), "main") {
                     let _ = window.hide();
@@ -417,6 +426,7 @@ pub fn run() {
             commands::get_startup_mode,
             commands::set_startup_mode,
             commands::set_close_to_tray,
+            commands::check_tool_updates_now,
             commands::list_secrets,
             commands::set_secret,
             commands::delete_secret,

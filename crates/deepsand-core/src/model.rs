@@ -674,6 +674,14 @@ pub struct AppSettings {
     /// existing `start_at_login: true` becomes `Foreground`, which is what it meant.
     #[serde(default, alias = "start_at_login")]
     pub startup: StartupMode,
+    /// Whether Deepsand may ask the registries about the tools it has cached.
+    ///
+    /// On by default, and the switch turns off *both* the check at startup and the periodic one,
+    /// which is what the setting says: an operator who does not want the app talking to npm and
+    /// crates.io on its own behalf should not have to find two controls. The button in Settings
+    /// still works -- that is the operator asking.
+    #[serde(default = "yes")]
+    pub check_tool_updates: bool,
     /// Whether the window's close button hides Deepsand instead of stopping it.
     ///
     /// Off by default, because the surprising behaviour is hiding: an operator who closes the
@@ -726,6 +734,7 @@ impl Default for AppSettings {
             remote: crate::remote::RemoteAccessSettings::default(),
             startup: StartupMode::Off,
             close_to_tray: false,
+            check_tool_updates: true,
         }
     }
 }

@@ -3262,6 +3262,15 @@ pub fn set_close_to_tray(
     Ok(enabled)
 }
 
+/// Ask the registries now, whatever the cadence says.
+///
+/// This is the button in Settings: the operator asking rather than the app deciding, so it works
+/// whether or not the automatic checks are turned on.
+#[tauri::command]
+pub fn check_tool_updates_now(app: tauri::AppHandle) -> CmdResult<Vec<String>> {
+    Ok(crate::tool_updates::check(app, true))
+}
+
 #[tauri::command]
 pub fn host_config_summary() -> CmdResult<std::collections::BTreeMap<String, String>> {
     Ok(credentials::describe_host_config(&credentials::read_host_config()))
@@ -3587,7 +3596,9 @@ fn fill_tool_cache(
 ) -> bool {
     let script = "mkdir -p /cache/bin /cache/node_modules \
                   && cp -a /usr/local/bin/. /cache/bin/ \
-                  && cp -a /usr/local/lib/node_modules/. /cache/node_modules/";
+                  && cp -a /usr/local/lib/node_modules/. /cache/node_modules/ \
+                  && { npm ls -g --depth=0 --json > /cache/versions-npm.json 2>/dev/null || true; } \
+                  && { cargo install --list > /cache/versions-cargo.txt 2>/dev/null || true; }";
     let args: Vec<String> = [
         "run",
         "--rm",
@@ -3611,8 +3622,18 @@ fn fill_tool_cache(
     deepsand_core::toolcache::mark_filled(dir, deepsand_core::now_ms()).is_ok()
 }
 
+/// Whether the operator wants Deepsand asking the registries about cached tools.
+pub fn tool_updates_enabled(state: &AppState) -> bool {
+    store(state).settings().check_tool_updates
+}
+
+/// Where cache entries live, for the check that reads them.
+pub fn tool_cache_root(state: &AppState) -> std::path::PathBuf {
+    store(state).data_dir().join("buildcache")
+}
+
 /// Empty a cache entry, keeping the directory the build context points at.
-fn empty_tool_cache(dir: &std::path::Path) {
+pub(crate) fn empty_tool_cache(dir: &std::path::Path) {
     let _ = std::fs::remove_dir_all(dir.join("bin"));
     let _ = std::fs::remove_dir_all(dir.join("node_modules"));
     let _ = std::fs::remove_file(dir.join(deepsand_core::toolcache::FILLED_MARKER));

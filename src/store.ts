@@ -426,6 +426,20 @@ export async function wireEvents(): Promise<() => void> {
 
     // The host's settings file is watched by the backend; this is the window being told to
     // re-read what depends on it.
+    /**
+     * A tool-version check found something. The window says so, because the alternative is a
+     * cache quietly emptying itself and the next build taking minutes longer for no visible
+     * reason.
+     */
+    api.onToolUpdatesChecked((report) => {
+      const first = report.notes[0] ?? "some cached tools have moved on";
+      toast(
+        "info",
+        "Cached tools are out of date",
+        `${first} The next build installs them again.`,
+      );
+    }),
+
     api.onHostConfigChanged(() => {
       setStore("configRevision", store.configRevision + 1);
       void api.logUiEvent("info", "the DeepCode settings file changed; re-read it");

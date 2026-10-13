@@ -79,6 +79,22 @@ file *inside* the sandbox, then types the path where the CLI can read it.
 - Nothing is attached unless a sandbox is running, and a file that fails is reported on its own
   rather than losing the files that worked.
 
+## Keeping the cached tools current
+
+Deepsand keeps the tools it builds (Rust binaries, npm globals) in a cache so a build copies them
+instead of compiling them again. A cache only helps if it can go stale safely, so:
+
+- A key covers everything a build can see — platform, tool selection, and a fingerprint of the
+  install steps — and changes the moment any of those do.
+- An entry older than two weeks is rebuilt.
+- **Every six hours**, and once shortly after startup, Deepsand asks npm and crates.io what they
+  offer for the versions the cache holds. If something has moved, that entry is emptied and the
+  next build installs it again. It never builds anything by itself.
+- The DeepCode CLI is exempt: it is refreshed on every build regardless.
+- **Settings → Updates** has the switch that turns those automatic checks off, and a *Check now*
+  button that works either way. When the check finds something, the window says so — a cache
+  quietly emptying itself would otherwise show up as a mysteriously slow build.
+
 ## Starting, closing, and the tray
 
 Two settings, both off by default, in Settings:
@@ -243,7 +259,7 @@ desktop app and the headless CLI cannot behave differently.
 
 ```bash
 npm run app:dev              # app with hot reload
-npm run core:test            # 366 core tests: paths, policy, broker, proxy, credentials, seccomp, durability
+npm run core:test            # 371 core tests: paths, policy, broker, proxy, credentials, seccomp, durability
 npm run app:test             # 13 tests in the app crate: the zombie guard, and the log file
 npm run test:bridge          # 55 checks: the permission protocol end to end
 npm test                     # both suites

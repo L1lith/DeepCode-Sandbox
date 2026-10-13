@@ -244,6 +244,13 @@ export interface SecuritySettings {
  */
 export type StartupMode = "off" | "background" | "foreground";
 
+/** What a finished tool-version check found. */
+export interface ToolUpdateReport {
+  /** One sentence per cache entry that had something to say. Empty when all is well. */
+  notes: string[];
+  checkedAt: number;
+}
+
 export interface AppSettings {
   image: string;
   default_network: NetworkPolicy;
@@ -258,6 +265,8 @@ export interface AppSettings {
   startup: StartupMode;
   /** Closing the window hides Deepsand instead of stopping it. Off by default. */
   close_to_tray: boolean;
+  /** Whether Deepsand may ask the registries about cached tools. On by default. */
+  check_tool_updates: boolean;
 }
 
 export interface ProjectView {

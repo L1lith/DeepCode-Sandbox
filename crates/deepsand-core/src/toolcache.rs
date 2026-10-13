@@ -119,6 +119,153 @@ pub fn cache_is_usable(dir: &Path, now_ms: i64) -> bool {
     has_tools && filled_age(dir, now_ms).is_some_and(cache_is_fresh)
 }
 
+/// The versions one cache entry holds, by name.
+pub type Versions = std::collections::BTreeMap<String, String>;
+
+/// Where the two listings are kept, inside a cache entry. They are the output of the tools
+/// themselves (`npm ls`, `cargo install --list`) taken when the entry was filled, so what is
+/// compared against the registries is what the cache actually has rather than what it was
+/// supposed to get.
+pub const NPM_VERSIONS_FILE: &str = "versions-npm.json";
+pub const CARGO_VERSIONS_FILE: &str = "versions-cargo.txt";
+/// When the registries were last asked about this entry.
+pub const CHECKED_MARKER: &str = "checked-at";
+
+/// How often the registries are asked again.
+///
+/// Six hours: a tool released while somebody is working is rare, the check is a handful of HTTP
+/// requests, and the cost of being a few hours behind is nothing next to the cost of asking on
+/// every launch of a long-running app.
+pub const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
+/// Whether an entry is due to be checked, given when it last was.
+///
+/// `None` means never, which is due: an entry filled before this feature existed still has a
+/// version listing written into it by the next fill, and until the registries have been asked
+/// once there is nothing to compare.
+pub fn check_is_due(last: Option<std::time::Duration>) -> bool {
+    last.is_none_or(|age| age >= CHECK_INTERVAL)
+}
+
+/// The two listings in an entry, npm first.
+pub fn read_versions(dir: &Path) -> (Versions, Versions) {
+    let npm = std::fs::read_to_string(dir.join(NPM_VERSIONS_FILE))
+        .map(|raw| parse_npm_versions(&raw))
+        .unwrap_or_default();
+    let cargo = std::fs::read_to_string(dir.join(CARGO_VERSIONS_FILE))
+        .map(|raw| parse_cargo_versions(&raw))
+        .unwrap_or_default();
+    (npm, cargo)
+}
+
+/// The globals from `npm ls -g --depth=0 --json`.
+///
+/// Only the top level: the point is the tools, not the tree under them, and a transitive
+/// dependency moving is not a reason to rebuild an image.
+pub fn parse_npm_versions(json: &str) -> Versions {
+    let mut out = Versions::new();
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json) else {
+        return out;
+    };
+    if let Some(deps) = parsed.get("dependencies").and_then(|value| value.as_object()) {
+        for (name, detail) in deps {
+            if let Some(version) = detail.get("version").and_then(|value| value.as_str()) {
+                out.insert(name.clone(), version.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// The crates from `cargo install --list`, which is written for a human:
+///
+/// ```text
+/// jq v0.4.0:
+///     jq
+/// ripgrep v14.1.0:
+///     rg
+/// ```
+pub fn parse_cargo_versions(text: &str) -> Versions {
+    let mut out = Versions::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        // A package line names the package and its version and ends with a colon; the lines
+        // under it are the binaries it installed, which are not packages at all.
+        if !trimmed.ends_with(':') || trimmed.contains(char::is_whitespace) == false {
+            continue;
+        }
+        let mut parts = trimmed.trim_end_matches(':').split_whitespace();
+        let (Some(name), Some(version)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let Some(version) = version.strip_prefix('v') else {
+            continue;
+        };
+        if parts.next().is_some() {
+            continue;
+        }
+        out.insert(name.to_string(), version.to_string());
+    }
+    out
+}
+
+/// Where to ask npm about one package, and how to read the answer.
+pub fn npm_metadata_url(name: &str) -> String {
+    format!("https://registry.npmjs.org/{name}/latest")
+}
+
+pub fn parse_npm_latest(json: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(json).ok()?;
+    Some(parsed.get("version")?.as_str()?.to_string())
+}
+
+/// Where to ask crates.io about one crate, and how to read the answer.
+pub fn crate_metadata_url(name: &str) -> String {
+    format!("https://crates.io/api/v1/crates/{name}")
+}
+
+pub fn parse_crate_latest(json: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(json).ok()?;
+    Some(
+        parsed
+            .get("crate")?
+            .get("max_stable_version")?
+            .as_str()?
+            .to_string(),
+    )
+}
+
+/// Which cached tools have moved on.
+///
+/// Compared for *difference* rather than by ordering the versions: a version string is not a
+/// number, and the question that matters is only whether the one in the cache is still the one
+/// the registry offers. A name the registry did not answer for is left alone rather than
+/// counted as out of date.
+pub fn outdated(cached: &Versions, latest: &Versions) -> Vec<(String, String, String)> {
+    let mut moved: Vec<(String, String, String)> = cached
+        .iter()
+        .filter_map(|(name, held)| {
+            let offered = latest.get(name)?;
+            (offered != held).then(|| (name.clone(), held.clone(), offered.clone()))
+        })
+        .collect();
+    moved.sort();
+    moved
+}
+
+/// Record that the registries have been asked about this entry.
+pub fn mark_checked(dir: &Path, now_ms: i64) -> std::io::Result<()> {
+    std::fs::write(dir.join(CHECKED_MARKER), now_ms.to_string())
+}
+
+/// How long ago this entry was checked, or `None` when it never was.
+pub fn last_checked(dir: &Path, now_ms: i64) -> Option<std::time::Duration> {
+    let raw = std::fs::read_to_string(dir.join(CHECKED_MARKER)).ok()?;
+    let checked: i64 = raw.trim().parse().ok()?;
+    let age_ms = now_ms.saturating_sub(checked).max(0);
+    Some(std::time::Duration::from_millis(age_ms as u64))
+}
+
 #[cfg(test)]
 mod tool_cache_tests {
     use super::*;
@@ -242,6 +389,89 @@ RUN npm install -g something-else
         assert!(!cache_is_usable(&bare, 1_000));
         assert!(cache_is_usable(&dir, 1_000), "a marked, populated entry is a cache");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The npm listing, in the shape `npm ls -g --depth=0 --json` really produces.
+    #[test]
+    fn the_npm_listing_gives_the_names_and_versions() {
+        let fixture = r#"{
+          "dependencies": {
+            "@vegamo/deepcode-cli": { "version": "1.2.3" },
+            "typescript": { "version": "5.6.2", "overridden": false }
+          }
+        }"#;
+        let parsed = parse_npm_versions(fixture);
+        assert_eq!(parsed.get("typescript").map(String::as_str), Some("5.6.2"));
+        assert_eq!(
+            parsed.get("@vegamo/deepcode-cli").map(String::as_str),
+            Some("1.2.3"),
+            "a scoped name is a name"
+        );
+        assert!(parse_npm_versions("not json").is_empty());
+    }
+
+    /// The cargo listing, which is written for a human and has to be read carefully: the lines
+    /// under a package are its binaries, not more packages.
+    #[test]
+    fn the_cargo_listing_gives_the_packages_and_not_their_binaries() {
+        let fixture = "jq v0.4.0:\n    jq\nripgrep v14.1.0:\n    rg\n";
+        let parsed = parse_cargo_versions(fixture);
+        assert_eq!(parsed.get("jq").map(String::as_str), Some("0.4.0"));
+        assert_eq!(parsed.get("ripgrep").map(String::as_str), Some("14.1.0"));
+        assert_eq!(parsed.len(), 2, "rg and jq are binaries, not packages");
+    }
+
+    /// The two registry answers, and the URLs they come from.
+    #[test]
+    fn the_registry_answers_are_read_from_the_fields_that_hold_them() {
+        assert_eq!(
+            npm_metadata_url("typescript"),
+            "https://registry.npmjs.org/typescript/latest"
+        );
+        assert_eq!(
+            parse_npm_latest(r#"{"name":"typescript","version":"5.6.2"}"#).as_deref(),
+            Some("5.6.2")
+        );
+        assert_eq!(
+            crate_metadata_url("ripgrep"),
+            "https://crates.io/api/v1/crates/ripgrep"
+        );
+        assert_eq!(
+            parse_crate_latest(r#"{"crate":{"max_stable_version":"14.1.0"}}"#).as_deref(),
+            Some("14.1.0")
+        );
+        assert_eq!(parse_npm_latest("{}"), None);
+        assert_eq!(parse_crate_latest("{}"), None);
+    }
+
+    /// What "out of date" means: differs, and the registry answered.
+    #[test]
+    fn only_tools_the_registry_has_moved_are_out_of_date() {
+        let mut cached = Versions::new();
+        cached.insert("typescript".into(), "5.6.2".into());
+        cached.insert("ripgrep".into(), "14.1.0".into());
+        cached.insert("unanswered".into(), "1.0.0".into());
+
+        let mut latest = Versions::new();
+        latest.insert("typescript".into(), "5.7.0".into());
+        latest.insert("ripgrep".into(), "14.1.0".into());
+
+        let moved = outdated(&cached, &latest);
+        assert_eq!(moved.len(), 1, "equal is not out of date, unanswered is not either");
+        assert_eq!(moved[0].0, "typescript");
+        assert_eq!(moved[0].1, "5.6.2");
+        assert_eq!(moved[0].2, "5.7.0");
+    }
+
+    /// The cadence: a check is due when it has never happened, and every six hours after.
+    #[test]
+    fn a_check_is_due_when_it_has_never_happened_or_has_gone_stale() {
+        assert!(check_is_due(None));
+        assert!(!check_is_due(Some(Duration::from_secs(60))));
+        assert!(!check_is_due(Some(CHECK_INTERVAL - Duration::from_secs(1))));
+        assert!(check_is_due(Some(CHECK_INTERVAL)));
+        assert!(check_is_due(Some(Duration::from_secs(48 * 60 * 60))));
+        assert!(CHECK_INTERVAL >= Duration::from_secs(60 * 60), "not every few minutes");
     }
 
     /// A directory of its own under the system temp directory, so tests do not collide.

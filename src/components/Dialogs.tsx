@@ -1212,6 +1212,28 @@ export function SettingsDialog(props: { settings: AppSettings; onClose: () => vo
     }
   }
 
+  /** The last tool-version check this dialog asked for, if any. */
+  const [toolBusy, setToolBusy] = createSignal(false);
+  const [toolReport, setToolReport] = createSignal<string[] | null>(null);
+
+  async function checkToolsNow() {
+    setToolBusy(true);
+    try {
+      const notes = await api.checkToolUpdatesNow();
+      setToolReport(notes);
+      toast(
+        notes.length ? "info" : "ok",
+        notes.length ? "Cached tools have moved on" : "Cached tools are current",
+        notes.join(" ") ||
+          "Nothing in the cache has a newer version published.",
+      );
+    } catch (error) {
+      toast("error", "Could not check the cached tools", describeError(error));
+    } finally {
+      setToolBusy(false);
+    }
+  }
+
   async function checkUpdates() {
     setUpdateBusy(true);
     try {
@@ -1546,6 +1568,31 @@ export function SettingsDialog(props: { settings: AppSettings; onClose: () => vo
             </button>
           </div>
 
+          <div class="row-inline">
+            <label class="check grow">
+              <input
+                type="checkbox"
+                checked={draft().check_tool_updates}
+                onChange={(event) =>
+                  setDraft({ ...draft(), check_tool_updates: event.currentTarget.checked })
+                }
+              />
+              Check the cached tools for newer versions at startup, and every six hours
+            </label>
+            <button class="btn" disabled={toolBusy()} onClick={() => void checkToolsNow()}>
+              {toolBusy() ? "Checking…" : "Check now"}
+            </button>
+          </div>
+          <Show when={toolReport()}>
+            {(notes) => (
+              <span class="hint">
+                {notes().length === 0
+                  ? "Every cached tool is current."
+                  : notes().join(" ")}
+              </span>
+            )}
+          </Show>
+
           <Show when={updateCheck()?.update}>
             {(available) => (
               <>
@@ -1576,6 +1623,10 @@ export function SettingsDialog(props: { settings: AppSettings; onClose: () => vo
           </Show>
 
           <span class="hint">
+            The tool check asks npm and crates.io what they offer for the versions your cache holds,
+            and empties that cache when something has moved, so the next build installs it again. It
+            never builds anything by itself, and turning it off leaves the "Check now" button working.
+
             Updates are signed, and the signature is what Deepsand checks before installing — not the
             download. A release that is not signed with this project's key will be refused.
           </span>

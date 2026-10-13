@@ -10,6 +10,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   StartupMode,
+  ToolUpdateReport,
   AllowlistView,
   AppInfo,
   AppSettings,
@@ -49,6 +50,7 @@ export const EVENTS = {
   buildDone: "build://done",
   buildProgress: "build://progress",
   hostConfigChanged: "host-config://changed",
+  toolUpdatesChecked: "tool-updates://checked",
   stateChanged: "state://changed",
   egressBlocked: "egress://blocked",
   updateProgress: "update://progress",
@@ -376,6 +378,18 @@ export function onStateChanged(handler: (payload: { reason: string }) => void): 
 export function onHostConfigChanged(handler: () => void): Promise<UnlistenFn> {
   return subscribe<Record<string, never>>(EVENTS.hostConfigChanged, () => handler());
 }
+
+/** A finished tool-version check, with what it found. */
+export function onToolUpdatesChecked(
+  handler: (report: ToolUpdateReport) => void,
+): Promise<UnlistenFn> {
+  return subscribe<ToolUpdateReport>(EVENTS.toolUpdatesChecked, (event) =>
+    handler(event.payload),
+  );
+}
+
+/** Ask the registries now, whether or not the automatic checks are on. */
+export const checkToolUpdatesNow = () => call<string[]>("check_tool_updates_now", {});
 
 export function onEgressBlocked(handler: (payload: BlockedEgressView) => void): Promise<UnlistenFn> {
   return subscribe<BlockedEgressView>(EVENTS.egressBlocked, (event) => handler(event.payload));
