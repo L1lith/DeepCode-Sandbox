@@ -103,14 +103,39 @@ impl Docker {
         cmd
     }
 
+    /// How long one docker command may take before its process is ended.
+    ///
+    /// Everything that goes through here is short -- `inspect`, `ps`, `cp`, `exec` -- and none of
+    /// it is the PTY, which has a lifetime of its own. Until this existed, `run_raw` waited with no
+    /// limit at all: a docker CLI that never exits hung its caller forever, with no log line and no
+    /// error, and a launch button sat on "Starting…" until the window's own fifteen-minute watchdog
+    /// gave up. That is exactly what a wedged Docker Desktop produces, and the app had no way to say
+    /// so. Bounded, a stuck command becomes a sentence that names it.
+    pub const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
     fn run_raw(&self, args: &[OsString]) -> Result<std::process::Output> {
         let mut cmd = self.command();
         cmd.args(args);
-        cmd.output().map_err(|err| {
-            SandboxError::DockerUnavailable(format!(
-                "could not run {}: {err}. Is Docker Desktop running?",
-                self.program.display()
-            ))
+        let named = format!(
+            "{} {}",
+            self.program.display(),
+            args.iter()
+                .map(|arg| arg.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        wait_bounded(cmd, Self::COMMAND_TIMEOUT).map_err(|err| {
+            if err.starts_with("could not start") {
+                SandboxError::DockerUnavailable(format!(
+                    "could not run {}: {err}. Is Docker Desktop running?",
+                    self.program.display()
+                ))
+            } else {
+                SandboxError::Docker {
+                    command: named,
+                    stderr: err,
+                }
+            }
         })
     }
 
@@ -1574,5 +1599,103 @@ mod tests {
         let status = docker.probe("deepsand/runtime:none");
         assert!(!status.available);
         assert!(!status.detail.is_empty());
+    }
+}
+
+/// Run a command, ending it if it outstays `limit`.
+///
+/// The watcher is a thread rather than a poll loop in the caller because `wait_with_output` is the
+/// only way to collect both pipes without deadlocking on a full one: the kill comes from outside
+/// and that call returns by itself. `killed` is what lets the caller tell "this process was stopped
+/// by the limit" from "this process said something and failed", which are the same shape otherwise
+/// and mean very different things.
+fn wait_bounded(
+    mut cmd: Command,
+    limit: std::time::Duration,
+) -> std::result::Result<std::process::Output, String> {
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let child = cmd
+        .spawn()
+        .map_err(|err| format!("could not start it: {err}"))?;
+    let pid = child.id();
+    let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watching = std::sync::Arc::clone(&finished);
+    let killed = std::sync::Arc::clone(&ended);
+    std::thread::spawn(move || {
+        use std::sync::atomic::Ordering;
+        let deadline = std::time::Instant::now() + limit;
+        while std::time::Instant::now() < deadline {
+            if watching.load(Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        killed.store(true, Ordering::SeqCst);
+        kill_process_tree(pid);
+    });
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("could not be collected: {err}"))?;
+    finished.store(true, std::sync::atomic::Ordering::SeqCst);
+    if ended.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(format!(
+            "it gave no answer within {}s, so it was killed. This command is not the problem: \
+             something inside Docker is not answering, and restarting Docker Desktop is the usual \
+             fix.",
+            limit.as_secs()
+        ));
+    }
+    Ok(output)
+}
+
+#[cfg(test)]
+mod command_timeout_tests {
+    use super::*;
+
+    /// A command that ignores its limit hangs the caller forever, which is the shape of the bug
+    /// this bound exists for. The child sleeps far longer than the limit, and the limit is short,
+    /// so the test is short too.
+    #[test]
+    fn a_command_that_outstays_its_limit_is_ended_and_reported() {
+        let mut cmd = if cfg!(windows) {
+            let mut cmd = Command::new("ping");
+            cmd.args(["-n", "20", "127.0.0.1"]);
+            cmd
+        } else {
+            let mut cmd = Command::new("sleep");
+            cmd.arg("20");
+            cmd
+        };
+        cmd.stdout(Stdio::null());
+        let started = std::time::Instant::now();
+        let outcome = wait_bounded(cmd, std::time::Duration::from_millis(400));
+        let elapsed = started.elapsed();
+        let message = outcome.expect_err("the limit has to end it, not the command");
+        assert!(message.contains("gave no answer within"), "and say why: {message}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "promptly, not eventually: {elapsed:?}"
+        );
+    }
+
+    /// The ordinary case is untouched: a command that finishes is a command that finishes.
+    #[test]
+    fn a_command_that_finishes_returns_its_output() {
+        let mut cmd = if cfg!(windows) {
+            let mut cmd = Command::new("cmd");
+            cmd.args(["/c", "echo", "hello"]);
+            cmd
+        } else {
+            let mut cmd = Command::new("echo");
+            cmd.arg("hello");
+            cmd
+        };
+        cmd.stdout(Stdio::piped());
+        let output = wait_bounded(cmd, std::time::Duration::from_secs(30)).expect("should run");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("hello"));
     }
 }
