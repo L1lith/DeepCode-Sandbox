@@ -33,6 +33,26 @@ DEEPSAND_BUILD_ARGS="--build-arg INSTALL_BUILD_TOOLS=1" node runtime/scripts/bui
 roughly doubles the image. It is off by default because most projects install
 their own toolchains, and a smaller image is a smaller attack surface.
 
+### How the tool plan reaches the build
+
+The app turns a project's tool selection into build arguments, and three of them are
+**comma-separated lists**: `APT_PACKAGES`, `NPM_GLOBALS` and `CARGO_INSTALLS`. Commas
+rather than spaces because a build argument is a single argv entry and needs no quoting.
+
+The Dockerfile splits them **once**, at the top of the step that uses them, into the same
+names. Do it there and not at each use. The apt branch used to expand `$APT_PACKAGES`
+directly, so apt was handed the whole list as one package name:
+
+```
+E: Unable to locate package curl,git,jq,ripgrep,unzip,zip
+```
+
+Every project whose tools needed an apt package failed to build an image, in four
+seconds, with an error that named none of this. `crates/deepsand-core/tests/runtime_dockerfile.rs`
+now asserts the split happens before every use, so a new list-valued argument that
+forgets to be split fails a unit test instead of a build. The same file is why a failed
+build now reports the last lines of its own output.
+
 ## The container's startup sequence
 
 `entrypoint.sh` runs as root for exactly three reasons, in this order:

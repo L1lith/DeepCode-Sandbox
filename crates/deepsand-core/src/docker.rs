@@ -265,6 +265,23 @@ impl Docker {
             })
         });
 
+        // Keep the last lines so a failure can say what actually went wrong. The error
+        // used to read "the build failed; see the build log above", and the log lives in
+        // the UI's memory and dies with the window: an operator pasted exactly that
+        // sentence into a bug report and the one line that mattered -- apt refusing a
+        // comma-separated package list -- was gone.
+        let mut tail: Vec<String> = Vec::new();
+        let keep_tail = |line: &str, tail: &mut Vec<String>| {
+            if tail.len() == BUILD_TAIL_LINES {
+                tail.remove(0);
+            }
+            tail.push(line.to_string());
+        };
+        let mut sink = |line: &str| {
+            keep_tail(line, &mut tail);
+            sink(line);
+        };
+
         if let Some(reader) = child.stderr.take().map(BufReader::new) {
             for line in reader.lines().map_while(std::result::Result::ok) {
                 sink(&line);
@@ -282,7 +299,7 @@ impl Docker {
         if !status.success() {
             return Err(SandboxError::Docker {
                 command: format!("docker build -t {tag} {}", context.display()),
-                stderr: "the build failed; see the build log above".to_string(),
+                stderr: describe_build_failure(&tail),
             });
         }
         Ok(())
@@ -595,6 +612,34 @@ impl Docker {
 ///
 /// Returns `None` rather than a guess when a line reports nothing, so a caller can show
 /// an indeterminate bar instead of a fabricated number.
+/// How many lines of build output a failure carries. Enough for the failing step's own
+/// message and its last line of context; not so many that the toast is a wall of text.
+pub const BUILD_TAIL_LINES: usize = 8;
+
+/// The message a failed build reports, including the end of its own output.
+///
+/// Split out from `build` so it can be tested without Docker, and so the shape of a
+/// failure is a decision in one place rather than string-formatting at a call site.
+pub fn describe_build_failure(tail: &[String]) -> String {
+    // Empty lines are dropped: buildkit separates steps with them, and the line that
+    // explains a failure is never blank.
+    let useful: Vec<&str> = tail
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect();
+    if useful.is_empty() {
+        return "the build failed and reported no output. Run `docker build` against the runtime directory by hand."
+            .to_string();
+    }
+    let start = useful.len().saturating_sub(BUILD_TAIL_LINES);
+    format!(
+        "the build failed. Last {} line(s) of its output:\n{}",
+        useful.len() - start,
+        useful[start..].join("\n")
+    )
+}
+
 pub fn parse_build_step(line: &str) -> Option<(u32, u32)> {
     // BuildKit: the first `[n/m]` on the line.
     if let Some(open) = line.find('[') {
@@ -697,6 +742,57 @@ fn which(program: &str) -> Option<PathBuf> {
         assert_eq!(parse_build_step("#1 [9/4] FROM node"), None);
         assert_eq!(parse_build_step("#1 [a/b] FROM node"), None);
     }
+
+#[cfg(test)]
+mod build_failure_tests {
+    use super::*;
+
+    fn lines(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    /// The message has to carry the end of the build's own output. The reason this exists
+    /// is that a failure saying only "see the build log above" is undiagnosable once the
+    /// window is closed.
+    #[test]
+    fn a_failed_build_reports_its_own_last_lines() {
+        let message = describe_build_failure(&lines(&[
+            "#16 3.082 E: Unable to locate package curl,git,jq",
+            "#16 ERROR: process did not complete successfully",
+        ]));
+        assert!(message.contains("E: Unable to locate package"), "{message}");
+        assert!(message.contains("did not complete successfully"), "{message}");
+    }
+
+    /// Only the tail, and never more than the cap: a toast is not a log viewer.
+    #[test]
+    fn a_chatty_build_is_truncated_to_the_last_lines() {
+        let mut noisy: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();
+        noisy.push("the one that matters".to_string());
+        let message = describe_build_failure(&noisy);
+
+        assert!(message.contains("the one that matters"), "{message}");
+        assert!(!message.contains("line 0\n"), "the start must be dropped: {message}");
+        assert!(
+            message.lines().count() <= BUILD_TAIL_LINES + 1,
+            "at most {BUILD_TAIL_LINES} lines plus the sentence: {message}"
+        );
+    }
+
+    /// Buildkit separates steps with blank lines; they are not the explanation.
+    #[test]
+    fn blank_separator_lines_are_not_what_gets_reported() {
+        let message = describe_build_failure(&lines(&["#16 failing", "", "   ", ""]));
+        assert_eq!(message.lines().count(), 2, "{message}");
+    }
+
+    /// A build that died before printing anything still has to say something useful.
+    #[test]
+    fn a_silent_failure_says_how_to_see_more() {
+        let message = describe_build_failure(&[]);
+        assert!(message.contains("docker build"), "{message}");
+    }
+}
 
 #[cfg(test)]
 mod tests {

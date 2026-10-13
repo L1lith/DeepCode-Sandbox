@@ -24,7 +24,7 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 303 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 309 tests |
 | `npm run core:check` | `cargo check --workspace` |
 | `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |
 | `npm test` | the two suites above, in order |

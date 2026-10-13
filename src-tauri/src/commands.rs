@@ -2786,11 +2786,21 @@ pub fn build_runtime_image_impl(
             .to_string()
     })?;
 
+    // The log goes to a file as well as to the window. The window's copy dies with the
+    // window, which is exactly when somebody wants to read it.
+    let log_path = store(&state).data_dir().join("build.log");
+
     let app_handle = AppHandle::clone(app);
     std::thread::spawn(move || {
         let app_for_log = AppHandle::clone(&app_handle);
         let image_for_event = image.clone();
+        // Truncated per build: the previous build's output is not context, it is noise.
+        let mut log = std::fs::File::create(&log_path).ok();
         let result = docker.build(&context, &image, &build_args, move |line| {
+            if let Some(file) = log.as_mut() {
+                use std::io::Write as _;
+                let _ = writeln!(file, "{line}");
+            }
             let _ = app_for_log.emit(events::BUILD_LOG, serde_json::json!({ "line": line }));
             // Emitted only when the line reports a step, so the bar moves on real
             // progress and an idle build does not look stalled at 0%.
@@ -2809,7 +2819,10 @@ pub fn build_runtime_image_impl(
             events::BUILD_DONE,
             match result {
                 Ok(()) => serde_json::json!({ "ok": true, "image": image }),
-                Err(err) => serde_json::json!({ "ok": false, "detail": err.to_string() }),
+                Err(err) => serde_json::json!({
+                    "ok": false,
+                    "detail": format!("{err}\n\nThe full build log is {}.", log_path.display()),
+                }),
             },
         );
     });

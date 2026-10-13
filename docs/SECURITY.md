@@ -338,8 +338,9 @@ enumerates families and flags so that dropping one fails a test rather than a re
 Everything above is asserted by tests you can run:
 
 ```bash
-cargo test -p deepsand-core                   # 303 tests, including the seccomp, allowlist and durability claims
+cargo test -p deepsand-core                   # 309 tests, including the seccomp, allowlist and durability claims
 node runtime/scripts/test-mcp-bridge.mjs      # 55 checks: the permission protocol end to end
+cargo test -p deepsand-core --test runtime_dockerfile   # claims about the image build, no Docker needed
 ```
 
 The most load-bearing ones:

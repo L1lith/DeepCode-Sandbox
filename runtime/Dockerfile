@@ -218,6 +218,18 @@ ARG WITH_BREW=0
 ARG WITH_NIX=0
 
 RUN set -eux; \
+    # The app passes these three as comma-separated lists, because a build argument is one
+    # argv entry and commas need no quoting. They are split here, once, rather than at each
+    # use. The apt branch used to expand $APT_PACKAGES directly, so apt was handed the whole
+    # list as a single package name and refused it:
+    #
+    #   E: Unable to locate package curl,git,jq,ripgrep,unzip,zip
+    #
+    # which meant no project whose tools needed an apt package could build an image at all.
+    # A new list-valued argument gets split here too, for the same reason.
+    APT_PACKAGES=$(echo "$APT_PACKAGES" | tr ',' ' '); \
+    NPM_GLOBALS=$(echo "$NPM_GLOBALS" | tr ',' ' '); \
+    CARGO_INSTALLS=$(echo "$CARGO_INSTALLS" | tr ',' ' '); \
     if [ -z "$INSTALL_TOOLS" ]; then \
       echo "deepsand: no tools selected for this project"; \
     else \
@@ -239,7 +251,7 @@ RUN set -eux; \
       rm -rf /var/lib/apt/lists/*; \
     fi; \
     if [ -n "$NPM_GLOBALS" ]; then \
-      for pkg in $(echo "$NPM_GLOBALS" | tr ',' ' '); do \
+      for pkg in $NPM_GLOBALS; do \
         npm install -g --no-fund --no-audit "$pkg@latest"; \
       done; \
     fi; \
@@ -264,7 +276,7 @@ RUN set -eux; \
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
           | sh -s -- -y --no-modify-path --profile minimal; \
       fi; \
-      for crate in $(echo "$CARGO_INSTALLS" | tr ',' ' '); do \
+      for crate in $CARGO_INSTALLS; do \
         cargo install --locked --root /usr/local "$crate"; \
       done; \
       apt-get purge -y gcc libc6-dev || true; \
