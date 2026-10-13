@@ -435,8 +435,21 @@ export const DEFAULT_LIMITS: ResourceLimits = {
 };
 
 /** Human label for a network policy, used in badges and pickers. */
+/**
+ * The mode as everything here compares it.
+ *
+ * The backend writes `restricted` for the allowlist mode -- deliberately, so a build from before
+ * the rename can still read the state file -- and reads both spellings. Everything in the window
+ * compares against `allowlisted`, so that one mode matched nothing: the project's Permissions tab
+ * showed no selection while an allowlisted project was selected, and picking any other mode then
+ * looked like the first selection. Normalised here, once, rather than at every comparison.
+ */
+export function policyMode(policy: NetworkPolicy): NetworkPolicy["mode"] {
+  return (policy.mode as string) === "restricted" ? "allowlisted" : policy.mode;
+}
+
 export function networkLabel(policy: NetworkPolicy): string {
-  switch (policy.mode) {
+  switch (policyMode(policy)) {
     case "none":
       return "no network";
     case "internet":
@@ -449,7 +462,7 @@ export function networkLabel(policy: NetworkPolicy): string {
 }
 
 export function networkDescription(policy: NetworkPolicy): string {
-  switch (policy.mode) {
+  switch (policyMode(policy)) {
     case "none":
       return "Nothing is reachable except the model API itself. Package installs, git clones and web requests will all fail, as will anything the enabled tools would otherwise reach — the sandbox has no way out other than the address its model is served from.";
     case "internet":

@@ -13,10 +13,11 @@ import * as api from "../lib/api";
 import {
   accessLabel,
   networkDescription,
-  networkLabel,
+  policyMode,
   type AllowlistView,
   type NetworkPolicy,
 } from "../lib/types";
+import { NetworkSlider } from "./NetworkSlider";
 import {
   describeError,
   refreshProjects,
@@ -255,27 +256,11 @@ export function PermissionsPanel() {
             <div class="card">
               <h3>Network access</h3>
               <div class="row-inline" style={{ "flex-wrap": "wrap" }}>
-                <For
-                  each={
-                    [
-                      { mode: "none" },
-                      { mode: "internet" },
-                      { mode: "allowlisted", allow: [] },
-                      { mode: "full" },
-                    ] as NetworkPolicy[]
-                  }
-                >
-                  {(candidate) => (
-                    <button
-                      class="mode-segment"
-                      classList={{ "mode-segment-on": current().network.mode === candidate.mode }}
-                      disabled={modeBusy()}
-                      onClick={() => void chooseMode(candidate.mode)}
-                    >
-                      {networkLabel(candidate)}
-                    </button>
-                  )}
-                </For>
+                <NetworkSlider
+                  value={policyMode(current().network)}
+                  disabled={modeBusy()}
+                  onChange={(mode) => void chooseMode(mode)}
+                />
               </div>
               <span class="hint">{networkDescription(current().network)}</span>
 

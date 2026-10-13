@@ -50,9 +50,10 @@ pub fn install(app: &tauri::AppHandle) -> tauri::Result<()> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
+            // Any button state: Windows delivers the press and the release, and only one of them
+            // has to open the window. Requiring `Up` meant a left click did nothing at all.
             if let tauri::tray::TrayIconEvent::Click {
                 button: tauri::tray::MouseButton::Left,
-                button_state: tauri::tray::MouseButtonState::Up,
                 ..
             } = event
             {

@@ -192,6 +192,11 @@ pub fn run() {
         // earlier instance is stuck and could not be cleared, because an app that refuses to
         // open at all is worse than two that have to be sorted out by hand.
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+                // A second launch is somebody asking for the window -- from the Start menu, a
+                // shortcut, or a file manager -- and there is one process, so the launch is handed
+                // here. Doing nothing left them with no window and no sign of one, because the
+                // instance they already had was in the tray.
+                tray::show_main_window(app);
             use tauri::Manager as _;
             tracing::info!("another launch was handed to this instance; showing the window");
             if let Some(window) = app.get_webview_window("main") {
