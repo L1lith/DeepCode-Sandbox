@@ -2398,7 +2398,7 @@ pub async fn set_project_tools(
 
 /// Write the current thinking settings into the project's `settings.json`, and into
 /// a running sandbox if there is one. Returns whether a running sandbox was updated.
-fn push_live_settings(state: &AppState, project_id: &str) -> CmdResult<bool> {
+pub(crate) fn push_live_settings(state: &AppState, project_id: &str) -> CmdResult<bool> {
     let (config_dir, container, resolved) = {
         let store = store(state);
         let project = store.project(project_id).map_err(fail)?.clone();
@@ -2557,6 +2557,206 @@ pub fn set_effort(
     value: String,
 ) -> CmdResult<EffortView> {
     set_effort_impl(&state, &project_id, &value)
+}
+
+/* ------------------------------------------------------------------------- */
+/* Attachments                                                               */
+/* ------------------------------------------------------------------------- */
+
+/// Where things pasted or dropped into the terminal land inside the sandbox.
+///
+/// The sandbox's own state directory rather than the workspace: a screenshot is not part of the
+/// repository, the agent can read this path, and it survives with the session volume.
+const ATTACHMENTS_DIR: &str = "/home/deepcode/.deepcode/attachments";
+
+/// The largest attachment. These bytes travel through the app's memory and then through
+/// `docker exec`'s stdin, so a dropped disk image should be a message rather than a hang.
+const MAX_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
+
+/// A safe name for an attachment, prefixed so two pastes never collide.
+///
+/// The suggestion comes from a filename or from whatever the webview decided to call a pasted
+/// image, so it is reduced to its last component and to characters that cannot mean anything to
+/// a shell or a path.
+fn attachment_name(suggested: &str, stamp: u64) -> String {
+    let last = suggested
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("file")
+        .to_string();
+    let cleaned: String = last
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        .collect();
+    let cleaned = cleaned.trim_matches('.').to_string();
+    if cleaned.is_empty() {
+        format!("{stamp}-file")
+    } else {
+        format!("{stamp}-{cleaned}")
+    }
+}
+
+/// The container to put an attachment in, or an explanation of why there is none.
+fn attachment_container(state: &AppState, project_id: &str) -> CmdResult<String> {
+    state
+        .sessions
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(project_id)
+        .map(|live| live.container_name.clone())
+        .ok_or_else(|| {
+            "There is no sandbox running for this project, so there is nowhere inside it to put \
+             that. Start the project, then paste or drop it again."
+                .to_string()
+        })
+}
+
+/// Put bytes inside the running sandbox and return the path to type into the terminal.
+fn put_attachment(
+    state: &AppState,
+    container: &str,
+    suggested: &str,
+    bytes: &[u8],
+) -> CmdResult<String> {
+    if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "{} is {} MB, and the limit for something pasted or dropped in is {} MB.",
+            suggested,
+            bytes.len() / (1024 * 1024),
+            MAX_ATTACHMENT_BYTES / (1024 * 1024)
+        ));
+    }
+    let docker = state.docker().map_err(fail)?;
+    let path = format!(
+        "{ATTACHMENTS_DIR}/{}",
+        attachment_name(suggested, deepsand_core::now_ms().max(0) as u64)
+    );
+    docker
+        .make_dirs_in_container(container, ATTACHMENTS_DIR)
+        .map_err(|err| format!("could not prepare the sandbox's attachments directory: {err}"))?;
+    docker
+        .write_into_container(container, &path, bytes)
+        .map_err(|err| format!("could not write {suggested} into the sandbox: {err}"))?;
+    Ok(path)
+}
+
+/// Attach paths from a drop: a file already inside the workspace is named where the sandbox
+/// already sees it, and anything else is copied in.
+pub fn attach_paths_impl(
+    state: &AppState,
+    project_id: &str,
+    paths: Vec<String>,
+) -> CmdResult<AttachmentView> {
+    let project = store(state).project(project_id).map_err(fail)?.clone();
+    let container = attachment_container(state, project_id)?;
+    let root = std::fs::canonicalize(&project.root_dir).ok();
+    let workspace_mount = deepsand_core::model::Project::workspace_mount();
+
+    let mut view = AttachmentView {
+        paths: Vec::new(),
+        problems: Vec::new(),
+    };
+
+    for raw in paths {
+        // Canonical first: a symlink or a `..` must not be able to name something outside the
+        // workspace and be treated as if it were inside it.
+        let Ok(canonical) = std::fs::canonicalize(&raw) else {
+            view.problems.push(format!("{raw} could not be read"));
+            continue;
+        };
+
+        // Already inside the workspace: the sandbox sees the same file, so the path it needs is
+        // the mount path, and nothing is copied.
+        if let Some(root) = &root {
+            if let Ok(relative) = canonical.strip_prefix(root) {
+                if !relative.as_os_str().is_empty() {
+                    view.paths.push(format!(
+                        "{workspace_mount}/{}",
+                        relative.to_string_lossy().replace('\\', "/")
+                    ));
+                    continue;
+                }
+            }
+        }
+
+        let meta = match std::fs::metadata(&canonical) {
+            Ok(meta) => meta,
+            Err(err) => {
+                view.problems.push(format!("{raw} could not be read: {err}"));
+                continue;
+            }
+        };
+        let name = canonical
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".to_string());
+
+        if meta.is_dir() {
+            // Copying a tree is a different feature with different questions (how big, how
+            // deep, what to do about links), so this says so rather than half-doing it.
+            view.problems.push(format!(
+                "{name} is a directory. Drop a file, or put the directory in the project folder, \
+                 where the sandbox can already see it."
+            ));
+            continue;
+        }
+        let bytes = match std::fs::read(&canonical) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                view.problems.push(format!("{name} could not be read: {err}"));
+                continue;
+            }
+        };
+        match put_attachment(state, &container, &name, &bytes) {
+            Ok(path) => view.paths.push(path),
+            Err(err) => view.problems.push(err),
+        }
+    }
+
+    Ok(view)
+}
+
+#[tauri::command]
+pub fn attach_paths(
+    state: State<'_, AppState>,
+    project_id: String,
+    paths: Vec<String>,
+) -> CmdResult<AttachmentView> {
+    attach_paths_impl(&state, &project_id, paths)
+}
+
+/// Attach bytes with no path of their own: what a pasted image or file gives the window.
+pub fn attach_bytes_impl(
+    state: &AppState,
+    project_id: &str,
+    name: String,
+    base64_data: String,
+) -> CmdResult<AttachmentView> {
+    use base64::Engine as _;
+    let container = attachment_container(state, project_id)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64_data.as_bytes())
+        .map_err(|err| format!("{name} did not arrive intact: {err}"))?;
+
+    let mut view = AttachmentView {
+        paths: Vec::new(),
+        problems: Vec::new(),
+    };
+    match put_attachment(state, &container, &name, &bytes) {
+        Ok(path) => view.paths.push(path),
+        Err(err) => view.problems.push(err),
+    }
+    Ok(view)
+}
+
+#[tauri::command]
+pub fn attach_bytes(
+    state: State<'_, AppState>,
+    project_id: String,
+    name: String,
+    base64_data: String,
+) -> CmdResult<AttachmentView> {
+    attach_bytes_impl(&state, &project_id, name, base64_data)
 }
 
 /* ------------------------------------------------------------------------- */
@@ -2734,11 +2934,9 @@ pub async fn list_models_impl(state: &AppState, project_id: &str) -> CmdResult<M
                     view.options = choices;
                     return Ok(view);
                 }
-                problem = Some(if status.is_success() {
-                    format!("{url} answered without any models in it")
-                } else {
-                    format!("{url} answered {status}")
-                });
+                // Why it failed decides what to advise: no enumeration at all is a reason to
+                // use Custom, a refused key is a reason to fix the key.
+                problem = Some(deepsand_core::models::listing_problem(&url, status.as_u16(), &body));
             }
             Err(err) => {
                 problem = Some(format!("{url} could not be reached: {err}"));

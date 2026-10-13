@@ -42,6 +42,16 @@ interface Store {
   buildLog: string[];
   building: boolean;
   /**
+   * Bumped whenever the operator's own DeepCode settings file changes on disk.
+   *
+   * A counter rather than a copy of the file: the answers that depend on it -- what "Defer to
+   * Config" resolves to, whether the thinking switch is deferring -- are the backend's to give,
+   * and a view that has already loaded re-reads them when this moves. It exists because the app
+   * used to read that file once at startup and keep showing that answer, so a model changed in
+   * the editor did not reach the window until it was restarted.
+   */
+  configRevision: number;
+  /**
    * The project whose session is being started, restarted or stopped right now, if any.
    *
    * This lives here rather than in each button because two buttons did own a copy of it and
@@ -78,6 +88,7 @@ const [store, setStore] = createStore<Store>({
   audit: [],
   buildLog: [],
   building: false,
+  configRevision: 0,
   sessionBusy: null,
   buildImage: null,
   buildProgress: null,
@@ -390,6 +401,13 @@ export async function wireEvents(): Promise<() => void> {
       } else {
         toast("error", "Runtime image build failed", payload.detail);
       }
+    }),
+
+    // The host's settings file is watched by the backend; this is the window being told to
+    // re-read what depends on it.
+    api.onHostConfigChanged(() => {
+      setStore("configRevision", store.configRevision + 1);
+      void api.logUiEvent("info", "the DeepCode settings file changed; re-read it");
     }),
 
     api.onStateChanged(() => {

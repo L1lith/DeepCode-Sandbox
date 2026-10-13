@@ -9,7 +9,7 @@
 import { createMemo, createSignal, For, onMount, Show } from "solid-js";
 import * as api from "../lib/api";
 import type { EffortView, ModelChoice, ModelView, ToolCatalogView, ToolView } from "../lib/types";
-import { describeError, selectedProject, toast } from "../store";
+import { describeError, selectedProject, store, toast } from "../store";
 import { Modal } from "./Dialogs";
 
 /* ------------------------------------------------------------------------- */
@@ -44,9 +44,12 @@ export function ModelSelect() {
   });
 
   // Reload when the project changes, so one project's model is never shown under another
-  // project's name.
+  // project's name, and when the host's settings file changes, because what "Defer to Config"
+  // resolves to is read from it.
   createMemo(() => {
     const current = project();
+    const revision = store.configRevision;
+    void revision;
     if (current) void load(current.id);
   });
 
@@ -263,10 +266,13 @@ export function EffortSwitch() {
     if (current) void load(current.id);
   });
 
-  // Reload when the project changes, so one project's setting is never shown under
-  // another project's name.
+  // Reload when the project changes, so one project's setting is never shown under another
+  // project's name, and when the host's settings file changes: whether this switch is deferring
+  // to it is exactly what that file decides.
   createMemo(() => {
     const current = project();
+    const revision = store.configRevision;
+    void revision;
     if (current) void load(current.id);
   });
 

@@ -872,6 +872,26 @@ pre.output {
   cursor: help;
 }
 
+/* Dragging a file over the terminal says so, because the alternative is guessing whether
+   dropping something will do anything. */
+.terminal-dropping {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+
+.terminal-drop-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 1rem;
+  transform: translateX(-50%);
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  font-size: 0.8rem;
+  pointer-events: none;
+}
+
 .effort {
   display: flex;
   align-items: center;

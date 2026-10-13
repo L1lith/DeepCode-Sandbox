@@ -20,6 +20,7 @@
 //! neither of them contains any policy of its own.
 
 pub mod commands;
+mod host_config;
 mod instance;
 pub mod remote_server;
 mod state;
@@ -212,6 +213,11 @@ pub fn run() {
             // tell "already running" from "stuck with nothing on screen".
             instance::start_heartbeat(app.handle(), data_dir_path.clone());
 
+            // The host's own DeepCode settings file is read fresh by the backend on every use,
+            // so what goes stale is only what the window was told. Three seconds is the latency
+            // of a person noticing; see the module for why this polls rather than watches.
+            host_config::watch(app.handle().clone(), std::time::Duration::from_secs(3));
+
             tracing::info!(version = version(), data_dir = %data_dir, "deepsand starting");
 
             // Bring up any remote server that is configured to survive a restart.
@@ -386,6 +392,8 @@ pub fn run() {
             commands::set_project_tools,
             commands::get_effort,
             commands::get_model,
+            commands::attach_paths,
+            commands::attach_bytes,
             commands::set_model,
             commands::list_models,
             commands::set_effort,

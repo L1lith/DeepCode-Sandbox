@@ -293,6 +293,19 @@ pub struct EffortView {
     pub applied_live: bool,
 }
 
+/// What came of attaching files the operator pasted or dropped into the terminal.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentView {
+    /// Paths to type into the terminal, in the order they arrived. Inside the sandbox: what the
+    /// agent and the CLI can actually read.
+    pub paths: Vec<String>,
+    /// What could not be attached, each with its reason, to be shown rather than thrown:
+    /// attaching three files and losing all three because the fourth was a directory is worse
+    /// than attaching three and saying why not the fourth.
+    pub problems: Vec<String>,
+}
+
 /// A project's model setting, as the header's dropdown needs it.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

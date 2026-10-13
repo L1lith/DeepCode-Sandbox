@@ -24,7 +24,7 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 347 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 350 tests |
 | `npm run app:test` | `cargo test -p deepsand-app` — the app crate's own tests, including the zombie guard. Part of `npm test`: it was not, and tests that never run are decoration |
 | `npm run core:check` | `cargo check --workspace` |
 | `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |
@@ -242,6 +242,21 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   ids and names -- never a key, not even masked. The cache that keeps the list between projects
   digests the key rather than storing it, and a failure to list comes back as a `problem` string
   rather than an error, so the dropdown still offers the two choices that need no list at all.
+* **The window is told when a file it read once changes.** The host's DeepCode settings decide
+  what "Defer to Config" resolves to, and the backend reads that file fresh on every use, so
+  only the *window* can go stale -- which it did, showing a model from startup until it was
+  restarted. `host_config.rs` polls it and emits an event that carries nothing: the views that
+  depend on the file re-read it from the backend rather than being handed a second copy of the
+  values. The poll compares a digest as well as a timestamp and a length, because a same-size
+  edit inside one filesystem timestamp tick is otherwise invisible.
+* **Attaching is the operator's action, and it is bounded.** Pasted or dropped files are copied
+  into the sandbox's own `~/.deepcode/attachments` -- never into the workspace, which is the
+  operator's repository -- and are size-capped on both sides. A path already inside the
+  workspace is *named* rather than copied, but only after `canonicalize`, so a symlink cannot
+  pretend to be inside it. One file failing is reported without losing the others: attaching
+  three and dropping all three because the fourth was a directory is worse than three and a
+  reason. The paste path is captured on the terminal's host element before xterm's own listener,
+  because text paste already works and only a clipboard with *files* needs intercepting.
 * **A per-project model is `credentials.model`, and `None` means "defer to configuration".**
   One field, so the header dropdown and the project's own credentials cannot disagree, and
   clearing the choice puts the configured model back rather than leaving the last one behind

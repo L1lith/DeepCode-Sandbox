@@ -6,11 +6,13 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AllowlistView,
   AppInfo,
   AppSettings,
+  AttachmentView,
   BlockedEgressView,
   Credentials,
   DecisionPayload,
@@ -45,6 +47,7 @@ export const EVENTS = {
   buildLog: "build://log",
   buildDone: "build://done",
   buildProgress: "build://progress",
+  hostConfigChanged: "host-config://changed",
   stateChanged: "state://changed",
   egressBlocked: "egress://blocked",
   updateProgress: "update://progress",
@@ -211,6 +214,43 @@ export function onUpdateProgress(handler: (payload: UpdateProgress) => void): Pr
 export const previewPlan = (projectId: string) => call<PlanPreview>("preview_plan", { projectId });
 export const sessionStatus = (projectId: string) =>
   call<SessionStatus>("session_status", { projectId });
+/* --- attachments: what is pasted or dropped into the terminal --------------- */
+
+export const attachPaths = (projectId: string, paths: string[]) =>
+  call<AttachmentView>("attach_paths", { projectId, paths });
+export const attachBytes = (projectId: string, name: string, base64Data: string) =>
+  call<AttachmentView>("attach_bytes", { projectId, name, base64Data });
+
+/** One drag-and-drop event, in the shape the terminal wants it. */
+export type DragDropPayload =
+  | { kind: "over"; x: number; y: number }
+  | { kind: "leave" }
+  | { kind: "drop"; x: number; y: number; paths: string[] };
+
+/**
+ * Files dragged over the window.
+ *
+ * The platform hands Tauri the *paths* of what was dropped, which the webview own drag events
+ * cannot: a `File` from an HTML drop has no location on disk, and the whole point here is to
+ * tell the sandbox where the file is. Positions are physical pixels, so a caller comparing them
+ * against a layout rectangle has to divide by the device pixel ratio.
+ */
+export async function onDragDrop(
+  handler: (payload: DragDropPayload) => void,
+): Promise<UnlistenFn> {
+  const webview = getCurrentWebview();
+  return webview.onDragDropEvent((event) => {
+    const payload = event.payload;
+    if (payload.type === "drop") {
+      handler({ kind: "drop", x: payload.position.x, y: payload.position.y, paths: payload.paths });
+    } else if (payload.type === "leave") {
+      handler({ kind: "leave" });
+    } else {
+      handler({ kind: "over", x: payload.position.x, y: payload.position.y });
+    }
+  });
+}
+
 /* --- the model ------------------------------------------------------------ */
 
 export const getModel = (projectId: string) => call<ModelView>("get_model", { projectId });
@@ -310,6 +350,16 @@ export function onBuildProgress(
 
 export function onStateChanged(handler: (payload: { reason: string }) => void): Promise<UnlistenFn> {
   return subscribe<{ reason: string }>(EVENTS.stateChanged, (event) => handler(event.payload));
+}
+
+/**
+ * The operator's own DeepCode settings file changed on disk.
+ *
+ * Nothing is sent with it: what depends on that file is re-read from the backend, which reads
+ * the file fresh every time, rather than being told a copy of its contents.
+ */
+export function onHostConfigChanged(handler: () => void): Promise<UnlistenFn> {
+  return subscribe<Record<string, never>>(EVENTS.hostConfigChanged, () => handler());
 }
 
 export function onEgressBlocked(handler: (payload: BlockedEgressView) => void): Promise<UnlistenFn> {

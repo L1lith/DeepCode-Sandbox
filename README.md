@@ -64,6 +64,21 @@ codebase do not have to share one.
 | Limits | Project settings | Memory, CPUs, pids. |
 | Credentials | Project settings | Inherit your host DeepCode configuration, or give this project its own model, base URL and key. |
 
+## Pasting and dropping into the terminal
+
+A terminal cannot paste a picture: the keystroke goes to the program inside it, and a clipboard
+image is never mentioned to anybody. Deepsand takes those pastes and drops instead and puts the
+file *inside* the sandbox, then types the path where the CLI can read it.
+
+- **Paste** (Ctrl+V, or right-click → Paste) with a file or an image on the clipboard: it is
+  copied in and its path is typed. Text pastes as text.
+- **Drop** a file on the terminal: a file already in the project folder is named where the
+  sandbox already sees it (`/workspace/...`), and anything else is copied in.
+- Files land in the sandbox's own `~/.deepcode/attachments`, not in your repository, and
+  anything over 25 MB is refused with a message rather than copied.
+- Nothing is attached unless a sandbox is running, and a file that fails is reported on its own
+  rather than losing the files that worked.
+
 ## Install
 
 Requires **Docker Desktop** (or Docker Engine on Linux) and, to build from
@@ -214,8 +229,8 @@ desktop app and the headless CLI cannot behave differently.
 
 ```bash
 npm run app:dev              # app with hot reload
-npm run core:test            # 347 core tests: paths, policy, broker, proxy, credentials, seccomp, durability
-npm run app:test             # 9 tests in the app crate: the zombie guard, and the log file
+npm run core:test            # 350 core tests: paths, policy, broker, proxy, credentials, seccomp, durability
+npm run app:test             # 12 tests in the app crate: the zombie guard, and the log file
 npm run test:bridge          # 55 checks: the permission protocol end to end
 npm test                     # both suites
 npm run core:check           # cargo check --workspace

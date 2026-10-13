@@ -422,6 +422,36 @@ impl Docker {
         Ok(())
     }
 
+    /// Create a directory inside a running container, parents and all.
+    ///
+    /// `write_into_container` writes with `cat >`, which cannot create the directory it writes
+    /// into, so anything that needs a new one asks for this first. Ownership is the sandbox
+    /// user's, so the agent can read and replace what it is given.
+    pub fn make_dirs_in_container(&self, container: &str, path: &str) -> Result<()> {
+        let mut cmd = self.command();
+        // The same shape as the write above: the path goes in as `$1` rather than into the
+        // script, so a quote or a space in it cannot become part of a command.
+        cmd.arg("exec")
+            .arg(container)
+            .arg("sh")
+            .arg("-c")
+            .arg("mkdir -p \"$1\" && chown 1000:1000 \"$1\" 2>/dev/null || true")
+            .arg("sh")
+            .arg(path);
+        let output = cmd.output().map_err(|err| SandboxError::Docker {
+            command: "docker exec".into(),
+            stderr: err.to_string(),
+        })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SandboxError::Docker {
+                command: "docker exec".into(),
+                stderr: format!("could not create {path} in the running sandbox: {}", stderr.trim()),
+            });
+        }
+        Ok(())
+    }
+
     pub fn volume_has_session_index(&self, volume: &str, image: &str) -> bool {
         if !self.volume_exists(volume) {
             return false;

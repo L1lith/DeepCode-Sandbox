@@ -10,7 +10,7 @@
  *    itself, which is what lets the container's TUI initialise at all.
  */
 
-import { createEffect, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -28,6 +28,11 @@ export function TerminalPane() {
   const busy = () => store.sessionBusy === project()?.id;
 
   const project = () => selectedProject();
+
+  /** True while a dragged file is over the terminal. */
+  const [dropping, setDropping] = createSignal(false);
+  /** True while something is being copied into the sandbox. */
+  const [attaching, setAttaching] = createSignal(false);
 
   onMount(() => {
     term = new Terminal({
@@ -85,9 +90,60 @@ export function TerminalPane() {
     const onWindowResize = () => safeFit();
     window.addEventListener("resize", onWindowResize);
 
+    // Pasting into a terminal is where a webview loses the clipboard's *files*: the keystroke
+    // goes to the TUI and an image is never mentioned to anybody. This intercepts a paste that
+    // carries files -- text is left to xterm, which already inserts it -- copies them into the
+    // sandbox and types the path, which is what the CLI can read. Capture phase, so this is seen
+    // before xterm's own listener on the textarea inside.
+    const onPaste = (event: ClipboardEvent) => {
+      const files = Array.from(event.clipboardData?.items ?? [])
+        .filter((item) => item.kind === "file")
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => file !== null);
+      if (files.length === 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void attachFiles(files);
+    };
+    host.addEventListener("paste", onPaste, true);
+
+    // Dropped files: Tauri hands over the paths, so the pane has to say whether the drop landed
+    // on it. Positions arrive in physical pixels, which is why they are scaled before being
+    // compared with a layout rectangle.
+    let unlistenDrop: (() => void) | undefined;
+    void api
+      .onDragDrop((payload) => {
+        if (payload.kind === "leave") {
+          setDropping(false);
+          return;
+        }
+        // The whole pane, not only the xterm element: the overlay and its Run button are part
+        // of the terminal as far as an operator is concerned, and a drop there should land.
+        const wrap = host.closest(".terminal-wrap") ?? host;
+        const rect = wrap.getBoundingClientRect();
+        const scale = window.devicePixelRatio || 1;
+        const x = payload.x / scale;
+        const y = payload.y / scale;
+        const inside = x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+        if (payload.kind === "over") {
+          setDropping(inside);
+          return;
+        }
+        setDropping(false);
+        if (inside) void attachDroppedPaths(payload.paths);
+      })
+      .then((unlisten) => {
+        unlistenDrop = unlisten;
+      })
+      .catch(() => {
+        /* A platform without drag-and-drop is not a reason to fail to mount. */
+      });
+
     onCleanup(() => {
       window.cancelAnimationFrame(firstFit);
       window.removeEventListener("resize", onWindowResize);
+      host.removeEventListener("paste", onPaste, true);
+      unlistenDrop?.();
       observer.disconnect();
       dataSub.dispose();
       term?.dispose();
@@ -153,9 +209,104 @@ export function TerminalPane() {
     });
   }
 
+  /* ----------------------------------------------------------------------- */
+  /* Attachments                                                             */
+  /* ----------------------------------------------------------------------- */
+
+  /** Matches the backend's limit, so the refusal is immediate rather than after a long read. */
+  const ATTACH_LIMIT_BYTES = 25 * 1024 * 1024;
+
+  /**
+   * A file's bytes as base64, in chunks.
+   *
+   * `String.fromCharCode(...bytes)` on a whole screenshot is a stack overflow, which is a
+   * memorable way to fail to paste a picture.
+   */
+  async function fileToBase64(file: File): Promise<string> {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let binary = "";
+    const CHUNK = 0x8000;
+    for (let at = 0; at < bytes.length; at += CHUNK) {
+      binary += String.fromCharCode(...bytes.subarray(at, at + CHUNK));
+    }
+    return btoa(binary);
+  }
+
+  function reportProblems(problems: string[]) {
+    if (problems.length === 0) return;
+    toast("warn", "Some of that could not be attached", problems.join("\n"));
+  }
+
+  /** Type the paths into the session, the same way typing would. */
+  function insertPaths(paths: string[]) {
+    const current = project();
+    if (!current || paths.length === 0) return;
+    // A trailing space so typing carries on after it, and no quoting: this goes into the CLI's
+    // input box, not into a shell.
+    void api
+      .writeToSession(current.id, `${paths.join(" ")} `)
+      .catch((error) => toast("error", "Could not type the path", describeError(error)));
+  }
+
+  /**
+   * Put clipboard files inside the sandbox and type where they went.
+   *
+   * A pasted image arrives with no path of its own -- the webview hands over bytes and a
+   * guess at a name -- so the bytes are copied in through the app, which is the only thing here
+   * that talks to Docker. The path typed back is the sandbox's, because that is what the CLI
+   * and the agent can read.
+   */
+  async function attachFiles(files: File[]) {
+    const current = project();
+    if (!current || attaching()) return;
+    setAttaching(true);
+    const paths: string[] = [];
+    const problems: string[] = [];
+    try {
+      for (const file of files) {
+        const name = file.name || "pasted";
+        if (file.size > ATTACH_LIMIT_BYTES) {
+          problems.push(
+            `${name} is ${Math.round(file.size / (1024 * 1024))} MB; the limit is ${
+              ATTACH_LIMIT_BYTES / (1024 * 1024)
+            } MB.`,
+          );
+          continue;
+        }
+        try {
+          const view = await api.attachBytes(current.id, name, await fileToBase64(file));
+          paths.push(...view.paths);
+          problems.push(...view.problems);
+        } catch (error) {
+          problems.push(describeError(error));
+        }
+      }
+      insertPaths(paths);
+      reportProblems(problems);
+    } finally {
+      setAttaching(false);
+    }
+  }
+
+  /** Attach dropped paths: what the sandbox can already see is named, the rest is copied in. */
+  async function attachDroppedPaths(paths: string[]) {
+    const current = project();
+    if (!current || paths.length === 0 || attaching()) return;
+    setAttaching(true);
+    try {
+      const view = await api.attachPaths(current.id, paths);
+      insertPaths(view.paths);
+      reportProblems(view.problems);
+    } catch (error) {
+      toast("error", "Could not attach that", describeError(error));
+    } finally {
+      setAttaching(false);
+    }
+  }
+
   return (
     <div class="panel-flush">
-      <div class="terminal-wrap">
+      <div class="terminal-wrap" classList={{ "terminal-dropping": dropping() }}>
         <div class="terminal-host" ref={host} />
         <Show when={!project()?.running}>
           <div class="terminal-overlay">
@@ -213,6 +364,9 @@ export function TerminalPane() {
           </div>
         </Show>
       </div>
+      <Show when={dropping() || attaching()}>
+        <div class="terminal-drop-hint">{attaching() ? "Attaching…" : "Drop to attach"}</div>
+      </Show>
       <Show when={project()?.running}>
         <div class="queue-note">
           <span>

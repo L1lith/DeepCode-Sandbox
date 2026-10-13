@@ -158,6 +158,14 @@ export interface EffortOption {
   description: string;
 }
 
+/** What came of attaching files pasted or dropped into the terminal. */
+export interface AttachmentView {
+  /** Paths, inside the sandbox, to type into the terminal. */
+  paths: string[];
+  /** What could not be attached, each with its reason. */
+  problems: string[];
+}
+
 /** One model the configured API offers. */
 export interface ModelChoice {
   /** What goes into `MODEL`, and therefore what the sandbox runs. */

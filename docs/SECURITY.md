@@ -351,6 +351,11 @@ and container names, paths, Docker availability, errors, and the panic that ende
 contains no API keys, tokens or secret values -- the traced messages carry identifiers and
 error text, not credentials -- and it is the file to send when something fails silently.
 
+Files you paste or drop into the terminal are read by the app and copied into the *sandbox*
+(its own `~/.deepcode/attachments`), never into your repository, and only because you asked. The
+window never sees those bytes as anything but a transport: it reads them from the clipboard,
+hands them to the app, and types back the path inside the sandbox that the agent can read.
+
 Listings the app makes on your behalf -- asking the configured API which models it offers, and
 the update check -- are made by the app process with your credentials, never by the window,
 which receives ids and names and no key at all. The model list is cached in memory keyed by a
@@ -372,7 +377,7 @@ survives being clicked, closed, or the window going away.
 Everything above is asserted by tests you can run:
 
 ```bash
-cargo test -p deepsand-core                   # 347 core tests, including the seccomp, allowlist and durability claims
+cargo test -p deepsand-core                   # 350 core tests, including the seccomp, allowlist and durability claims
 node runtime/scripts/test-mcp-bridge.mjs      # 55 checks: the permission protocol end to end
 cargo test -p deepsand-core --test runtime_dockerfile   # claims about the image build, no Docker needed
 ```
@@ -416,6 +421,10 @@ The most load-bearing ones:
 | `an_empty_rolling_backup_does_not_hide_a_set_aside_copy` | an empty fallback cannot stand in for a copy that has projects |
 | `a_substitute_store_never_overwrites_the_rolling_backup` | an unreadable configuration cannot cost you the last good copy |
 | `a_projects_own_model_wins_and_having_none_defers_to_configuration` | choosing a model is per project, and clearing it goes back to the configured one |
+| `every_way_the_list_can_fail_says_what_to_do_about_it` | no enumeration, a refused key, rate limiting and an API's own error each get words that say what to do |
+| `a_key_quoted_back_by_the_api_does_not_reach_the_message` | an API that quotes the key it refused cannot put it in the window or the log |
+| `an_edit_of_the_same_length_is_still_a_change` | the settings watcher notices what a timestamp and a length do not |
+| `deleting_the_file_is_a_change` | deferring to a configuration that is gone is a change too |
 | `the_endpoint_is_joined_the_way_the_configured_base_needs` | the model list is asked for at a URL the configured base actually serves |
 | `a_real_reply_yields_the_names_and_the_ids` | the API's own reply is read as names and ids, rather than guessed at |
 | `a_state_lost_with_its_backup_comes_back_from_a_dated_copy` | the live file and its rotation both gone, and the projects still return |
