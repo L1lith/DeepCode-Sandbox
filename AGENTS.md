@@ -24,7 +24,7 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 351 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 352 tests |
 | `npm run app:test` | `cargo test -p deepsand-app` — the app crate's own tests, including the zombie guard. Part of `npm test`: it was not, and tests that never run are decoration |
 | `npm run core:check` | `cargo check --workspace` |
 | `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |
@@ -257,6 +257,12 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   install -g` behind a connection that had stopped answering left an operator with a build that
   had simply stopped, and no way back except closing the app. npm's own fetch timeouts are
   bounded in the Dockerfile as well, so the common case fails in a minute instead of never.
+  **The watchdog never `join`s**: it polls `try_wait` and leaves when the child is gone. Joining
+  it was the first version, and it meant a build that had *finished* waited for the watchdog to
+  notice the silence that followed it -- ten minutes of a progress bar frozen on the last step,
+  which is precisely what the watchdog was written to prevent. A stop is the operator's to ask
+  for as well: `cancel_build` finds the build by tag in `LIVE_BUILDS` and ends it, and the
+  failure says it was stopped rather than broken.
 * **Nothing this app starts outlives it.** Windows does not end a child when its parent exits,
   and `std::process::exit` in the shutdown path abandons whatever is still running: a hung
   `docker build` was found an hour and a half after the app had gone, still holding the image

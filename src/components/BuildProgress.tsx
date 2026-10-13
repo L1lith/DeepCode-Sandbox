@@ -10,10 +10,12 @@
  * bar that never moves looks like a hang.
  */
 
-import { createMemo, Show } from "solid-js";
-import { store } from "../store";
+import { createMemo, createSignal, Show } from "solid-js";
+import { cancelBuild, store } from "../store";
 
 export function BuildProgress() {
+  /** Only to stop a second click landing while the first is being answered. */
+  const [stopping, setStopping] = createSignal(false);
   const percent = createMemo(() => {
     const progress = store.buildProgress;
     if (!progress || progress.total === 0) return null;
@@ -67,6 +69,18 @@ export function BuildProgress() {
             )}
           </Show>
           <span class="build-bar-latest mono">{latest()}</span>
+          {/* A build can take minutes and can stall, and the only other way out of a stalled
+              one is to close the app. */}
+          <button
+            class="btn btn-sm build-bar-stop"
+            disabled={stopping()}
+            onClick={() => {
+              setStopping(true);
+              void cancelBuild().finally(() => setStopping(false));
+            }}
+          >
+            Stop build
+          </button>
         </div>
       </div>
     </Show>

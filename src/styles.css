@@ -892,6 +892,11 @@ pre.output {
   pointer-events: none;
 }
 
+/* The build bar's stop button: at the end of the line it belongs to. */
+.build-bar-stop {
+  margin-left: auto;
+}
+
 .effort {
   display: flex;
   align-items: center;

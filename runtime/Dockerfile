@@ -249,26 +249,31 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       apt-get install -y --no-install-recommends nodejs; \
     fi; \
     if [ -n "$APT_PACKAGES" ]; then \
+      echo "deepsand: apt-get install $APT_PACKAGES"; \
       apt-get update; \
       apt-get install -y --no-install-recommends $APT_PACKAGES; \
     fi; \
     if [ "$WITH_GO" = "1" ]; then \
+      echo "deepsand: apt-get install golang-go"; \
       apt-get update; \
       apt-get install -y --no-install-recommends golang-go; \
     fi; \
     if [ -n "$NPM_GLOBALS" ]; then \
       for pkg in $NPM_GLOBALS; do \
+        echo "deepsand: npm install -g $pkg"; \
         npm install -g --no-fund --no-audit --fetch-retries=2 --fetch-timeout=60000 --fetch-retry-maxtimeout=30000 "$pkg@latest"; \
       done; \
     fi; \
     if [ "$WITH_RUSTUP" = "1" ]; then \
       export RUSTUP_HOME=/home/deepcode/.rustup CARGO_HOME=/home/deepcode/.cargo; \
       if ! command -v cargo >/dev/null 2>&1; then \
+        echo "deepsand: installing rustup"; \
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
           | sh -s -- -y --no-modify-path --profile minimal; \
       fi; \
     fi; \
     if [ -n "$CARGO_INSTALLS" ]; then \
+      echo "deepsand: cargo install $CARGO_INSTALLS"; \
       # A minimal C toolchain. `cargo install` links its output and fails with
       # "linker `cc` not found" without one, and the default tool set includes a
       # cargo-installed program -- so without this the default image could not be

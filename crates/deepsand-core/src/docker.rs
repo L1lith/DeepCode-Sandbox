@@ -286,13 +286,35 @@ impl Docker {
         let child = std::sync::Arc::new(std::sync::Mutex::new(child));
         let child_for_watchdog = std::sync::Arc::clone(&child);
 
+        // Whether the build ended because it went quiet, and whether someone asked for it to
+        // stop. Both are read after the wait, to say which happened.
+        let stopped_for_silence = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let registered_pid = child
+            .lock()
+            .map(|child| child.id())
+            .map_err(|_| SandboxError::policy("the build's handle was lost"))?;
+        register_build(tag, registered_pid, &cancelled);
+
         // A build that stops talking is not going to finish. The readers below block on the
         // pipe, so nothing but the process ending can interrupt them -- and the app's own budget
-        // for a build is half an hour, which is a long time to watch nothing happen. Silence
-        // rather than elapsed time, because every step that takes minutes prints as it goes.
+        // for a build is half an hour, which is a long time to watch nothing happen.
+        //
+        // The first thing this checks is whether there is still a build to watch. It used to
+        // `join()` instead, which meant a build that had *finished* still waited for the
+        // watchdog to notice the silence that followed it -- ten minutes of a progress bar
+        // frozen on the last step, which is exactly what it was written to prevent.
+        let silence_flag = std::sync::Arc::clone(&stopped_for_silence);
         let watchdog = std::thread::spawn(move || {
             loop {
-                std::thread::sleep(std::time::Duration::from_secs(15));
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                let still_running = match child_for_watchdog.lock() {
+                    Ok(mut child) => matches!(child.try_wait(), Ok(None)),
+                    Err(_) => false,
+                };
+                if !still_running {
+                    return;
+                }
                 let quiet = quiet_for_watchdog
                     .lock()
                     .map(|since| since.elapsed())
@@ -305,10 +327,11 @@ impl Docker {
                     "the build has produced no output for {}s; stopping it",
                     quiet.as_secs()
                 );
+                silence_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 if let Ok(mut child) = child_for_watchdog.lock() {
                     let _ = child.kill();
                 }
-                return true;
+                return;
             }
         });
 
@@ -367,16 +390,32 @@ impl Docker {
             .lock()
             .map_err(|_| SandboxError::policy("the build's handle was lost"))?
             .wait()?;
-        // The watchdog returns true only when it ended the build itself.
-        let stopped_for_silence = watchdog.join().unwrap_or(false);
-        if stopped_for_silence {
-            // A fact rather than a diagnosis: it produced nothing for ten minutes, so it was
+        unregister_build(tag);
+        // The watchdog is left to notice that the build it was watching is over; joining it
+        // here would block this build on the *next* thing the watchdog checks, which is how a
+        // finished build sat for ten minutes with its progress bar frozen.
+        drop(watchdog);
+
+        let was_cancelled = cancelled.load(std::sync::atomic::Ordering::SeqCst);
+        if was_cancelled {
+            return Err(SandboxError::Docker {
+                command: format!("docker build -t {tag} {}", context.display()),
+                stderr: format!(
+                    "the build was stopped. Nothing is wrong with the image files, and starting \
+                     it again carries on from the steps that had already finished.\n\n{}",
+                    describe_build_failure(&tail)
+                ),
+            });
+        }
+        if stopped_for_silence.load(std::sync::atomic::Ordering::SeqCst) {
+            // A fact rather than a diagnosis: it produced nothing for the limit, so it was
             // stopped. Whatever it did say is in the log and in the tail below.
             return Err(SandboxError::Docker {
                 command: format!("docker build -t {tag} {}", context.display()),
                 stderr: format!(
                     "the build produced no output for {} minutes, so it was stopped. Its output \
-                     up to that point is in the build log.\n\n{}",
+                     up to that point is in the build log. The step it was on is the last line \
+                     of it, and starting the build again resumes from the steps that finished.\n\n{}",
                     BUILD_SILENCE_LIMIT.as_secs() / 60,
                     describe_build_failure(&tail)
                 ),
@@ -887,6 +926,67 @@ pub fn parse_info(json: &str) -> (String, String) {
 /// was to close the app and kill the `docker build` it had left behind.
 pub const BUILD_SILENCE_LIMIT: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// The builds running in this process, so one can be stopped from outside.
+///
+/// Keyed by image tag, because that is what everything else names a build by: the Activity tab's
+/// progress, the Run that is waiting on it, and the button that wants it to stop. The flag is
+/// how a cancelled build knows to say it was cancelled rather than looking like one that broke
+/// on its own.
+type LiveBuild = (
+    String,
+    u32,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+);
+
+static LIVE_BUILDS: std::sync::Mutex<Vec<LiveBuild>> = std::sync::Mutex::new(Vec::new());
+
+fn register_build(tag: &str, pid: u32, cancelled: &std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    let mut builds = LIVE_BUILDS.lock().unwrap_or_else(|p| p.into_inner());
+    builds.retain(|(name, _, _)| name != tag);
+    builds.push((tag.to_string(), pid, std::sync::Arc::clone(cancelled)));
+}
+
+fn unregister_build(tag: &str) {
+    let mut builds = LIVE_BUILDS.lock().unwrap_or_else(|p| p.into_inner());
+    builds.retain(|(name, _, _)| name != tag);
+}
+
+/// Stop the build of `tag`, if one is running. Returns whether there was one.
+///
+/// The kill is the `docker` client and its children: BuildKit does its own work in the daemon,
+/// but it stops when the client that asked for it goes away, and the client is what the app
+/// started and can reach.
+pub fn cancel_build(tag: &str) -> bool {
+    let found = {
+        let builds = LIVE_BUILDS.lock().unwrap_or_else(|p| p.into_inner());
+        builds
+            .iter()
+            .find(|(name, _, _)| name == tag)
+            .map(|(_, pid, cancelled)| {
+                cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                *pid
+            })
+    };
+    match found {
+        Some(pid) => {
+            tracing::warn!(pid, tag, "a build was cancelled");
+            kill_process_tree(pid);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Whether anything is being built right now.
+pub fn builds_in_flight() -> Vec<String> {
+    LIVE_BUILDS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .map(|(tag, _, _)| tag.clone())
+        .collect()
+}
+
 /// Whether a build that has been silent this long should be stopped.
 ///
 /// Split out from the watchdog that applies it so the rule can be read, and tested, without
@@ -1283,6 +1383,47 @@ mod build_watchdog_tests {
         // Long enough that a slow `cargo install` or a cold apt mirror is not mistaken for a
         // hang, which is the failure mode of a watchdog set too tight.
         assert!(BUILD_SILENCE_LIMIT >= Duration::from_secs(5 * 60));
+    }
+
+    /// A cancel has to actually stop something. This spawns a real process, registers it the way
+    /// a build registers itself, and checks that cancelling ends it and marks it -- the
+    /// alternative is a button that reports success while the build carries on.
+    #[test]
+    fn cancelling_a_build_stops_the_process_it_was_told_about() {
+        let tag = format!("deepsand/runtime:cancel-test-{}", crate::now_ms());
+        #[cfg(windows)]
+        let spawned = std::process::Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1 > NUL"])
+            .spawn();
+        #[cfg(not(windows))]
+        let spawned = std::process::Command::new("sleep").arg("30").spawn();
+        let mut child = spawned.expect("a process to cancel");
+
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        register_build(&tag, child.id(), &cancelled);
+        assert!(builds_in_flight().contains(&tag), "a build is in flight");
+
+        assert!(cancel_build(&tag), "the registered build is found");
+        assert!(
+            cancelled.load(std::sync::atomic::Ordering::SeqCst),
+            "and is marked cancelled, so its failure can say so"
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut exited = false;
+        while std::time::Instant::now() < deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(exited, "the process was stopped");
+        let _ = child.kill();
+
+        unregister_build(&tag);
+        assert!(!cancel_build(&tag), "nothing to cancel is not a failure");
+        assert!(!builds_in_flight().contains(&tag));
     }
 }
 

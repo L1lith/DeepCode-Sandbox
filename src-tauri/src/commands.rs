@@ -2560,6 +2560,34 @@ pub fn set_effort(
 }
 
 /* ------------------------------------------------------------------------- */
+/* Cancelling a build                                                        */
+/* ------------------------------------------------------------------------- */
+
+/// Stop a build that is running.
+///
+/// The operator's own control: installing tools takes minutes and can stall, and until now the
+/// only way out of a stalled build was to close the app -- which, before `terminate_our_clients`,
+/// left the build running behind it. Passing no image stops whatever is being built.
+pub fn cancel_build_impl(image: Option<String>) -> CmdResult<Vec<String>> {
+    let targets = match image {
+        Some(image) => vec![image],
+        None => deepsand_core::docker::builds_in_flight(),
+    };
+    let mut stopped = Vec::new();
+    for tag in targets {
+        if deepsand_core::docker::cancel_build(&tag) {
+            stopped.push(tag);
+        }
+    }
+    Ok(stopped)
+}
+
+#[tauri::command]
+pub fn cancel_build(image: Option<String>) -> CmdResult<Vec<String>> {
+    cancel_build_impl(image)
+}
+
+/* ------------------------------------------------------------------------- */
 /* Attachments                                                               */
 /* ------------------------------------------------------------------------- */
 

@@ -13,6 +13,7 @@ import { baseName } from "./lib/format";
 import { networkLabel } from "./lib/types";
 import {
   bootstrap,
+  cancelBuild,
   describeError,
   refreshProjectData,
   selectProject,
@@ -243,6 +244,13 @@ export default function App() {
                       </span>
                     </Show>
                     <div class="header-actions">
+                      {/* While tools are being installed there is no session to stop, but there
+                          is a build to stop, and this is where an operator looks for it. */}
+                      <Show when={store.building}>
+                        <button class="btn" onClick={() => void cancelBuild()}>
+                          Stop build
+                        </button>
+                      </Show>
                       {/* The model comes before the thinking intensity: it decides what is
                           doing the thinking. */}
                       <ModelSelect />

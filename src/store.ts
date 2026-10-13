@@ -252,6 +252,27 @@ export async function refreshSettings() {
 }
 
 /**
+ * Ask the build that is running to stop.
+ *
+ * The build's own verdict arrives through the usual events -- the failure says it was stopped
+ * rather than reporting a break -- so this only has to send the request and say what happened
+ * to it. Both the header and the progress bar call this, so there is one implementation of the
+ * decision and two places to make it from.
+ */
+export async function cancelBuild() {
+  try {
+    const stopped = await api.cancelBuild(store.buildImage);
+    if (stopped.length > 0) {
+      toast("info", "Stopping the build", "Its output so far is in the Activity tab.");
+    } else {
+      toast("warn", "Nothing to stop", "No build is running now.");
+    }
+  } catch (error) {
+    toast("error", "Could not stop the build", describeError(error));
+  }
+}
+
+/**
  * How long an operation on a session may stay "in flight" before the button is let go.
  *
  * A first Run builds an image, which takes minutes, so this is not a timeout on the work --

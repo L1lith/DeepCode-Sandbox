@@ -214,6 +214,11 @@ export function onUpdateProgress(handler: (payload: UpdateProgress) => void): Pr
 export const previewPlan = (projectId: string) => call<PlanPreview>("preview_plan", { projectId });
 export const sessionStatus = (projectId: string) =>
   call<SessionStatus>("session_status", { projectId });
+/* --- builds --------------------------------------------------------------- */
+
+/** Stop a build. With no image, whatever is being built. Returns what was stopped. */
+export const cancelBuild = (image: string | null) => call<string[]>("cancel_build", { image });
+
 /* --- attachments: what is pasted or dropped into the terminal --------------- */
 
 export const attachPaths = (projectId: string, paths: string[]) =>

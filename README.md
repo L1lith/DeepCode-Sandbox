@@ -229,7 +229,7 @@ desktop app and the headless CLI cannot behave differently.
 
 ```bash
 npm run app:dev              # app with hot reload
-npm run core:test            # 351 core tests: paths, policy, broker, proxy, credentials, seccomp, durability
+npm run core:test            # 352 core tests: paths, policy, broker, proxy, credentials, seccomp, durability
 npm run app:test             # 12 tests in the app crate: the zombie guard, and the log file
 npm run test:bridge          # 55 checks: the permission protocol end to end
 npm test                     # both suites
@@ -285,7 +285,9 @@ the live file, then its rolling backup, then a dated copy, then anything it prev
 aside. It only ever tells you about a copy it actually used.
 
 A build that stops producing output for ten minutes is stopped and reported, rather than left
-running until you close the app. That is a limit on *silence*, not on how long a build may take:
+running until you close the app -- and there is a **Stop build** button while one is running, in
+the header and on the progress bar, so you do not have to wait for that. Stopping is safe:
+finished steps are kept, so starting again carries on from where it stopped. That is a limit on *silence*, not on how long a build may take:
 apt, npm and cargo all print as they go, so a build that has said nothing for ten minutes is not
 one that is about to finish. Closing Deepsand also ends any `docker` command it started, so a
 stuck build cannot hold the image tag the next one needs.

@@ -392,6 +392,7 @@ pub fn run() {
             commands::set_project_tools,
             commands::get_effort,
             commands::get_model,
+            commands::cancel_build,
             commands::attach_paths,
             commands::attach_bytes,
             commands::set_model,
