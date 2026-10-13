@@ -43,6 +43,15 @@ pub enum SandboxError {
     #[error("the state file {path} could not be read: {message}")]
     StateUnreadable { path: PathBuf, message: String },
 
+    /// JSON that this build cannot map onto its own shape, which means another version of
+    /// Deepsand wrote it.
+    ///
+    /// Distinct from `StateCorrupt` for the same reason `StateUnreadable` is: the file is
+    /// intact and is probably the only copy of what it says, so it must be reported rather
+    /// than replaced.
+    #[error("the state file {path} was written by a different version of Deepsand: {message}")]
+    StateIncompatible { path: PathBuf, message: String },
+
     #[error("permission broker: {0}")]
     Broker(String),
 

@@ -62,10 +62,22 @@ pub enum NetworkPolicy {
     Internet,
     /// Only DNS, the model endpoint, and what the allowlist names are reachable.
     ///
-    /// Stored as `allowlisted`. `restricted` is the name this mode had before the
-    /// allowlist could express addresses and ports, and it is still accepted on load so
-    /// that existing projects keep their mode; the next save rewrites it.
-    #[serde(alias = "restricted")]
+    /// **Written to disk as `restricted`**, the name this mode had before the allowlist
+    /// could express addresses and ports. Reading accepts both names; writing uses the
+    /// older one, deliberately.
+    ///
+    /// The reason is a real data loss, twice over. The state file lives in a directory
+    /// shared by the installed app and any development build, and an older build cannot
+    /// read a variant it has never heard of: it reports the *whole file* as corrupt, sets
+    /// it aside, and starts with an empty project list -- five projects, in the incident
+    /// that led here. Keeping the on-disk name at the older of the two means every build
+    /// in circulation can read what this one writes. `allowlisted` is what the mode is
+    /// called everywhere a person reads it: the UI, the plan preview, and the snapshot
+    /// the bridge is handed.
+    ///
+    /// So changing this name again means either reading the new one as well (an alias, as
+    /// here) or waiting until no build that predates it is installed anywhere.
+    #[serde(rename = "restricted", alias = "allowlisted")]
     Allowlisted {
         #[serde(default)]
         allow: Vec<String>,
@@ -1058,31 +1070,47 @@ mod reasoning_effort_tests {
 
 /// The network mode was called `restricted` before the allowlist could express
 /// addresses and ports. The rename is a pure name change, so the migration *is* the
-/// serde alias: an existing state file keeps working untouched, and the next save
-/// writes the new spelling. These two tests are what make that a fact rather than a
-/// hope, because a state file that no longer loads is an operator's projects gone.
+/// serde aliases: both spellings of the mode load, and the older one is what gets written
+/// so that every build in circulation can read the file. These tests are what make that a
+/// fact rather than a hope, because a state file that no longer loads is an operator's
+/// projects gone.
 #[cfg(test)]
 mod network_policy_tests {
     use super::*;
 
+    /// Both spellings are read; the **older** one is written.
+    ///
+    /// The rename was meant to normalise the file on the next save, and that is the one
+    /// thing it must not do. A build that predates the rename cannot read `allowlisted`,
+    /// and a file it cannot read is a file it reports as corrupt: it is set aside, and the
+    /// app starts with an empty project list. That happened twice, to five projects, with
+    /// the installed app and a development build sharing one data directory.
+    ///
+    /// Writing the older name is what makes every build in circulation able to read what
+    /// this one writes. `allowlisted` stays the name people see.
     #[test]
-    fn the_old_mode_name_still_loads_and_the_new_one_is_what_gets_written() {
-        let old: NetworkPolicy =
+    fn both_mode_names_are_read_and_the_older_one_is_written() {
+        let from_old: NetworkPolicy =
             serde_json::from_str(r#"{"mode":"restricted","allow":["registry.npmjs.org"]}"#)
                 .expect("a state file written before the rename must still load");
-        assert_eq!(old.mode_str(), "allowlisted");
-        assert_eq!(old.allowlist(), ["registry.npmjs.org"]);
+        assert_eq!(from_old.mode_str(), "allowlisted");
+        assert_eq!(from_old.allowlist(), ["registry.npmjs.org"]);
 
-        let written = serde_json::to_string(&old).unwrap();
-        assert!(written.contains(r#""mode":"allowlisted""#), "{written}");
+        // The newer spelling still loads, so a file this build wrote until now keeps its
+        // mode instead of being rejected as an unknown variant.
+        let from_new: NetworkPolicy =
+            serde_json::from_str(r#"{"mode":"allowlisted","allow":["registry.npmjs.org"]}"#)
+                .expect("a file using the newer spelling must still load");
+        assert_eq!(from_new, from_old);
+
+        // And what gets written is the spelling an older build understands.
+        let written = serde_json::to_string(&from_old).unwrap();
+        assert!(written.contains(r#""mode":"restricted""#), "{written}");
         assert!(
-            !written.contains("restricted"),
-            "the next save should normalise the name away: {written}"
+            !written.contains("allowlisted"),
+            "an older build must be able to read this: {written}"
         );
-
-        // And the new spelling round-trips to the same value.
-        let reloaded: NetworkPolicy = serde_json::from_str(&written).unwrap();
-        assert_eq!(reloaded, old);
+        assert_eq!(serde_json::from_str::<NetworkPolicy>(&written).unwrap(), from_old);
     }
 
     #[test]

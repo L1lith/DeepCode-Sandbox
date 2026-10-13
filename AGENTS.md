@@ -24,7 +24,7 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 301 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 303 tests |
 | `npm run core:check` | `cargo check --workspace` |
 | `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |
 | `npm test` | the two suites above, in order |
@@ -127,21 +127,33 @@ These are load-bearing. Breaking one is how this project gets a CVE.
     no projects left. All four are asserted in `store::durability_tests`; a replay
     against a real data directory is what caught the empty-backup case, so run the
     tests against real data when the failure being fixed was real.
-14. **`reference/` is never committed, vendored or bundled.** Upstream DeepCode CLI
+14. **The state file must stay readable by older builds, because the installed app
+    and a development build share one data directory.** An older build cannot read a
+    serde variant or field it has never heard of, and it reports the whole file as
+    corrupt -- set aside, empty project list. That cost an operator five projects,
+    twice. So: widen the stored shape only additively, and where a name changes,
+    **write the older spelling** (`NetworkPolicy::Allowlisted` is stored as
+    `restricted` for exactly this reason) and accept both on load. A file that this
+    build cannot map is a version skew, not damage: `ReadOutcome::Incompatible`
+    reports it and leaves it alone, and a file whose `version` is newer than
+    `STATE_VERSION` is refused rather than loaded and silently downgraded on the
+    next save. And do not point newer tooling at the live data directory of an
+    older install -- `deepsandctl --data-dir` writes, and it rewrote this one.
+15. **`reference/` is never committed, vendored or bundled.** Upstream DeepCode CLI
     source is downloaded there read-only, and gitignored.
-15. **The update signing key never enters the repository, and its loss is
+16. **The update signing key never enters the repository, and its loss is
     permanent.** The private half lives in `~/.tauri/deepsand.key` and in the
     `TAURI_SIGNING_PRIVATE_KEY` secret; the public half is pinned in
     `src-tauri/tauri.conf.json`, which is what every installed copy verifies
     against. Whoever holds the private key can sign an update that all of them
     will install, and losing it means no installed copy can ever be updated.
     `.gitignore` covers `*.key` as a backstop, not as permission to be careless.
-16. **The three version fields move together** — `src-tauri/tauri.conf.json`,
+17. **The three version fields move together** — `src-tauri/tauri.conf.json`,
     `package.json`, and `version` in the workspace `Cargo.toml`. The release
     workflow fails early when they disagree, because a release whose manifest
     version is wrong tells every installed copy it is already up to date: a
     silent failure where nobody gets an error and nobody gets the update.
-17. **The updater is reachable only through our own two commands.** The plugin is
+18. **The updater is reachable only through our own two commands.** The plugin is
     initialised in Rust and the webview is not given `updater:*` — installing an
     update replaces the binary, which is the most powerful thing a frontend could
     ask for. The commands are absent from the remote command table on purpose: a

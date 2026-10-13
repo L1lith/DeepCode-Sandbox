@@ -104,6 +104,14 @@ impl Store {
                     message,
                 })
             }
+            // Written by a different version. Reported and left exactly where it is: the
+            // file is intact, and it is probably the only copy of what it says.
+            ReadOutcome::Incompatible(message) => {
+                return Err(SandboxError::StateIncompatible {
+                    path: state_path.clone(),
+                    message,
+                })
+            }
             ReadOutcome::Corrupt(message) => {
                 // Keep the file: it is worthless to the app but it may be salvageable by
                 // hand, and overwriting it would destroy that chance.
@@ -663,11 +671,43 @@ fn restict_permissions(dir: &Path) {
 ///   real data loss, not a theoretical one.
 /// * `Corrupt` means the bytes were read and could not be understood, which is what the
 ///   keep-aside path is for.
+/// * `Incompatible` means the bytes *are* JSON and this build cannot map them onto its own
+///   shape: an unknown variant, a missing field, a version from the future. That is a
+///   version skew, not damage, and it must not be destroyed either. The file is exactly
+///   what some other build of Deepsand wrote, and it is probably the only copy.
 enum ReadOutcome {
     Loaded(StoreDocument),
     Missing,
     Unreadable(String),
     Corrupt(String),
+    Incompatible(String),
+}
+
+/// Whether a parse failure looks like a file written by a different version of Deepsand
+/// rather than a damaged one.
+///
+/// A file from another version is JSON; it just says something this build does not know.
+/// serde reports that in a few recognisable ways, listed here. Anything else -- NULs, a
+/// truncated write, a stray byte -- is left to be handled as damage.
+fn is_version_skew(raw: &str, message: &str) -> bool {
+    if !raw.trim_start().starts_with('{') {
+        return false;
+    }
+    let markers = [
+        "unknown variant",
+        "missing field",
+        "invalid type",
+        "unknown field",
+    ];
+    if markers.iter().any(|marker| message.contains(marker)) {
+        return true;
+    }
+    // A version from the future is the same problem stated plainly.
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| value.get("version").and_then(|version| version.as_u64()))
+        .map(|version| version > STATE_VERSION as u64)
+        .unwrap_or(false)
 }
 
 /// Parse a state file.
@@ -685,9 +725,26 @@ fn read_state(path: &Path) -> ReadOutcome {
                 // The version is left as it was found: `migrate` needs it to tell an old
                 // file from a current one, and clobbering it here made every file look
                 // current.
-                return match serde_json::from_str(&raw) {
+                return match serde_json::from_str::<StoreDocument>(&raw) {
+                    // Parsed, but written by a newer build. Loading it would be worse than
+                    // refusing it: the fields this build does not know are dropped in
+                    // memory, and the next save writes them gone.
+                    Ok(doc) if doc.version > STATE_VERSION => ReadOutcome::Incompatible(format!(
+                        "it records version {}, and this build understands {STATE_VERSION}",
+                        doc.version
+                    )),
                     Ok(doc) => ReadOutcome::Loaded(doc),
-                    Err(err) => ReadOutcome::Corrupt(err.to_string()),
+                    Err(err) => {
+                        let message = err.to_string();
+                        // JSON that this build cannot map is a version skew, not damage,
+                        // and the two have different responses: a skew is reported and
+                        // left alone, damage is set aside.
+                        if is_version_skew(&raw, &message) {
+                            ReadOutcome::Incompatible(message)
+                        } else {
+                            ReadOutcome::Corrupt(message)
+                        }
+                    }
                 };
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return ReadOutcome::Missing,
@@ -894,6 +951,94 @@ mod durability_tests {
 
         let store = Store::load(&dir).expect("must rescue");
         assert_eq!(store.projects().len(), 4, "the richer copy must win");
+    }
+
+    /// The property that keeps a mixed-version installation working: what this build
+    /// writes, every build still in circulation can read.
+    ///
+    /// The mode was renamed from `restricted` to `allowlisted` everywhere a person reads
+    /// it, and the on-disk name deliberately stayed at the older one. A state file that
+    /// says `allowlisted` is unreadable to a build that predates the rename, and an
+    /// unreadable file was being treated as a corrupt one -- five projects, twice.
+    #[test]
+    fn an_older_build_can_read_what_this_one_writes() {
+        let dir = scratch("compatible-name");
+        let workspaces = dir.parent().unwrap().join(format!(
+            "{}-ws",
+            dir.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&workspaces).unwrap();
+
+        let mut store = Store::load(&dir).expect("store");
+        let project = store
+            .create_project("website", &workspaces.to_string_lossy())
+            .expect("project");
+        store
+            .project_mut(&project.id)
+            .expect("project")
+            .network = crate::model::NetworkPolicy::Allowlisted { allow: vec![] };
+        store.save().expect("save");
+
+        let written = std::fs::read_to_string(dir.join("state.json")).expect("read");
+        assert!(
+            written.contains("\"mode\": \"restricted\""),
+            "the on-disk name must stay at the one older builds know: {written}"
+        );
+        assert!(
+            !written.contains("\"allowlisted\""),
+            "the newer name must not reach the file while an older build may read it"
+        );
+
+        // And the newer spelling is still read, so a file written by a build that used
+        // it -- which is what this build did until now -- keeps its mode rather than
+        // being rejected as an unknown variant.
+        let newer_spelling = written.replace("\"restricted\"", "\"allowlisted\"");
+        assert!(newer_spelling.contains("allowlisted"));
+        let other = scratch("compatible-name-newer");
+        std::fs::write(other.join("state.json"), &newer_spelling).unwrap();
+        let read_back = Store::load(&other).expect("a file using the newer name must load");
+        assert_eq!(
+            read_back.project(&project.id).expect("project").network,
+            crate::model::NetworkPolicy::Allowlisted { allow: vec![] }
+        );
+
+        // And it still round-trips to the mode the operator chose.
+        let reloaded = Store::load(&dir).expect("reload");
+        assert_eq!(
+            reloaded.project(&project.id).expect("project").network,
+            crate::model::NetworkPolicy::Allowlisted { allow: vec![] },
+            "the mode must survive the older spelling"
+        );
+    }
+
+    /// A file from a different version is not a damaged file. It is reported and left
+    /// exactly where it is, because it is probably the only copy of what it says.
+    #[test]
+    fn a_state_file_from_a_newer_build_is_reported_and_left_alone() {
+        let donor = scratch("newer-donor");
+        let mut newer: serde_json::Value =
+            serde_json::from_str(&state_with_projects(&donor, 1)).expect("json");
+        newer["version"] = serde_json::json!(crate::model::STATE_VERSION + 7);
+        // Something this build has never heard of, as a future version would have.
+        newer["projects"][0]["network"] = serde_json::json!({ "mode": "some-future-mode" });
+
+        let dir = scratch("newer");
+        std::fs::write(
+            dir.join("state.json"),
+            serde_json::to_string_pretty(&newer).unwrap(),
+        )
+        .unwrap();
+
+        let err = Store::load(&dir).expect_err("a file from the future must not be loaded");
+        assert!(
+            matches!(err, SandboxError::StateIncompatible { .. }),
+            "expected StateIncompatible, got {err:?}"
+        );
+        assert!(dir.join("state.json").exists(), "the file must be left in place");
+        let set_aside = std::fs::read_dir(&dir).unwrap().flatten().any(|entry| {
+            entry.file_name().to_string_lossy().starts_with("state.corrupt-")
+        });
+        assert!(!set_aside, "a version skew must not be filed as corruption");
     }
 
     /// The case the replay against a real data directory found, which the tests above
