@@ -166,11 +166,20 @@ pub fn create_project_impl(state: &AppState, name: String, root_dir: String) -> 
 }
 
 #[tauri::command]
-pub fn update_project_settings(state: State<'_, AppState>, project_id: String, network: Option<NetworkPolicy>, limits: Option<ResourceLimits>, deepcode_mode: Option<DeepCodeMode>, notes: Option<String>, credentials: Option<Credentials>) -> CmdResult<ProjectView> {
-    update_project_settings_impl(&state, project_id, network, limits, deepcode_mode, notes, credentials)
+pub fn update_project_settings(state: State<'_, AppState>, project_id: String, network: Option<NetworkPolicy>, limits: Option<ResourceLimits>, deepcode_mode: Option<DeepCodeMode>, notes: Option<String>, credentials: Option<Credentials>, resume_on_launch: Option<bool>) -> CmdResult<ProjectView> {
+    update_project_settings_impl(
+        &state,
+        project_id,
+        network,
+        limits,
+        deepcode_mode,
+        notes,
+        credentials,
+        resume_on_launch,
+    )
 }
 
-pub fn update_project_settings_impl(state: &AppState, project_id: String, network: Option<NetworkPolicy>, limits: Option<ResourceLimits>, deepcode_mode: Option<DeepCodeMode>, notes: Option<String>, credentials: Option<Credentials>) -> CmdResult<ProjectView> {
+pub fn update_project_settings_impl(state: &AppState, project_id: String, network: Option<NetworkPolicy>, limits: Option<ResourceLimits>, deepcode_mode: Option<DeepCodeMode>, notes: Option<String>, credentials: Option<Credentials>, resume_on_launch: Option<bool>) -> CmdResult<ProjectView> {
 
     let mut store = store(&state);
     {
@@ -180,6 +189,9 @@ pub fn update_project_settings_impl(state: &AppState, project_id: String, networ
         }
         if let Some(limits) = limits {
             project.limits = limits;
+        }
+        if let Some(resume) = resume_on_launch {
+            project.resume_on_launch = resume;
         }
         if let Some(mode) = deepcode_mode {
             project.deepcode_mode = mode;
@@ -3908,6 +3920,33 @@ pub fn shutdown_cleanup(state: &AppState) {
         let store = store(state);
         store.projects().iter().map(|project| project.id.clone()).collect()
     };
+    // Which projects were running, recorded before anything is stopped: this is what the
+    // per-project "resume on application start" setting acts on, and this is the last moment that
+    // knows. Written for every project, changed or not, because a project stopped by hand this
+    // session has to be remembered as stopped.
+    {
+        let mut store = store(state);
+        let mut changed = false;
+        for project_id in &project_ids {
+            let running = state
+                .sessions
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains_key(project_id);
+            if let Ok(project) = store.project_mut(project_id) {
+                if project.was_running != running {
+                    project.was_running = running;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            if let Err(err) = store.save() {
+                tracing::warn!(%err, "could not record which projects were running");
+            }
+        }
+    }
+
     for project_id in project_ids {
         // Stops the PTY and removes the container by name.
         state.stop_session_internal(&project_id);

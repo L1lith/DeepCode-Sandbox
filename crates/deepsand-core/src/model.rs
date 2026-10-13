@@ -400,6 +400,20 @@ pub struct Project {
     pub requests_enabled: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
+    /// Start this project again when Deepsand starts, if it was running when it last ended.
+    ///
+    /// Off by default: a sandbox is a privilege and a resource, and coming back on its own is a
+    /// thing an operator asks for rather than something they discover. What it acts on is
+    /// `was_running` below, not "has a session volume" -- a project stopped by hand last week must
+    /// not come back because it once ran.
+    #[serde(default)]
+    pub resume_on_launch: bool,
+    /// Whether this project's session was live the last time the app ended.
+    ///
+    /// Written on shutdown, for every project, so that a project stopped by hand is remembered as
+    /// stopped. This is state rather than a setting, which is why nothing in the window writes it.
+    #[serde(default)]
+    pub was_running: bool,
 }
 
 impl Project {

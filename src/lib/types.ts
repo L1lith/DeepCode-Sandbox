@@ -270,6 +270,8 @@ export interface AppSettings {
 }
 
 export interface ProjectView {
+  /** Whether this project starts itself when Deepsand starts. */
+  resumeOnLaunch: boolean;
   id: string;
   name: string;
   slug: string;

@@ -433,6 +433,8 @@ fn migrate(state: &mut StoreDocument) {
             deepcode_mode: DeepCodeMode::AllowAll,
             allowed_roots: Vec::new(),
             requests_enabled: true,
+            resume_on_launch: false,
+            was_running: false,
             notes: String::new(),
             reasoning_effort: ReasoningEffort::default(),
             // `None` rather than the defaults spelled out, so a project keeps

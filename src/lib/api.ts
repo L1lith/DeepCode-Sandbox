@@ -166,6 +166,8 @@ export const createProject = (name: string, rootDir: string) =>
 export const deleteProject = (projectId: string) => call<void>("delete_project", { projectId });
 
 export interface ProjectUpdate {
+  /** Start this project again when Deepsand starts. */
+  resumeOnLaunch?: boolean;
   projectId: string;
   network?: NetworkPolicy | null;
   limits?: ResourceLimits | null;

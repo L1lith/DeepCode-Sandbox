@@ -362,6 +362,8 @@ mod tests {
             reasoning_effort: Default::default(),
             tools: None,
             requests_enabled: true,
+            resume_on_launch: false,
+            was_running: false,
             notes: String::new(),
         }
     }

@@ -230,6 +230,52 @@ pub fn run() {
             // Bring up any remote server that is configured to survive a restart.
             // Off by default, so this is normally a no-op; when it does run the
             // operator has asked for it explicitly.
+            // Projects marked to come back on their own. Docker gets a moment first, because a
+            // session cannot start without it and the daemon is often still coming up at login.
+            // `was_running` was written when the app last ended, for whatever was running then.
+            {
+                let handle = app.handle().clone();
+                let wanted: Vec<String> = {
+                    let state = tauri::Manager::state::<AppState>(app);
+                    let store = state.store.lock().unwrap_or_else(|p| p.into_inner());
+                    store
+                        .projects()
+                        .iter()
+                        .filter(|project| project.resume_on_launch && project.was_running)
+                        .map(|project| project.id.clone())
+                        .collect()
+                };
+                if !wanted.is_empty() {
+                    tracing::info!(?wanted, "starting the projects marked to resume");
+                    std::thread::spawn(move || {
+                        for _ in 0..30 {
+                            let ready = {
+                                let state = tauri::Manager::state::<AppState>(&handle);
+                                state.docker().is_ok()
+                            };
+                            if ready {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                        }
+                        for project_id in wanted {
+                            let state = tauri::Manager::state::<AppState>(&handle);
+                            let outcome = tauri::async_runtime::block_on(commands::start_session_impl(
+                                &handle,
+                                &state,
+                                project_id.clone(),
+                                Some(true),
+                                false,
+                            ));
+                            match outcome {
+                                Ok(_) => tracing::info!(project = %project_id, "resumed"),
+                                Err(err) => tracing::warn!(project = %project_id, %err, "could not resume"),
+                            }
+                        }
+                    });
+                }
+            }
+
             let should_start = {
                 let state = tauri::Manager::state::<AppState>(app);
                 let settings = state

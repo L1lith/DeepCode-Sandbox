@@ -673,6 +673,7 @@ async fn dispatch(
             optional(args, "deepcodeMode")?,
             optional(args, "notes")?,
             optional(args, "credentials")?,
+            optional(args, "resumeOnLaunch")?,
         )?),
         "set_requests_enabled" => to_value(commands::set_requests_enabled_impl(
             &app,

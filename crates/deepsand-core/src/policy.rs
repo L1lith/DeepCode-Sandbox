@@ -785,6 +785,8 @@ mod tests {
                 deepcode_mode: DeepCodeMode::AllowAll,
                 allowed_roots: vec![],
                 requests_enabled: true,
+                resume_on_launch: false,
+                was_running: false,
                 notes: String::new(),
                 reasoning_effort: Default::default(),
                 tools: None,
