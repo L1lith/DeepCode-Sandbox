@@ -93,8 +93,17 @@ pub fn read_record(data_dir: &Path) -> Option<Record> {
 }
 
 pub fn write_record(data_dir: &Path, record: &Record) {
-    if let Ok(raw) = serde_json::to_string(record) {
-        let _ = std::fs::write(record_path(data_dir), raw);
+    let Ok(raw) = serde_json::to_string(record) else {
+        return;
+    };
+    // Written beside the record and renamed over it, for the same reason the state file is:
+    // a beat interrupted halfway through would leave JSON that does not parse, which reads as
+    // "no idea who is running" -- and that is the answer that lets a second instance start
+    // while the first is still there. A torn beat must not be able to erase the evidence.
+    let path = record_path(data_dir);
+    let staging = path.with_extension("json.new");
+    if std::fs::write(&staging, raw.as_bytes()).is_ok() {
+        let _ = std::fs::rename(&staging, &path);
     }
 }
 
@@ -358,6 +367,29 @@ time.sleep(120)
             let _ = child.kill();
         }
         assert!(exited, "the zombie should have been terminated");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A crash can leave the staging file behind, and a torn write can leave the record
+    /// unreadable. Neither may be mistaken for a live instance's record, and neither may throw:
+    /// the answer to "who is running?" has to be "unknown", which is what the caller already
+    /// handles by deferring to the plugin.
+    #[test]
+    fn a_half_written_record_is_unknown_rather_than_an_answer() {
+        let dir = std::env::temp_dir().join(format!("deepsand-torn-{}", deepsand_core::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(record_path(&dir), "{\"pid\": 12").unwrap();
+        assert_eq!(read_record(&dir), None, "a torn record is not a record");
+        assert_eq!(decide(read_record(&dir).as_ref(), 999_999), Action::HandOff);
+
+        // The record is written beside itself and renamed, so a leftover staging file is not
+        // read as the record even when it looks like one.
+        std::fs::write(record_path(&dir).with_extension("json.new"), "{\"pid\": 7}").unwrap();
+        assert_eq!(read_record(&dir), None);
+
+        // And a beat replaces the record atomically.
+        write_record(&dir, &record(42, false));
+        assert_eq!(read_record(&dir), Some(record(42, false)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

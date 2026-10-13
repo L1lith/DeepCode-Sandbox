@@ -2879,12 +2879,13 @@ pub fn build_runtime_image_impl(
         // every line is flushed: the log's whole job is to survive the failure it describes.
         let log = std::sync::Mutex::new(open_build_log(&log_path, &image, &build_args));
 
+        // `flush` on a `File` is a no-op -- the bytes are already with the OS -- so the only
+        // thing that makes this durable is the sync before the outcome is announced, below.
         let write = |line: &str| {
             if let Ok(mut guard) = log.lock() {
                 if let Some(file) = guard.as_mut() {
                     use std::io::Write as _;
                     let _ = writeln!(file, "{line}");
-                    let _ = file.flush();
                 }
             }
         };
@@ -2984,6 +2985,14 @@ pub fn build_runtime_image_impl(
         // The image is no longer being built, whatever happened.
         end_build(&tauri::Manager::state::<AppState>(&app_handle), &image);
 
+        // Pushed to disk before the outcome is announced. The log's whole job is to be read
+        // after a failure -- including a failure that takes the machine with it -- and up to
+        // this point it has only reached the OS's cache.
+        if let Ok(guard) = log.lock() {
+            if let Some(file) = guard.as_ref() {
+                let _ = file.sync_data();
+            }
+        }
         let _ = app_handle.emit(
             events::BUILD_DONE,
             match result {

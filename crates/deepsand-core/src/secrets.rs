@@ -246,6 +246,14 @@ impl Secrets {
             SandboxError::policy(format!("could not write the secrets file: {err}"))
         })?;
         restrict(&staging);
+        // Contents before name. A rename is atomic but not durable on its own: without this,
+        // a crash can commit the name and lose the data, leaving a file of NULs at the right
+        // size -- which is exactly how this machine lost a Dockerfile, the state file and the
+        // tail of a log. Of everything here, secrets are the least recoverable: the file is
+        // encrypted, so a damaged one cannot be salvaged by reading it.
+        if let Ok(handle) = std::fs::OpenOptions::new().write(true).open(&staging) {
+            let _ = handle.sync_all();
+        }
         std::fs::rename(&staging, &self.path).map_err(|err| {
             SandboxError::policy(format!("could not replace the secrets file: {err}"))
         })?;

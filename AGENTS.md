@@ -24,7 +24,7 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 336 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 340 tests |
 | `npm run app:test` | `cargo test -p deepsand-app` — the app crate's own tests, including the zombie guard. Part of `npm test`: it was not, and tests that never run are decoration |
 | `npm run core:check` | `cargo check --workspace` |
 | `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |
@@ -229,6 +229,18 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   was kept forever: the probe runs once, after the window is ready, which is routinely while
   Docker Desktop is still starting. It is retried while the answer is no, and re-asked when the
   window takes focus. If you move a field out of a command, grep the frontend for it.
+* **Contents before name.** Anything that holds state is written to a sibling file, synced
+  with `sync_all`, and only then renamed over the real one. A rename is atomic but not durable
+  on its own: without the sync, a crash can commit the name and lose the data, which is how
+  this machine was left with an 18,412-byte `Dockerfile` of NULs and a `state.json` of them
+  twice. The build log is synced before its outcome is announced, because its job is to be read
+  after a failure -- including one that takes the machine with it.
+* **A reader treats a file with NUL bytes in it as damage, never as content.** That is the
+  shape this failure takes, and a reader that shows it is worse than one that shows nothing:
+  log lines, audit lines and runtime files are all filtered this way. `store.rs` keeps a dated
+  copy of the configuration once a day for the case where the live file *and* its rolling
+  backup go together, which one crash can do -- written only when there is a project worth
+  keeping, so an empty state cannot hold the day's slot.
 * **The runtime files are read from disk, so they are checked before they are used.** A
   machine that loses the contents of a write while keeping its size leaves a `Dockerfile` of
   NULs, and Docker's answer to that -- `dockerfile parse error on line 1: unknown instruction:`

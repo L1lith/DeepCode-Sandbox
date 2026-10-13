@@ -213,8 +213,8 @@ desktop app and the headless CLI cannot behave differently.
 
 ```bash
 npm run app:dev              # app with hot reload
-npm run core:test            # 336 core tests: paths, policy, broker, proxy, credentials, seccomp, durability
-npm run app:test             # 8 tests in the app crate: the zombie guard, and the log file
+npm run core:test            # 340 core tests: paths, policy, broker, proxy, credentials, seccomp, durability
+npm run app:test             # 9 tests in the app crate: the zombie guard, and the log file
 npm run test:bridge          # 55 checks: the permission protocol end to end
 npm test                     # both suites
 npm run core:check           # cargo check --workspace
@@ -262,6 +262,11 @@ request). That includes every error the window showed in a corner box, every com
 failed, and any panic. A Windows release build has no console, so this file is the only place
 those are readable after the fact — and the boxes themselves can be copied with the button in
 the corner, or selected directly.
+
+If your project list comes back smaller than you left it, the notice at the top says which file
+it was read from: Deepsand keeps a dated copy of its configuration once a day, and falls back to
+the live file, then its rolling backup, then a dated copy, then anything it previously set
+aside. It only ever tells you about a copy it actually used.
 
 If a runtime file is damaged — a crash can leave a file the right size and full of NULs — the
 next build repairs it from the copy inside the app and says which files it replaced, rather

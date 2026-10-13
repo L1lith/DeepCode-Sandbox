@@ -138,6 +138,21 @@ impl Store {
             }
         }
 
+        // Then the dated copies, newest first. Both the live file and its rolling backup can
+        // be lost to one crash, and this is what survives it: the state as of an earlier day,
+        // named in the notice so the operator can see how far back it goes.
+        if state.is_none() {
+            for (path, _) in snapshots(&data_dir) {
+                if let ReadOutcome::Loaded(parsed) = read_state(&path) {
+                    if !parsed.projects.is_empty() {
+                        recovered_from_salvage = Some(path);
+                        state = Some(parsed);
+                        break;
+                    }
+                }
+            }
+        }
+
         // Then the copies this app set aside as corrupt. Two rules, and the second one was
         // learned the hard way: on a real data directory, an *empty but valid* rolling
         // backup answered first and the rescue never ran, so the operator was shown an
@@ -185,7 +200,52 @@ impl Store {
             may_rotate_backup,
         };
         store.save()?;
+        store.snapshot_if_stale();
         Ok(store)
+    }
+
+    /// Keep a dated copy of the state, at most one a day, and the newest few of those.
+    ///
+    /// One rolling backup is not enough against the failure this machine produces: it lost the
+    /// contents of `state.json` twice, and one crash can catch a file and its rotation
+    /// together. This is what is left when both are gone -- the state as of some earlier day --
+    /// and the file is a few KB, written from the file that was just read successfully.
+    ///
+    /// Best effort by design: nothing here may stop the app from starting.
+    fn snapshot_if_stale(&self) {
+        const KEEP: usize = 5;
+        const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+        // Nothing worth keeping yet. A first run would otherwise fill the day's slot with an
+        // empty state, and the copy that matters -- taken once the operator has projects --
+        // would wait until tomorrow.
+        if self.state.projects.is_empty() {
+            return;
+        }
+
+        let existing = snapshots(&self.data_dir);
+        if let Some((_, newest)) = existing.first() {
+            let age = crate::now_ms() - *newest as i64;
+            if age < DAY_MS {
+                return;
+            }
+        }
+        let Ok(bytes) = std::fs::read(self.data_dir.join("state.json")) else {
+            return;
+        };
+        // An empty or NUL-filled file is exactly the thing this is protection against, and
+        // copying it would put the damage in the slot that is supposed to survive it.
+        if bytes.is_empty() || bytes.contains(&0) {
+            return;
+        }
+        let _ = std::fs::write(
+            snapshot_path(&self.data_dir, crate::now_ms().max(0) as u64),
+            bytes,
+        );
+        // Keep the newest KEEP including the one just written.
+        for (old, _) in existing.into_iter().skip(KEEP.saturating_sub(1)) {
+            let _ = std::fs::remove_file(old);
+        }
     }
 
     /// A store that opens without having read anything, for the case where the saved
@@ -615,7 +675,12 @@ fn migrate(state: &mut StoreDocument) {
         let Ok(raw) = std::fs::read_to_string(path) else {
             return Vec::new();
         };
-        let mut lines: Vec<String> = raw.lines().map(str::to_string).collect();
+        // Read as text: a torn write can leave a line of NULs, and this list is read by a
+        // person looking for what happened. It shows the lines that were written, or nothing.
+        let mut lines: Vec<String> = raw
+            .lines()
+            .filter_map(crate::docker::sanitize_output_line)
+            .collect();
         if lines.len() > limit {
             lines = lines.split_off(lines.len() - limit);
         }
@@ -629,6 +694,31 @@ fn migrate(state: &mut StoreDocument) {
             .map(|(k, v)| (k.clone(), v.len()))
             .collect()
     }
+}
+
+/// `state.snapshot-<epoch ms>.json`, the dated copies `Store::snapshot_if_stale` keeps.
+fn snapshot_path(data_dir: &Path, stamp: u64) -> PathBuf {
+    data_dir.join(format!("state.snapshot-{stamp}.json"))
+}
+
+/// Every dated copy in the directory, newest first.
+fn snapshots(data_dir: &Path) -> Vec<(PathBuf, u64)> {
+    let mut found: Vec<(PathBuf, u64)> = std::fs::read_dir(data_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let stamp = name
+                .strip_prefix("state.snapshot-")?
+                .strip_suffix(".json")?
+                .parse()
+                .ok()?;
+            Some((entry.path(), stamp))
+        })
+        .collect();
+    found.sort_by(|a, b| b.1.cmp(&a.1));
+    found
 }
 
 /// Best-effort tightening of the state directory so the grants file is not
@@ -1074,6 +1164,134 @@ mod durability_tests {
     /// A substitute store -- one built because nothing could be read -- must never
     /// promote its guess into the backup slot. That is the difference between "the app
     /// looks emptier than it should" and "the last good copy is gone".
+    /// A healthy load keeps a dated copy, and a second load while it is fresh does not add
+    /// another: the point is one a day, not one a start.
+    #[test]
+    fn a_healthy_load_keeps_a_dated_copy_and_does_not_add_another_while_it_is_fresh() {
+        let dir = scratch("snapshot-once");
+        let workspaces = dir.parent().unwrap().join(format!(
+            "{}-ws",
+            dir.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&workspaces).unwrap();
+
+        {
+            let mut store = Store::load(&dir).expect("first run");
+            store
+                .create_project("kept", &workspaces.to_string_lossy())
+                .expect("project");
+            store.save().expect("save");
+            store.snapshot_if_stale();
+        }
+        assert_eq!(snapshots(&dir).len(), 1, "one dated copy");
+
+        let _ = Store::load(&dir).expect("second load");
+        assert_eq!(
+            snapshots(&dir).len(),
+            1,
+            "still one: it is a day's copy, not a start's"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The case this exists for: the live file and the rolling backup are both gone, and the
+    /// dated copy is what brings the projects back.
+    #[test]
+    fn a_state_lost_with_its_backup_comes_back_from_a_dated_copy() {
+        let dir = scratch("snapshot-recovery");
+        let workspaces = dir.parent().unwrap().join(format!(
+            "{}-ws",
+            dir.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&workspaces).unwrap();
+        {
+            let mut store = Store::load(&dir).expect("first run");
+            // A first run keeps no dated copy: an empty one would hold the day's slot.
+            assert!(snapshots(&dir).is_empty(), "nothing worth keeping yet");
+            store
+                .create_project("kept", &workspaces.to_string_lossy())
+                .expect("a project to lose");
+            store.save().expect("save");
+            store.snapshot_if_stale();
+        }
+        assert_eq!(
+            snapshots(&dir).len(),
+            1,
+            "a dated copy of the state that has something in it"
+        );
+
+        // Now lose both the live file and its rotation, the way a crash does: right size, no
+        // contents.
+        for name in ["state.json", "state.json.bak"] {
+            let path = dir.join(name);
+            if let Ok(raw) = std::fs::read(&path) {
+                std::fs::write(&path, vec![0u8; raw.len()]).unwrap();
+            }
+        }
+
+        let recovered = Store::load(&dir).expect("a dated copy is enough");
+        assert_eq!(recovered.projects().len(), 1, "the project came back");
+        assert_eq!(recovered.projects()[0].name, "kept");
+        assert!(
+            recovered
+                .recovered_from_salvage()
+                .is_some_and(|path| path.file_name().unwrap().to_string_lossy().starts_with("state.snapshot-")),
+            "and the notice names the dated copy it used"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_dated_copies_are_pruned_to_the_newest_few() {
+        let dir = scratch("snapshot-prune");
+        let workspaces = dir.parent().unwrap().join(format!(
+            "{}-ws",
+            dir.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&workspaces).unwrap();
+        {
+            let mut store = Store::load(&dir).expect("first run");
+            store
+                .create_project("kept", &workspaces.to_string_lossy())
+                .expect("project");
+            store.save().expect("save");
+        }
+        // Seven copies, all older than a day: the next load writes one more and prunes.
+        for n in 1..=7u64 {
+            let stamp = (crate::now_ms().max(0) as u64).saturating_sub(n * 86_400_000);
+            std::fs::write(snapshot_path(&dir, stamp), "{}").unwrap();
+        }
+        let _ = Store::load(&dir).expect("a load with old copies");
+
+        let kept = snapshots(&dir);
+        assert!(kept.len() <= 5, "kept {} dated copies", kept.len());
+        assert!(
+            kept.iter().any(|(path, _)| std::fs::metadata(path).is_ok()),
+            "and the ones it kept are files"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An audit line that is not text is not shown. The same failure that filled a Dockerfile
+    /// with NULs can land in this file, and it is the one the operator reads to find out what
+    /// happened.
+    #[test]
+    fn an_audit_line_of_nuls_is_not_shown() {
+        let dir = std::env::temp_dir().join(format!("deepsand-audit-{}", crate::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::load(dir.clone()).expect("a store in an empty directory");
+        // The audit path is derived from the project id, so the file is all this needs.
+        let path = store.audit_log("p1");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, format!("granted read\n{}\n\n", "\0".repeat(4096))).unwrap();
+
+        let lines = store.read_audit("p1", 50);
+        assert_eq!(lines, vec!["granted read".to_string()], "got {lines:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_substitute_store_never_overwrites_the_rolling_backup() {
         let dir = scratch("substitute");
