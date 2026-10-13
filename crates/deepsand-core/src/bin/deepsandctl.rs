@@ -113,7 +113,7 @@ COMMANDS
   watch <project>               Be the permission broker: show and answer requests
   requests <project>            List requests currently waiting for a decision
   network <project> [mode]      Show or change the egress policy
-                                (none|internet|restricted|full)
+                                (none|internet|allowlisted|full)
 
 NOTES
   `run` and `watch` are meant to be used together in two terminals: `run`
@@ -879,7 +879,7 @@ fn cmd_network(data_dir: &Path, args: &[String]) -> Result<()> {
                 NetworkPolicy::Internet => {
                     println!("  public internet reachable; host, LAN, link-local and cloud metadata blocked")
                 }
-                NetworkPolicy::Restricted { allow } => {
+                NetworkPolicy::Allowlisted { allow } => {
                     println!("  only DNS and the Deepsand allowlist proxy are reachable");
                     for host in allow {
                         println!("    - {host}");
@@ -894,12 +894,12 @@ fn cmd_network(data_dir: &Path, args: &[String]) -> Result<()> {
                 "none" => NetworkPolicy::None,
                 "internet" => NetworkPolicy::Internet,
                 "full" => NetworkPolicy::Full,
-                "restricted" => NetworkPolicy::Restricted {
+                "restricted" | "allowlisted" => NetworkPolicy::Allowlisted {
                     allow: store.settings().egress_allowlist.clone(),
                 },
                 other => {
                     return Err(SandboxError::Other(anyhow::anyhow!(
-                        "unknown network mode '{other}'; expected none, internet, restricted or full"
+                        "unknown network mode '{other}'; expected none, internet, allowlisted or full"
                     )))
                 }
             };

@@ -154,9 +154,13 @@ const TOOLS = [
           type: "array",
           items: { type: "string" },
           description:
-            "One or more destinations. 'registry.npmjs.org' matches that host exactly. '*.example.com' matches its " +
-            "subdomains but not the apex. 'host/path' limits a host to paths under that prefix (plain HTTP only - a " +
-            "CONNECT tunnel carries no path). '!host' denies. Never '*'.",
+            "One or more destinations. 'registry.npmjs.org' matches that host exactly on any port, and " +
+            "'registry.npmjs.org:8443' matches only that port. '*.example.com' matches its subdomains but " +
+            "not the apex. 'host/path' limits a host to paths under that prefix (plain HTTP only - a " +
+            "CONNECT tunnel carries no path). An IP literal such as '192.168.1.50:5432' is reached " +
+            "directly, which is what a database or any non-HTTP client needs. '!host' denies. Never '*'. " +
+            "A hostname that resolves into local or private address space is refused even when allowed, " +
+            "and the refusal names the address to ask for instead - ask for the address, not the name.",
         },
         command: {
           type: "string",

@@ -1157,6 +1157,33 @@ pub fn resize_session_impl(state: &AppState, project_id: String, rows: u16, cols
 /* Permission broker                                                         */
 /* ------------------------------------------------------------------------- */
 
+/// A request the sandbox did not need to make, judged against the snapshot the sandbox
+/// itself reads.
+///
+/// `None` means the operator still decides: either the request is real, or it is one of
+/// the shapes `covered` deliberately declines to judge. Judging against the *snapshot*
+/// rather than against the store's own idea of the mounts matters — the question is
+/// what the sandbox can already see, and the snapshot is what it was told.
+fn already_covered_request(
+    app: &AppHandle,
+    project_id: &str,
+    request: &PermissionRequest,
+) -> Option<deepsand_core::covered::AlreadyCovered> {
+    let (project, grants) = {
+        let state = app.state::<AppState>();
+        let store = state.store.lock().ok()?;
+        (store.project(project_id).ok()?.clone(), store.grants(project_id))
+    };
+    let snapshot = container_settings::build_sandbox_snapshot(
+        &project,
+        &grants,
+        &project.network,
+        Vec::new(),
+        Vec::new(),
+    );
+    deepsand_core::covered::already_covered(request, Path::new(&project.root_dir), &snapshot)
+}
+
 fn request_view(state: &impl AsAppState, request: &PermissionRequest) -> PermissionRequestView {
     let project_name = store(state)
         .project(&request.project)
@@ -1303,7 +1330,7 @@ pub fn answer_request_impl(app: &AppHandle, state: &AppState, payload: DecisionP
             // operator believes is in force.
             let validation = allowlist::validate(&patterns);
             let in_allowlisted_mode =
-                matches!(guard.project(&request.project).map(|p| &p.network), Ok(NetworkPolicy::Restricted { .. }));
+                matches!(guard.project(&request.project).map(|p| &p.network), Ok(NetworkPolicy::Allowlisted { .. }));
 
             let refusal = if !validation.is_acceptable() {
                 Some(validation.problems.join("; "))
@@ -1341,13 +1368,13 @@ pub fn answer_request_impl(app: &AppHandle, state: &AppState, payload: DecisionP
             {
                 let project = guard.project_mut(&request.project).map_err(fail)?;
                 let mut entries = match &project.network {
-                    NetworkPolicy::Restricted { allow } => allow.clone(),
+                    NetworkPolicy::Allowlisted { allow } => allow.clone(),
                     _ => Vec::new(),
                 };
                 entries.extend(patterns.iter().cloned());
                 entries.sort();
                 entries.dedup();
-                project.network = NetworkPolicy::Restricted { allow: entries };
+                project.network = NetworkPolicy::Allowlisted { allow: entries };
             }
             guard.save().map_err(fail)?;
             guard.append_audit(
@@ -1628,6 +1655,36 @@ fn start_broker(app: &AppHandle, state: &AppState, project_id: &str) {
                             continue;
                         }
                         announced.insert(request.id.clone(), ());
+
+                        // Asking for something the sandbox already has is answered here
+                        // rather than shown: a prompt with nothing to decide trains the
+                        // operator to approve without reading. The bar is "certain", so
+                        // anything ambiguous still reaches them -- see `covered`.
+                        if let Some(covered) = already_covered_request(&app, &project_id, &request)
+                        {
+                            let _ = broker.answer(&PermissionResponse::deny(
+                                &request.id,
+                                &covered.message,
+                            ));
+                            broker.clear_request(&request.id);
+                            if let Ok(store) = app.state::<AppState>().store.lock() {
+                                store.append_audit(
+                                    &project_id,
+                                    &format!("DENY  {} (already covered: {})", request.kind.as_str(), request.id),
+                                );
+                            }
+                            let _ = app.emit(
+                                events::BROKER_RESOLVED,
+                                serde_json::json!({
+                                    "requestId": request.id,
+                                    "decision": "deny",
+                                    "auto": true,
+                                    "reason": covered.message,
+                                }),
+                            );
+                            continue;
+                        }
+
                         let view = request_view(&app.state::<AppState>(), &request);
                         app.state::<AppState>().register_request(request);
                         let _ = app.emit(events::BROKER_REQUEST, &view);
@@ -1737,7 +1794,7 @@ async fn refresh_proxies(state: &impl AsAppState) {
             .iter()
             .map(|(id, _)| {
                 let project_entries = match store.project(id).map(|project| &project.network) {
-                    Ok(NetworkPolicy::Restricted { allow }) => allow.clone(),
+                    Ok(NetworkPolicy::Allowlisted { allow }) => allow.clone(),
                     _ => Vec::new(),
                 };
                 let (merged, problems) = allowlist::effective(&global, &project_entries);
@@ -1763,12 +1820,12 @@ async fn refresh_proxies(state: &impl AsAppState) {
 /// restricted mode is returned untouched, since nothing consults its allowlist.
 fn with_effective_allowlist(project: &Project, app: &AppSettings) -> Project {
     let mut effective = project.clone();
-    if let NetworkPolicy::Restricted { allow } = &project.network {
+    if let NetworkPolicy::Allowlisted { allow } = &project.network {
         let (merged, problems) = allowlist::effective(&app.egress_allowlist, allow);
         for problem in &problems {
             tracing::warn!("allowlist entry ignored for project {}: {problem}", project.id);
         }
-        effective.network = NetworkPolicy::Restricted {
+        effective.network = NetworkPolicy::Allowlisted {
             allow: merged.to_entries(),
         };
     }
@@ -1778,10 +1835,10 @@ fn with_effective_allowlist(project: &Project, app: &AppSettings) -> Project {
 /// Build the view a UI renders for one project's allowlist.
 fn allowlist_view(project: &Project, global: &[String]) -> AllowlistView {
     let (project_entries, mode) = match &project.network {
-        NetworkPolicy::Restricted { allow } => (allow.clone(), "restricted".to_string()),
+        NetworkPolicy::Allowlisted { allow } => (allow.clone(), "allowlisted".to_string()),
         other => (Vec::new(), other.mode_str().to_string()),
     };
-    let restricted = matches!(project.network, NetworkPolicy::Restricted { .. });
+    let allowlisted = matches!(project.network, NetworkPolicy::Allowlisted { .. });
 
     let (merged, mut problems) = allowlist::effective(global, &project_entries);
     let effective = merged.to_entries();
@@ -1793,7 +1850,7 @@ fn allowlist_view(project: &Project, global: &[String]) -> AllowlistView {
     AllowlistView {
         project_id: project.id.clone(),
         mode,
-        restricted,
+        allowlisted,
         project: project_entries,
         global: global.to_vec(),
         effective,
@@ -2043,9 +2100,9 @@ pub async fn set_project_allowlist_impl(state: &AppState, project_id: String, en
         let mut store = store(&state);
         let project = store.project_mut(&project_id).map_err(fail)?;
         match project.network {
-            NetworkPolicy::Restricted { ref mut allow } => *allow = cleaned,
+            NetworkPolicy::Allowlisted { ref mut allow } => *allow = cleaned,
             // Saving into a mode that never consults an allowlist would store
-            // entries that do nothing. The UI shows `restricted: false` and offers
+            // entries that do nothing. The UI shows `allowlisted: false` and offers
             // the switch, so refuse here rather than accept a silent no-op.
             _ => {
                 return Err(

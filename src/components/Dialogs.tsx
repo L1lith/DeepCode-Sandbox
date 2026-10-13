@@ -1208,7 +1208,7 @@ export function SettingsDialog(props: { settings: AppSettings; onClose: () => vo
         <div class="field">
           <label>Network for new projects</label>
           <div class="mode-choice">
-            <For each={["restricted", "internet", "none", "full"] as const}>
+            <For each={["allowlisted", "internet", "none", "full"] as const}>
               {(mode) => (
                 <button
                   class="mode-option"
@@ -1216,14 +1216,14 @@ export function SettingsDialog(props: { settings: AppSettings; onClose: () => vo
                   onClick={() =>
                     setDraft({
                       ...draft(),
-                      // `restricted` carries a list; a project starts with an empty
+                      // `allowlisted` carries a list; a project starts with an empty
                       // one and inherits the global entries, so the field is not a
                       // second place to maintain the allowlist.
-                      default_network: mode === "restricted" ? { mode, allow: [] } : { mode },
+                      default_network: mode === "allowlisted" ? { mode, allow: [] } : { mode },
                     })
                   }
                 >
-                  {networkLabel(mode === "restricted" ? { mode, allow: [] } : { mode })}
+                  {networkLabel(mode === "allowlisted" ? { mode, allow: [] } : { mode })}
                 </button>
               )}
             </For>

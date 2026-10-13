@@ -24,7 +24,7 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 252 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 290 tests |
 | `npm run core:check` | `cargo check --workspace` |
 | `npm run test:bridge` | 48 checks of the MCP bridge against a simulated spool |
 | `npm test` | the two suites above, in order |
@@ -93,10 +93,25 @@ These are load-bearing. Breaking one is how this project gets a CVE.
    nothing is worse than no field. The human decision is the control — which means
    **never add an auto-approve path** ("already granted", "approved before"), because
    that converts dialog spoofing into a silent host-directory grant.
-10. **LF line endings for everything Linux reads or executes.** `.gitattributes`
+10. **An allowlist entry's shape decides how it is enforced, and only an address
+    entry may bypass the proxy.** A hostname entry goes through the egress proxy,
+    which is where the path rules and the DNS-rebinding refusal live; an address
+    entry is allowed directly by the container's own rules, so a database client
+    that speaks no HTTP can reach it. Do not "simplify" this by resolving hostname
+    entries into direct rules: that would re-open the rebinding hole the refusal
+    exists for. A port named in an entry is also published on the host's
+    **loopback**, never on `0.0.0.0`.
+11. **Never auto-approve a permission request; auto-refusal is allowed only when
+    there is nothing left to decide.** `covered.rs` refuses a request for something
+    the sandbox already has (a directory inside `/workspace` or a grant, a host
+    already on the allowlist, an installed tool) and says where it already is. That
+    is a `deny`, because an automatic `allow` is consent the operator never gave.
+    Anything ambiguous — a wildcard pattern, a write request against a read-only
+    grant, `locate_resource` — must reach the operator.
+12. **LF line endings for everything Linux reads or executes.** `.gitattributes`
     enforces this. A shell script with a CRLF shebang fails inside the container
     with `bash\r: No such file or directory` and the sandbox never starts.
-11. **`reference/` is never committed, vendored or bundled.** Upstream DeepCode CLI
+13. **`reference/` is never committed, vendored or bundled.** Upstream DeepCode CLI
     source is downloaded there read-only, and gitignored.
 
 ## Conventions

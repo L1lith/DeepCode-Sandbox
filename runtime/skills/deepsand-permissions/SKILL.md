@@ -69,12 +69,41 @@ Ask with **`deepsand_request_network_access`**. Give it:
 
 | Pattern | Matches |
 |---|---|
-| `registry.npmjs.org` | that host exactly |
+| `registry.npmjs.org` | that host exactly, on any port |
+| `registry.npmjs.org:8443` | that host, on that port only |
 | `*.example.com` | its **subdomains**, but not `example.com` itself |
 | `github.com/org/repo` | only paths under that prefix — and only over plain HTTP, because an HTTPS CONNECT tunnel carries no path |
+| `192.168.1.50:5432` | that address, on that port — for a database, or anything that is not HTTP |
+| `192.168.1.50` | that address, on any port |
 | `!tracker.example.com` | denies; a deny always beats an allow |
 
+An entry with no port covers **every** port on that destination, so name the port when
+you know it: it is a narrower rule and a more persuasive request.
+
 A blanket `*` is refused before the operator ever sees it. Never ask for one.
+
+### Addresses, and the refusal that is not an accident
+
+If the blocked destination is an **IP address**, ask for the address — `["192.168.1.50:5432"]`
+rather than `["db.internal"]`. An address entry is also what a client that speaks no
+HTTP needs, because the sandbox reaches a named address directly instead of through
+the proxy.
+
+A request for a **hostname** that resolves into local or private address space is
+refused even when the hostname is allowed. That is deliberate: a name can be made to
+resolve somewhere else later, so a name is never evidence of which machine is meant.
+The refusal message names the address to ask for instead. Read it, and ask for that
+address rather than the name again.
+
+### If you are told you already have it
+
+Some requests are answered without the operator ever seeing them, because the sandbox
+already has what you asked for: a directory inside `/workspace` or inside an
+already-shared directory, a host that is already on the allowlist, or a tool that is
+already installed. The answer names where it already lives, such as `/workspace/src`
+or `/grants/brand-assets/logos`. Use that directly — it is not a refusal, and asking
+again gets the same answer. `deepsand_sandbox_info` lists all of it up front, which is
+why checking it first is worth the call.
 
 ### Good and bad requests
 

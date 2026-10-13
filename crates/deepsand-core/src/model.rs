@@ -50,9 +50,9 @@ impl Access {
 
 /// Egress policy for a sandbox.
 ///
-/// `Internet` is the default the operator asked for: anything that is not on
-/// the local network. `Restricted` routes all egress through Deepsand's
-/// allowlisting proxy. `Full` is an explicit opt-out.
+/// `Allowlisted` is the default: DNS, the model endpoint, the hosts on the operator's
+/// allowlist, and any local address the allowlist names, and nothing else. `Internet`
+/// allows anything that is not on the local network. `Full` is an explicit opt-out.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum NetworkPolicy {
@@ -60,8 +60,13 @@ pub enum NetworkPolicy {
     None,
     /// Public egress allowed; host, LAN, link-local and metadata blocked.
     Internet,
-    /// Only DNS and the egress allowlist proxy are reachable.
-    Restricted {
+    /// Only DNS, the model endpoint, and what the allowlist names are reachable.
+    ///
+    /// Stored as `allowlisted`. `restricted` is the name this mode had before the
+    /// allowlist could express addresses and ports, and it is still accepted on load so
+    /// that existing projects keep their mode; the next save rewrites it.
+    #[serde(alias = "restricted")]
+    Allowlisted {
         #[serde(default)]
         allow: Vec<String>,
     },
@@ -81,7 +86,7 @@ impl Default for NetworkPolicy {
     /// Projects created before this change keep whatever mode they were stored with,
     /// so nothing silently starts being blocked.
     fn default() -> Self {
-        NetworkPolicy::Restricted { allow: Vec::new() }
+        NetworkPolicy::Allowlisted { allow: Vec::new() }
     }
 }
 
@@ -90,7 +95,7 @@ impl NetworkPolicy {
         match self {
             NetworkPolicy::None => "none",
             NetworkPolicy::Internet => "internet",
-            NetworkPolicy::Restricted { .. } => "restricted",
+            NetworkPolicy::Allowlisted { .. } => "allowlisted",
             NetworkPolicy::Full => "full",
         }
     }
@@ -100,37 +105,37 @@ impl NetworkPolicy {
     /// Whether the in-container egress rules have to be installed.
     ///
     /// `none` is included: it no longer means "no interfaces", it means "only the
-    /// model API", and enforcing that needs the same rules as restricted mode.
+    /// model API", and enforcing that needs the same rules as allowlisted mode.
     pub fn needs_netfilter(&self) -> bool {
         matches!(
             self,
-            NetworkPolicy::None | NetworkPolicy::Internet | NetworkPolicy::Restricted { .. }
+            NetworkPolicy::None | NetworkPolicy::Internet | NetworkPolicy::Allowlisted { .. }
         )
     }
 
     /// Whether egress goes through the Deepsand proxy running on the host.
     ///
-    /// True for `none` as well as `restricted`, because a sandbox that may reach
+    /// True for `none` as well as `allowlisted`, because a sandbox that may reach
     /// exactly one destination reaches it the same way it reaches many.
     /// Whether this mode needs the allowlisting egress proxy.
     ///
-    /// Only `restricted` does. `none` means "the model API and nothing else", which the
+    /// Only `allowlisted` does. `none` means "the model API and nothing else", which the
     /// model's own addresses already express, and the proxy cannot deliver the model
     /// anyway: the client builds its own dispatcher and ignores `HTTP_PROXY`.
     pub fn uses_proxy(&self) -> bool {
-        matches!(self, NetworkPolicy::Restricted { .. })
+        matches!(self, NetworkPolicy::Allowlisted { .. })
     }
 
     /// Whether the project's own allowlist is consulted on top of the mandatory
     /// hosts. `none` deliberately ignores it: that mode means the model API and
     /// nothing else, whatever the project has listed.
     pub fn honours_allowlist(&self) -> bool {
-        matches!(self, NetworkPolicy::Restricted { .. })
+        matches!(self, NetworkPolicy::Allowlisted { .. })
     }
 
     pub fn allowlist(&self) -> &[String] {
         match self {
-            NetworkPolicy::Restricted { allow } => allow,
+            NetworkPolicy::Allowlisted { allow } => allow,
             _ => &[],
         }
     }
@@ -718,8 +723,10 @@ impl RequestKind {
 pub struct PermissionRequest {
     pub id: String,
     pub kind: RequestKind,
-    #[serde(default)]
-    pub token: String,
+    // No `token`. One used to be carried here and nothing ever read it, which made the
+    // spool look authenticated when it is not: the bridge that writes a request is a
+    // child of the agent's own process, so no value it can read is beyond the agent.
+    // See docs/SECURITY.md, "The request spool is not authenticated".
     #[serde(default)]
     pub project: String,
     #[serde(default)]
@@ -1006,6 +1013,58 @@ mod reasoning_effort_tests {
                 "{} needs a real explanation for the tooltip",
                 state.as_str()
             );
+        }
+    }
+}
+
+/// The network mode was called `restricted` before the allowlist could express
+/// addresses and ports. The rename is a pure name change, so the migration *is* the
+/// serde alias: an existing state file keeps working untouched, and the next save
+/// writes the new spelling. These two tests are what make that a fact rather than a
+/// hope, because a state file that no longer loads is an operator's projects gone.
+#[cfg(test)]
+mod network_policy_tests {
+    use super::*;
+
+    #[test]
+    fn the_old_mode_name_still_loads_and_the_new_one_is_what_gets_written() {
+        let old: NetworkPolicy =
+            serde_json::from_str(r#"{"mode":"restricted","allow":["registry.npmjs.org"]}"#)
+                .expect("a state file written before the rename must still load");
+        assert_eq!(old.mode_str(), "allowlisted");
+        assert_eq!(old.allowlist(), ["registry.npmjs.org"]);
+
+        let written = serde_json::to_string(&old).unwrap();
+        assert!(written.contains(r#""mode":"allowlisted""#), "{written}");
+        assert!(
+            !written.contains("restricted"),
+            "the next save should normalise the name away: {written}"
+        );
+
+        // And the new spelling round-trips to the same value.
+        let reloaded: NetworkPolicy = serde_json::from_str(&written).unwrap();
+        assert_eq!(reloaded, old);
+    }
+
+    #[test]
+    fn the_default_is_allowlisted_and_is_the_strict_one() {
+        let default = NetworkPolicy::default();
+        assert!(matches!(default, NetworkPolicy::Allowlisted { .. }));
+        assert_eq!(default.mode_str(), "allowlisted");
+        // The default consults the project list and goes through the proxy: a default
+        // that ignored the list would be a mode that silently reaches nothing.
+        assert!(default.honours_allowlist());
+        assert!(default.uses_proxy());
+        assert!(default.needs_netfilter());
+    }
+
+    /// `internet` and `full` are the modes where the list is not consulted, and they
+    /// must say so, or an entry would sit in the UI appearing to do something.
+    #[test]
+    fn only_the_allowlisted_mode_honours_the_list() {
+        for mode in [NetworkPolicy::None, NetworkPolicy::Internet, NetworkPolicy::Full] {
+            assert!(!mode.honours_allowlist(), "{mode:?} must not claim to honour a list");
+            assert!(mode.allowlist().is_empty());
         }
     }
 }

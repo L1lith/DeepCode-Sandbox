@@ -12,7 +12,9 @@ export type Access = "read" | "write";
 export type NetworkPolicy =
   | { mode: "none" }
   | { mode: "internet" }
-  | { mode: "restricted"; allow: string[] }
+  // Stored as `allowlisted`. A state file written before the rename says
+  // `restricted`; the backend still reads that and rewrites it on the next save.
+  | { mode: "allowlisted"; allow: string[] }
   | { mode: "full" };
 
 export type DeepCodeMode = "allow_all" | "strict";
@@ -172,10 +174,10 @@ export interface EffortView {
 
 export interface AllowlistView {
   projectId: string;
-  /** The project's network mode. None of this applies unless it is `restricted`. */
+  /** The project's network mode. None of this applies unless the mode is allowlisted. */
   mode: string;
   /** False when the mode means the list is never consulted. */
-  restricted: boolean;
+  allowlisted: boolean;
   project: string[];
   global: string[];
   effective: string[];
@@ -354,7 +356,7 @@ export function networkLabel(policy: NetworkPolicy): string {
       return "no network";
     case "internet":
       return "internet only";
-    case "restricted":
+    case "allowlisted":
       return "allowlisted";
     case "full":
       return "full egress";
@@ -367,8 +369,8 @@ export function networkDescription(policy: NetworkPolicy): string {
       return "Nothing is reachable except the model API itself. Package installs, git clones and web requests will all fail, as will anything the enabled tools would otherwise reach — the sandbox has no way out other than the address its model is served from.";
     case "internet":
       return "Public internet is reachable. The host machine, your local network, link-local addresses and cloud metadata endpoints are blocked by the container's own kernel rules.";
-    case "restricted":
-      return "All traffic goes through Deepsand's proxy and only allowlisted hostnames on ports 80/443 are reachable. Names that resolve into local or private address space are refused.";
+    case "allowlisted":
+      return "Only what you list is reachable. A hostname you list goes through Deepsand's proxy; an address you list is reached directly, so a database or any non-HTTP client works. An entry with no port covers every port, and a port you list is also published on this machine's loopback so you can reach a server the sandbox runs there. A hostname that resolves into local or private address space is still refused — list the address itself to reach it on purpose.";
     case "full":
       return "No egress restriction at all, including this machine's own network services. Filesystem isolation is unaffected, but prefer a narrower mode.";
   }

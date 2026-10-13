@@ -11,8 +11,22 @@
 #   none        - DNS and the model API only. No proxy: the client does not use
 #                 one, so the endpoint is allowed by address instead.
 #   internet    - public internet reachable, host + LAN + link-local blocked
-#   restricted  - only DNS and the Deepsand egress allowlist proxy are reachable
+#   allowlisted - DNS, the model API, the operator's named addresses and the
+#                 Deepsand egress allowlist proxy are reachable, nothing else.
+#                 `restricted` is the same mode under its old name, still accepted
+#                 so that an image built before the rename keeps working.
 #   full        - not called; unrestricted egress (operator's explicit choice)
+#
+# Environment
+#   DEEPSAND_PROXY_ADDR / DEEPSAND_PROXY_HOST / DEEPSAND_PROXY_PORT
+#   DEEPSAND_MODEL_ADDRS    - comma-separated `ip:port`, the model endpoint(s)
+#   DEEPSAND_ALLOW_ADDRS    - comma-separated `ip[:port]`, the addresses the
+#                             operator named in the allowlist. Omitted port means
+#                             every port. These are reached *directly*, because a
+#                             database or an SSH endpoint cannot speak HTTP to a
+#                             proxy; hostname entries are proxy-only by design.
+#   DEEPSAND_PUBLISHED_PORTS - comma-separated ports published on the host, so a
+#                             server the sandbox runs is reachable from outside
 #
 # Exit code 1 means the policy could not be applied. entrypoint.sh treats that
 # as fatal unless DEEPSAND_NETFILTER_OPTIONAL=1.
@@ -27,13 +41,19 @@ PROXY_PORT="${DEEPSAND_PROXY_PORT:-}"
 log() { printf '[deepsand-netfilter] %s\n' "$*" >&2; }
 
 case "$MODE" in
-  internet|restricted|none) ;;
+  internet|allowlisted|restricted|none) ;;
   any) ;;
   *)
     log "mode '$MODE' needs no policy"
     exit 0
     ;;
 esac
+
+# The old spelling is folded onto the new one so every branch below reads the same.
+if [ "$MODE" = "restricted" ]; then
+  log "mode 'restricted' is the old name for 'allowlisted'; treating it as such"
+  MODE="allowlisted"
+fi
 
 # --- pick an iptables frontend ---------------------------------------------
 IPT=""
@@ -89,7 +109,7 @@ fi
 "$IPT" -A OUTPUT -d 127.0.0.11 -p tcp --dport 53 -j ACCEPT 2>/dev/null && DNS_ALLOWED=1
 log "dns exemptions installed: $DNS_ALLOWED"
 
-if [ "$MODE" = "restricted" ] || [ "$MODE" = "none" ]; then
+if [ "$MODE" = "allowlisted" ] || [ "$MODE" = "none" ]; then
   # --- the model API, by address -------------------------------------------
   #
   # This is the one destination that has to work in every mode, and it cannot go
@@ -132,6 +152,70 @@ if [ "$MODE" = "restricted" ] || [ "$MODE" = "none" ]; then
     exit 0
   fi
 
+  # --- the addresses the operator named in the allowlist --------------------
+  #
+  # These are allowed *directly*, not through the proxy, because that is what they
+  # are for: a database, an SSH endpoint or any other protocol that cannot speak
+  # HTTP to a proxy. Hostname entries are deliberately absent from this list --
+  # they stay proxy-only, which is where the path rules and the DNS-rebinding
+  # refusal live.
+  #
+  # Entry syntax is `ip` (every port) or `ip:port`. IPv4 only, matching the model
+  # endpoint handling above; the IPv6 chain below stays deny-by-default, and the
+  # host tells the operator when an address entry cannot be enforced here.
+  DIRECT_ALLOWED=0
+  if [ -n "${DEEPSAND_ALLOW_ADDRS:-}" ]; then
+    OLD_IFS="$IFS"
+    IFS=','
+    for entry in $DEEPSAND_ALLOW_ADDRS; do
+      entry="$(echo "$entry" | tr -d ' ')"
+      [ -z "$entry" ] && continue
+      case "$entry" in
+        *:*) addr="${entry%:*}"; port="${entry##*:}" ;;
+        *)   addr="$entry"; port="" ;;
+      esac
+      if [ -z "$addr" ]; then
+        log "ignoring malformed allowlist address '$entry'"
+        continue
+      fi
+      if [ -n "$port" ]; then
+        if "$IPT" -A OUTPUT -d "$addr" -p tcp --dport "$port" -j ACCEPT; then
+          DIRECT_ALLOWED=$((DIRECT_ALLOWED + 1))
+        fi
+      else
+        # Every port, which is what an entry without a port means.
+        if "$IPT" -A OUTPUT -d "$addr" -p tcp -j ACCEPT; then
+          DIRECT_ALLOWED=$((DIRECT_ALLOWED + 1))
+        fi
+      fi
+    done
+    IFS="$OLD_IFS"
+  fi
+  log "operator-named allowlist addresses allowed directly: $DIRECT_ALLOWED"
+
+  # --- published ports: accept from the host, so a server here is reachable -- #
+  #
+  # Only appended, never a policy change: these ports are published to the host's
+  # loopback by `docker run -p 127.0.0.1:port:port`, so the only peer that can reach
+  # them is the operator's own machine. Stating the ACCEPT makes the intent
+  # independent of whatever the daemon's default INPUT policy happens to be.
+  PUBLISHED=0
+  if [ -n "${DEEPSAND_PUBLISHED_PORTS:-}" ]; then
+    OLD_IFS="$IFS"
+    IFS=','
+    for port in $DEEPSAND_PUBLISHED_PORTS; do
+      port="$(echo "$port" | tr -d ' ')"
+      [ -z "$port" ] && continue
+      if "$IPT" -A INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null; then
+        PUBLISHED=$((PUBLISHED + 1))
+      fi
+    done
+    IFS="$OLD_IFS"
+  fi
+  if [ "$PUBLISHED" -gt 0 ]; then
+    log "published ports accepted on INPUT: $PUBLISHED"
+  fi
+
   # --- resolve the allowlist proxy ----------------------------------------
   PROXY_IP=""
   if [ -n "$PROXY_ADDR" ]; then
@@ -142,7 +226,7 @@ if [ "$MODE" = "restricted" ] || [ "$MODE" = "none" ]; then
     PROXY_IP="$(getent hosts "$PROXY_HOST" 2>/dev/null | awk 'NR==1 {print $1}')"
   fi
   if [ -z "$PROXY_IP" ] || [ -z "$PROXY_PORT" ]; then
-    log "restricted mode requested but the proxy could not be resolved (host='$PROXY_HOST' addr='$PROXY_ADDR')"
+    log "allowlisted mode requested but the proxy could not be resolved (host='$PROXY_HOST' addr='$PROXY_ADDR')"
     exit 1
   fi
   if [ "$PROXY_IP" = "127.0.0.1" ] || [ "$PROXY_IP" = "0.0.0.0" ]; then
@@ -156,7 +240,7 @@ if [ "$MODE" = "restricted" ] || [ "$MODE" = "none" ]; then
   # pre-existing ESTABLISHED rule's usefulness to a would-be attacker: a
   # connection can only ever have been established to an allowed target.
   reject_all
-  log "restricted policy applied: DNS, the model API and $PROXY_IP:$PROXY_PORT are reachable, nothing else"
+  log "allowlisted policy applied: DNS, the model API, $DIRECT_ALLOWED named address(es) and $PROXY_IP:$PROXY_PORT are reachable, nothing else"
 else
   # --- internet mode: burn down every non-public destination ---------------
   #
@@ -202,7 +286,7 @@ if command -v ip6tables >/dev/null 2>&1 && ip6tables -L OUTPUT >/dev/null 2>&1; 
       log "ipv6 policy: allowed (internet mode)"
     else
       ip6tables -A OUTPUT -j REJECT 2>/dev/null || ip6tables -A OUTPUT -j DROP
-      log "ipv6 policy: denied (restricted mode)"
+      log "ipv6 policy: denied (allowlisted mode)"
     fi
   fi
 else

@@ -1,11 +1,10 @@
-//! The allowlisting egress proxy used by the `restricted` network mode.
+//! The allowlisting egress proxy used by the `allowlisted` network mode.
 //!
-//! When a project is in `restricted` mode the container's own kernel rules allow
-//! it to reach exactly one address: this proxy. Everything else is dropped
-//! inside the container. The proxy then decides, per connection, whether the
-//! destination is on the operator's allowlist.
+//! When a project is in allowlisted mode the container's own kernel rules allow it
+//! to reach exactly one destination it did not name: this proxy. The proxy then
+//! decides, per connection, whether the destination is on the operator's allowlist.
 //!
-//! Two properties matter:
+//! Three properties matter:
 //!
 //! * **The allowlist is by hostname, and the proxy does the resolving.** The
 //!   sandbox cannot influence name resolution.
@@ -13,6 +12,18 @@
 //!   resolves into loopback, RFC1918, link-local or CGNAT space is refused, so
 //!   a rebinding trick or a DNS entry pointed at the operator's router cannot
 //!   turn an allowlisted domain into a path onto the local network.
+//! * **Unless the operator named the address.** An entry that *is* an address
+//!   literal is an instruction to reach that address, so it overrides the refusal
+//!   above. That is how a database on the LAN, or a service on the operator's own
+//!   machine, is expressed — and it is the only form that can be, because a hostname
+//!   entry must keep failing closed against rebinding.
+//!
+//! The port is part of the decision: an entry that names one allows only that port,
+//! and an entry that names none allows every port. See [`crate::allowlist`].
+//!
+//! A path prefix only binds where a path exists. Inside a `CONNECT` tunnel the
+//! request is an opaque pipe, so a path-prefixed entry degrades to host-only —
+//! documented in the allowlist module, and disclosed in the UI rather than implied.
 
 use crate::allowlist::{Allowlist, Decision};
 use crate::error::{Result, SandboxError};
@@ -258,7 +269,7 @@ async fn serve(
     };
 
     let list = allow.read().await.clone();
-    let decision = list.decide(&request.host, path);
+    let decision = list.decide(&request.host, path, Some(request.port));
 
     if !decision.is_allowed() {
         counters.denied.fetch_add(1, Ordering::Relaxed);
@@ -310,28 +321,13 @@ async fn serve(
         .await?;
         return Ok(());
     }
-    // The request is permitted, but local and private addressing is still
-    // refused below.
-
-    if !is_allowed_port(request.port) {
-        counters.denied.fetch_add(1, Ordering::Relaxed);
-        record_blocked(&blocked, &request, "port not permitted through the allowlist proxy");
-        write_status(
-            &mut client,
-            403,
-            "Forbidden",
-            &format!(
-                "Deepsand's egress proxy only permits ports 80 and 443; '{}' was requested.",
-                request.port
-            ),
-        )
-        .await?;
-        return Ok(());
-    }
-
-    // Resolve ourselves, then refuse anything that lands on local or private
-    // address space. An allowlisted hostname must not become a route to the
-    // operator's own network.
+    // The request is permitted. The port was part of that decision, so there is no
+    // separate port gate here any more: an entry that names a port allows only that
+    // port, and one that names none allows any.
+    //
+    // Resolve ourselves, then refuse anything that lands on local or private address
+    // space -- unless the operator named that address, in which case reaching it is
+    // the entire point of the entry.
     let mut resolved = match tokio::net::lookup_host((request.host.as_str(), request.port)).await {
         Ok(addrs) => addrs.collect::<Vec<_>>(),
         Err(err) => {
@@ -347,23 +343,47 @@ async fn serve(
         }
     };
 
-    let blocked_addresses: Vec<SocketAddr> = resolved.iter().copied().filter(|a| is_blocked_target(a.ip())).collect();
-    resolved.retain(|a| !is_blocked_target(a.ip()));
+    // An explicit address entry overrides the refusal, but only for a request that
+    // arrived *as* that address. A hostname that merely resolves there is still refused:
+    // otherwise listing one literal would silently bless every allowlisted name that
+    // resolves to it, which is the rebinding case the refusal exists for.
+    let named: Vec<IpAddr> = if request.host.parse::<IpAddr>().is_ok() {
+        list.explicit_addresses_for_port(request.port)
+    } else {
+        Vec::new()
+    };
+    let mut blocked_addresses: Vec<SocketAddr> = Vec::new();
+    resolved.retain(|address| {
+        if is_blocked_target(address.ip()) && !named.contains(&address.ip()) {
+            blocked_addresses.push(*address);
+            false
+        } else {
+            true
+        }
+    });
 
     if resolved.is_empty() {
         counters.denied.fetch_add(1, Ordering::Relaxed);
-        let detail = blocked_addresses
-            .first()
+        let first_blocked = blocked_addresses.first().copied();
+        let detail = first_blocked
             .map(|a| a.ip().to_string())
             .unwrap_or_else(|| "no address".to_string());
         record_blocked(&blocked, &request, "resolves into local or private address space");
+        // The suggestion has to be an entry the allowlist parser accepts, which for an
+        // IPv6 address means brackets: a bare `::1:9` would be read as an address with
+        // no port, so the advice would not work if it were followed.
+        let suggestion = first_blocked
+            .map(|a| entry_suggestion(a.ip(), request.port))
+            .unwrap_or_else(|| format!("{detail}:{}", request.port));
         write_status(
             &mut client,
             403,
             "Forbidden",
             &format!(
-                "Deepsand refused '{}': it resolves to {detail}, which is local or private address space. An \
-                 allowlisted name is never allowed to become a route onto the operator's own network.",
+                "Deepsand refused '{}': it resolves to {detail}, which is local or private address space. \
+                 An allowlisted name is never allowed to become a route onto the operator's own network. \
+                 If that address is what you meant, allowlist the address itself -- '{suggestion}' -- so \
+                 the decision is explicit.",
                 request.host
             ),
         )
@@ -539,6 +559,18 @@ fn is_plausible_host(host: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
 }
 
+/// Render an address and port the way an allowlist entry is written.
+///
+/// Used in refusal messages, so the advice has to be something the parser accepts:
+/// `127.0.0.1:9` for v4, `[::1]:9` for v6. A bare `::1:9` would be read as an address
+/// with no port, and the operator would follow the suggestion and stay blocked.
+fn entry_suggestion(address: IpAddr, port: u16) -> String {
+    match address {
+        IpAddr::V4(v4) => format!("{v4}:{port}"),
+        IpAddr::V6(v6) => format!("[{v6}]:{port}"),
+    }
+}
+
 fn record_blocked(blocked: &Arc<Mutex<Vec<BlockedEgress>>>, request: &ProxyRequest, reason: &str) {
     if let Ok(mut list) = blocked.lock() {
         if list.iter().any(|b| b.host == request.host && b.port == request.port) {
@@ -571,30 +603,27 @@ async fn write_status(client: &mut TcpStream, code: u16, reason: &str, body: &st
     client.flush().await
 }
 
-/// Match a hostname against the allowlist.
+/// Match a hostname against the allowlist, ignoring ports and paths.
 ///
 /// Supported patterns: an exact host, `*.suffix` for any single-or-multi label
-/// subdomain, and `*` for everything.
-/// The predicate form of an allowlist check, for host-only requests where the
-/// caller only needs a yes or no and has no path to offer.
+/// subdomain, an address literal, and `*` for everything.
 ///
-/// Equivalent to asking a parsed [`Allowlist`] about a host-only request. The
-/// live connection path goes through [`Allowlist::decide`] directly so that it
-/// can pass the path and report which rule was responsible.
+/// The predicate form, for callers that only need a yes or no — "is this destination
+/// reachable at all?" — and have neither a path nor a port to offer. A rule that names
+/// a port counts, because the sandbox can reach that host.
+///
+/// The live connection path goes through [`Allowlist::decide`] instead, because it must
+/// pass the port and the path and report which rule was responsible. This function is
+/// strictly wider than that decision and must never be used to permit a connection.
 pub fn host_allowed(host: &str, patterns: &[String]) -> bool {
     if normalise_host(host).is_empty() {
         return false;
     }
-    Allowlist::parse_lenient(patterns).0.decide(host, None).is_allowed()
+    Allowlist::parse_lenient(patterns).0.decide_host_only(host).is_allowed()
 }
 
 fn normalise_host(host: &str) -> String {
     host.trim().trim_end_matches('.').to_ascii_lowercase()
-}
-
-/// Ports the proxy will tunnel.
-pub fn is_allowed_port(port: u16) -> bool {
-    matches!(port, 80 | 443)
 }
 
 /// Addresses that must never be reachable through the proxy, even via an
@@ -705,13 +734,14 @@ mod tests {
         assert!(!host_allowed("example.com.attacker.net", &allow));
     }
 
+    /// The port is now part of the allowlist decision rather than a fixed 80/443 rule,
+    /// so these assert the *refusal set* rather than a port whitelist. `is_blocked_target`
+    /// is the remaining port-independent rule and is covered separately below.
     #[test]
-    fn only_http_ports_are_tunnelled() {
-        assert!(is_allowed_port(80));
-        assert!(is_allowed_port(443));
-        assert!(!is_allowed_port(22));
-        assert!(!is_allowed_port(3306));
-        assert!(!is_allowed_port(8080));
+    fn the_private_address_set_is_unchanged_by_the_port_work() {
+        for blocked in ["127.0.0.1", "10.1.2.3", "192.168.1.1", "169.254.169.254", "::1"] {
+            assert!(is_blocked_target_str(blocked), "{blocked} must stay blocked by default");
+        }
     }
 
     #[test]
@@ -848,34 +878,69 @@ mod tests {
         assert_eq!(proxy.stats().accepted, 0);
     }
 
+    /// A hostname that resolves into private space is refused even when it is on the
+    /// allowlist — and the *literal* it resolves to is not, because that is the entry
+    /// form that says "I mean this address". Both halves matter: the first is the
+    /// rebinding defence, the second is the whole point of the change.
     #[tokio::test]
-    async fn an_allowlisted_but_private_resolving_host_is_refused() {
+    async fn an_allowlisted_but_private_resolving_name_is_refused_while_its_literal_is_not() {
         let proxy = EgressProxy::start(ProxyConfig {
             bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            // localhost is "allowlisted", but must still be refused because it
-            // resolves into loopback space.
             allow: patterns(&["localhost", "127.0.0.1"]),
             ..ProxyConfig::default()
         })
         .await
         .unwrap();
 
-        let mut stream = TcpStream::connect(proxy.local_addr()).await.unwrap();
-        stream
-            .write_all(b"CONNECT 127.0.0.1:443 HTTP/1.1\r\n\r\n")
-            .await
-            .unwrap();
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).await.unwrap();
-        let text = String::from_utf8_lossy(&response);
+        // By name: refused, because a name that resolves to loopback proves nothing
+        // about what it will resolve to next time.
+        let by_name = request(&proxy, "CONNECT localhost:443 HTTP/1.1\r\n\r\n").await;
+        assert!(by_name.starts_with("HTTP/1.1 403"), "{by_name}");
+        assert!(by_name.contains("local or private address space"), "{by_name}");
 
-        assert!(text.starts_with("HTTP/1.1 403"), "{text}");
-        assert!(text.contains("local or private address space"), "{text}");
-        assert_eq!(proxy.stats().denied, 1);
+        // By literal: dialled. Port 443 on loopback is almost certainly closed, so the
+        // dial is expected to fail; the point is that it is not a policy refusal.
+        let by_literal = request(&proxy, "CONNECT 127.0.0.1:443 HTTP/1.1\r\n\r\n").await;
+        assert!(
+            !by_literal.starts_with("HTTP/1.1 403"),
+            "a literal the operator named must not be refused as private: {by_literal}"
+        );
+
+        // One policy refusal, one attempt that got through.
+        assert_eq!(proxy.stats().denied, 1, "{:?}", proxy.stats());
     }
 
+    /// A named port is enforced: the entry allows that port and only that port. This is
+    /// the narrowing the old 80/443 rule could not express, and the regression it must
+    /// not introduce is "a port-qualified rule matches everything anyway".
     #[tokio::test]
-    async fn a_disallowed_port_is_refused_even_for_an_allowed_host() {
+    async fn a_named_port_is_allowed_and_every_other_port_is_refused() {
+        let proxy = EgressProxy::start(ProxyConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            allow: patterns(&["example.com:8443"]),
+            ..ProxyConfig::default()
+        })
+        .await
+        .unwrap();
+
+        // The named port passes the allowlist and then fails at DNS, which is what
+        // "not refused by the allowlist" looks like with no network.
+        let allowed = request(&proxy, "CONNECT example.com:8443 HTTP/1.1\r\n\r\n").await;
+        assert!(!allowed.starts_with("HTTP/1.1 403"), "the named port was refused: {allowed}");
+
+        for other in ["443", "80", "22", "8444"] {
+            let refused = request(&proxy, &format!("CONNECT example.com:{other} HTTP/1.1\r\n\r\n")).await;
+            assert!(
+                refused.starts_with("HTTP/1.1 403"),
+                "port {other} must not inherit a rule written for 8443: {refused}"
+            );
+        }
+    }
+
+    /// An entry with no port allows every port — the documented widening. Asserted so
+    /// that the absence of a port can never quietly turn into 80/443-only again.
+    #[tokio::test]
+    async fn an_entry_without_a_port_covers_every_port() {
         let proxy = EgressProxy::start(ProxyConfig {
             bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
             allow: patterns(&["example.com"]),
@@ -884,13 +949,71 @@ mod tests {
         .await
         .unwrap();
 
-        let mut stream = TcpStream::connect(proxy.local_addr()).await.unwrap();
-        stream.write_all(b"CONNECT example.com:22 HTTP/1.1\r\n\r\n").await.unwrap();
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).await.unwrap();
-        let text = String::from_utf8_lossy(&response);
-        assert!(text.starts_with("HTTP/1.1 403"), "{text}");
-        assert!(text.contains("ports 80 and 443"), "{text}");
+        for port in ["22", "3306", "6379", "65535"] {
+            let response = request(&proxy, &format!("CONNECT example.com:{port} HTTP/1.1\r\n\r\n")).await;
+            assert!(
+                !response.starts_with("HTTP/1.1 403"),
+                "port {port} should be covered by an entry that names no port: {response}"
+            );
+        }
+    }
+
+    /// The load-bearing exception: a hostname that resolves into private space stays
+    /// refused, but an address the operator named literally is allowed through to the
+    /// connection attempt. Asserted through the live proxy so the call site is covered,
+    /// not just the matcher.
+    #[tokio::test]
+    async fn a_named_address_reaches_private_space_where_a_hostname_may_not() {
+        let proxy = EgressProxy::start(ProxyConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            // Both forms are "allowlisted"; only the literal may touch loopback.
+            allow: patterns(&["localhost:9", "127.0.0.1:9"]),
+            ..ProxyConfig::default()
+        })
+        .await
+        .unwrap();
+
+        // The name resolves into loopback, so it is refused even though a rule covers
+        // it: that is the rebinding defence, and it must survive this change.
+        let by_name = request(&proxy, "CONNECT localhost:9 HTTP/1.1\r\n\r\n").await;
+        assert!(by_name.starts_with("HTTP/1.1 403"), "a private-resolving name must stay refused: {by_name}");
+        assert!(by_name.contains("local or private address space"), "{by_name}");
+        // The refusal has to say how to do it deliberately, and the entry it suggests
+        // must be one the parser accepts — advice that does not parse would leave the
+        // operator still blocked. `localhost` resolves to `::1` as well as `127.0.0.1`,
+        // so this also pins the bracketed IPv6 form.
+        let suggested = by_name
+            .split("allowlist the address itself -- '")
+            .nth(1)
+            .and_then(|rest| rest.split('\'').next())
+            .unwrap_or_else(|| panic!("the refusal should suggest a literal to allow: {by_name}"));
+        crate::allowlist::Rule::parse(suggested)
+            .unwrap_or_else(|err| panic!("the suggested entry '{suggested}' does not parse: {err}"));
+
+        // The literal is allowed past the checks. Nothing is listening on port 9, so the
+        // dial itself fails — what matters is that it got as far as dialling instead of
+        // being refused by policy.
+        let by_address = request(&proxy, "CONNECT 127.0.0.1:9 HTTP/1.1\r\n\r\n").await;
+        assert!(
+            !by_address.starts_with("HTTP/1.1 403"),
+            "the named address should have been dialled rather than refused: {by_address}"
+        );
+    }
+
+    /// The port on an address entry is enforced too: naming `127.0.0.1:9` must not open
+    /// every port on loopback.
+    #[tokio::test]
+    async fn a_named_address_on_another_port_is_still_refused() {
+        let proxy = EgressProxy::start(ProxyConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            allow: patterns(&["127.0.0.1:9"]),
+            ..ProxyConfig::default()
+        })
+        .await
+        .unwrap();
+
+        let other = request(&proxy, "CONNECT 127.0.0.1:9000 HTTP/1.1\r\n\r\n").await;
+        assert!(other.starts_with("HTTP/1.1 403"), "port 9000 was not allowed: {other}");
     }
 
     #[tokio::test]
@@ -1101,7 +1224,7 @@ mod tests {
         let list = proxy.allowlist().await;
         assert_eq!(list.broad_allow_rules().len(), 1, "the blanket allow should be flagged");
         assert!(matches!(
-            list.decide("metadata.google.internal", None),
+            list.decide("metadata.google.internal", None, None),
             Decision::Denied { .. }
         ));
     }

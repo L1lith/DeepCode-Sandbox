@@ -201,7 +201,7 @@ pub fn build_agents_md(
                 "You can reach the public internet over IP. The host machine, the local network and\n\
                  cloud metadata addresses (169.254.169.254) are refused by an address filter."
                     .to_string(),
-            NetworkPolicy::Restricted { allow } => format!(
+            NetworkPolicy::Allowlisted { allow } => format!(
                 "All your traffic goes through an allowlisting proxy. You can only reach: {}.",
                 if allow.is_empty() { "nothing yet".to_string() } else { allow.join(", ") }
             ),

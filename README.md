@@ -131,12 +131,21 @@ depth.
   rules and adopt a volume, then drops every capability, the bounding set and
   uid 0. DeepCode runs as uid 1000 with `--read-only` and
   `--security-opt=no-new-privileges`.
-* **Network.** Default is *anything that is not on your local network*: public
-  internet works, your host, your LAN, link-local and cloud metadata
-  (`169.254.169.254`) are rejected by the container's own kernel. Switch a
-  project to `restricted` for a hostname allowlist through a filtering proxy, or
-  `none` to leave only the model API reachable — package installs, clones and web
-  requests fail, which is a deliberate choice rather than a broken default.
+* **Network.** Default is **allowlisted**: an allowlist through a filtering proxy,
+  plus any address you name reached directly, and everything else refused. List a
+  hostname — any port, or `host:port` for one — and it goes through the proxy; list
+  an **address** such as `192.168.1.50:5432` and the sandbox reaches it directly,
+  which is what a database or any non-HTTP client needs. A port you name is also
+  published on this machine's loopback, so you can reach a server the sandbox runs.
+  A hostname that resolves into local or private address space stays refused — list
+  the address itself to reach it on purpose. `internet` is one click away for work
+  that needs the open web, and `none` leaves only the model API reachable.
+* **Requests you never see.** Asking for something the sandbox already has — a
+  directory inside `/workspace` or inside a directory you already shared, a host
+  already on the allowlist, a tool already in the image — is refused automatically,
+  with a note saying where it already is. It is a refusal rather than an automatic
+  approval, because an approval is yours to give; anything ambiguous still reaches
+  you.
 * **Kernel hardening.** A hardened seccomp profile is **on by default** and
   attached with `--security-opt=seccomp=`. Its 16 rules deny 69 syscalls, among them
   `mount`, `unshare`, `setns`, `pivot_root`, `chroot`, `bpf`, `ptrace`, `keyctl`,
@@ -184,7 +193,7 @@ desktop app and the headless CLI cannot behave differently.
 
 ```bash
 npm run app:dev              # app with hot reload
-npm run core:test            # 252 Rust tests: paths, policy, broker, proxy, secrets, seccomp
+npm run core:test            # 290 Rust tests: paths, policy, broker, proxy, credentials, seccomp
 npm run test:bridge          # 48 checks: the permission protocol end to end
 npm test                     # both suites
 npm run core:check           # cargo check --workspace

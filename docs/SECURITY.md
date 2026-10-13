@@ -102,19 +102,40 @@ no capability to run `iptables`. Blocked: `0.0.0.0/8`, `10/8`, `100.64/10`,
 `127/8`, `169.254/16`, `172.16/12`, `192.0.0/24`, `192.168/16`, `198.18/15`,
 `224/4`, `240/4`, broadcast. DNS to the container's configured resolvers is
 exempted, because without it nothing works. IPv6 is denied outright in
-`restricted` mode.
+`allowlisted` mode.
 
-`restricted` mode additionally allows exactly one address: the Deepsand proxy on
-the project's own bridge gateway. The proxy:
+`allowlisted` mode — stored as `allowlisted`, still read as `restricted` from an
+older state file — allows DNS, the model endpoint, whatever the allowlist names,
+and the Deepsand proxy on the project's own bridge gateway. Nothing else. The
+allowlist has two enforcement paths, and which one an entry uses is the entry's
+own shape:
 
-* matches hostnames against the operator's allowlist (exact, or `*.suffix`)
-* refuses ports other than 80 and 443
-* **resolves names itself** and refuses any result in loopback, private,
-  link-local, CGNAT or reserved space
+* **A hostname entry goes through the proxy.** The proxy matches it against the
+  allowlist (exact, `*.suffix`, `re:^…$`, `host/path`), **resolves the name
+  itself**, and refuses any result in loopback, private, link-local, CGNAT or
+  reserved space.
+* **An address entry is allowed directly by the container's own rules**, with the
+  port it names or every port if it names none, because a database driver or an
+  SSH client cannot speak HTTP to a proxy. These are also the entries whose named
+  ports are published on the host's **loopback**, so a server the sandbox runs can
+  be reached from the operator's side and not from the LAN.
 
-That last point matters: an allowlisted hostname that resolves to `192.168.1.1`
-— whether by DNS rebinding, a hostile DNS server, or a `hosts` entry — is
-refused, so the allowlist cannot be turned into a route onto the local network.
+The proxy's private-address refusal is the point of the first path, and an address
+entry is the deliberate exception to it. An allowlisted *hostname* that resolves to
+`192.168.1.1` — whether by DNS rebinding, a hostile DNS server, or a `hosts` entry —
+is refused, so a name can never become a route onto the local network. Naming the
+address instead is an explicit instruction to reach that address, and it is the only
+way to express "the database on my LAN"; the refusal message says so and names the
+address to allow. Ports are part of the decision in both paths: an entry that names
+one allows that port only, and an entry that names none allows every port — which is
+a widening from the earlier "80 and 443 only" rule, and the reason the UI text no
+longer claims otherwise.
+
+A request for a destination that is already reachable is refused without troubling
+the operator, with a message that says where the thing already is. That is a `deny`,
+never an automatic `allow`: an auto-approval would be consent the operator never
+gave, and the bar for skipping them is that there is nothing left to decide. See
+`crates/deepsand-core/src/covered.rs`.
 
 `netfilter_required` is on by default, which makes `entrypoint.sh` **fail closed**:
 if the egress rules cannot be installed the container exits rather than running
@@ -194,11 +215,11 @@ Being explicit here is more useful than a longer list of things it does.
 
 2. **Model API exfiltration in the default network mode.** In `internet` mode the
    sandbox can reach the public internet, so anything it can read, it can send
-   to a remote host. This is inherent to using a hosted model. Use `restricted`
+   to a remote host. This is inherent to using a hosted model. Use `allowlisted`
    mode with a short allowlist to close it.
 
 3. **`internet` mode does not filter by domain.** It blocks *address ranges*. A
-   public pastebin is reachable. `restricted` mode is the answer.
+   public pastebin is reachable. `allowlisted` mode is the answer.
 
 4. **Leaked credentials via the project directory.** The API key is injected into
    the container's own home volume, not the project, but a careless setup could
@@ -310,7 +331,7 @@ enumerates families and flags so that dropping one fails a test rather than a re
 Everything above is asserted by tests you can run:
 
 ```bash
-cargo test -p deepsand-core                   # 252 tests, including the seccomp profile claims
+cargo test -p deepsand-core                   # 290 tests, including the seccomp and allowlist claims
 node runtime/scripts/test-mcp-bridge.mjs      # 48 checks: the permission protocol end to end
 ```
 
@@ -327,7 +348,7 @@ The most load-bearing ones:
 | `symlinks_are_resolved_before_guards_run` | link-based smuggling |
 | `an_ancestor_of_home_is_refused`, `the_deepsand_state_directory_is_refused_both_ways` | the guard set |
 | `local_and_private_addresses_are_never_targets` | the proxy cannot be aimed inward |
-| `an_allowlisted_but_private_resolving_host_is_refused` | rebinding is useless |
+| `an_allowlisted_but_private_resolving_name_is_refused_while_its_literal_is_not` | rebinding is useless; naming the address is the deliberate exception |
 | `a_path_that_only_looks_like_a_container_path_is_kept` | the guard is not over-broad (a Linux-breaking bug this caught) |
 | `clone_is_refused_when_any_namespace_flag_is_set` | all eight `CLONE_NEW*` bits, not just the one that was remembered |
 | `every_filtered_address_family_is_refused` | the socket-family set, and that `AF_UNIX`/`INET`/`INET6`/`NETLINK` survive |
@@ -335,6 +356,12 @@ The most load-bearing ones:
 | `a_stale_image_is_refused_and_says_which_side_is_which` | the applied profile *is* the shipped profile (R3-A) |
 | `a_request_is_never_answered_without_an_explicit_decision` | dialog spoofing cannot become a silent grant |
 | `resolve_announces_what_it_dropped_rather_than_dropping_it_silently` | the env passthrough cannot smuggle an unrelated key in |
+| `a_named_port_is_allowed_and_every_other_port_is_refused` | a port-qualified entry narrows rather than widens |
+| `an_entry_without_a_port_covers_every_port` | the documented port semantics, asserted rather than implied |
+| `a_named_address_reaches_private_space_where_a_hostname_may_not` | naming an address is the deliberate exception, and a name stays refused |
+| `a_named_address_becomes_a_netfilter_allowance_and_its_port_a_publication` | an entry in the UI is an entry in the container, or it is a lie |
+| `a_directory_inside_the_workspace_is_already_covered` | a request the sandbox did not need to make never reaches the operator |
+| `a_write_request_for_a_read_only_grant_is_not_covered` | auto-refusal only where there is nothing left to decide |
 
 To read the exact command for any project:
 

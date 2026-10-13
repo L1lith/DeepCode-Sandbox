@@ -7,12 +7,42 @@
 //!
 //! | Entry | Meaning |
 //! | --- | --- |
-//! | `example.com` | that exact hostname, and nothing else |
+//! | `example.com` | that exact hostname, on any port |
+//! | `example.com:8443` | that hostname, only on that port |
 //! | `*.example.com` | `a.example.com` and `a.b.example.com`, but **not** `example.com` |
 //! | `example.com/org/repo` | that hostname, but only for paths under `/org/repo` |
+//! | `192.168.1.50:5432` | an address literal, on that port |
+//! | `192.168.1.50` | an address literal, on any port |
+//! | `[fe80::1]:8080` | an IPv6 address literal, on that port |
 //! | `re:^api\.example\.(com\|org)$` | an anchored regular expression |
 //! | `!evil.example` | a **deny** entry; any prefix form is allowed here too |
 //! | `*` | everything (permitted, but always flagged — see [`Rule::is_broad`]) |
+//!
+//! # Addresses are the exception to the private-address refusal
+//!
+//! An entry that is an address literal is an explicit instruction to reach *that
+//! address*, so it overrides the proxy's refusal to touch loopback and RFC1918 space.
+//! That is the point of it: a database on the LAN, or a service on the operator's own
+//! machine, is a legitimate destination that no hostname entry can express without
+//! also re-opening DNS rebinding.
+//!
+//! A **hostname** entry never overrides that refusal, however narrow it looks. A name
+//! that resolves into private space is exactly the rebinding case the refusal exists
+//! for, and "it is on my allowlist" is not evidence about what it resolves to. A local
+//! service is listed by its address.
+//!
+//! Address entries are also the only ones enforceable without the proxy: the netfilter
+//! gets a rule per literal, so a database client that speaks no HTTP can reach it.
+//! Hostname entries are proxy-only, which is where the path rules and the rebinding
+//! check live.
+//!
+//! # Ports
+//!
+//! The port is optional and means what it says: omitting it allows every port on that
+//! entry. That is a deliberate widening from the earlier "ports 80 and 443 only" rule,
+//! which could not express a database or a development server at all. A port named on
+//! an address entry is also the port published on the host, so a server the sandbox
+//! runs there can be reached from the operator's side.
 //!
 //! # Deny always wins
 //!
@@ -43,6 +73,7 @@
 
 use regex::Regex;
 use std::fmt;
+use std::net::IpAddr;
 
 /// The allowlist entry shipped for ordinary development work.
 ///
@@ -108,6 +139,10 @@ pub enum HostMatcher {
     /// A strict subdomain of this domain: `*.example.com` never matches
     /// `example.com` itself.
     Subdomain(String),
+    /// An address literal. Matched against the literal, so `192.168.1.50` and
+    /// `[fe80::1]` are compared as addresses rather than as text, and it is what
+    /// lets the proxy admit a private destination the operator named on purpose.
+    Address(IpAddr),
     /// Matches any hostname. Permitted because an operator may genuinely want it,
     /// but it is always flagged by [`Rule::is_broad`].
     Any,
@@ -122,6 +157,8 @@ pub struct Rule {
     pub matcher: HostMatcher,
     /// Path prefix such as `/org/repo`, if the entry had one.
     pub path_prefix: Option<String>,
+    /// Port the entry names, if it named one. `None` means every port.
+    pub port: Option<u16>,
     /// Exactly what the operator wrote, so diagnostics and the UI can show the
     /// source text rather than a re-rendered approximation.
     pub raw: String,
@@ -168,6 +205,8 @@ impl Rule {
                 kind,
                 matcher: HostMatcher::Regex(compiled),
                 path_prefix: None,
+                // The regex owns the whole entry, so there is nowhere to put a port.
+                port: None,
                 raw,
             });
         }
@@ -184,6 +223,11 @@ impl Rule {
             return Err(format!("'{raw}': no hostname"));
         }
 
+        let (host_part, port) = split_port(host_part).map_err(|err| format!("'{raw}': {err}"))?;
+        if host_part.is_empty() {
+            return Err(format!("'{raw}': nothing before the port"));
+        }
+
         let matcher = if host_part == "*" {
             HostMatcher::Any
         } else if let Some(suffix) = host_part.strip_prefix("*.") {
@@ -198,6 +242,10 @@ impl Rule {
             // which is broader still and harder to reason about; flagging it via
             // `is_broad` is more useful than rejecting it.
             HostMatcher::Subdomain(suffix)
+        } else if let Ok(address) = host_part.parse::<IpAddr>() {
+            // An address literal, checked before the hostname rules so that a colon
+            // in an IPv6 address is never mistaken for a port.
+            HostMatcher::Address(address)
         } else {
             if host_part.contains('*') {
                 return Err(format!(
@@ -211,6 +259,14 @@ impl Rule {
             HostMatcher::Exact(host)
         };
 
+        // A port on `*` has no reading: it would say "any host, but only this port",
+        // which is not something the operator can have meant.
+        if port.is_some() && matches!(matcher, HostMatcher::Any) {
+            return Err(format!(
+                "'{raw}': a port cannot be combined with '*'. Name a host or an address instead."
+            ));
+        }
+
         // A path prefix on a `*` or a wildcard is almost never what was meant,
         // and it cannot be enforced over HTTPS anyway.
         if path_prefix.is_some() && matches!(matcher, HostMatcher::Any) {
@@ -223,11 +279,12 @@ impl Rule {
             kind,
             matcher,
             path_prefix,
+            port,
             raw,
         })
     }
 
-    /// Whether this rule matches `host` (ignoring any path).
+    /// Whether this rule matches `host`, ignoring the path and the port.
     pub fn matches_host(&self, host: &str) -> bool {
         let host = normalise_host(host);
         if host.is_empty() {
@@ -241,16 +298,34 @@ impl Rule {
                 // not match `notexample.com`.
                 host.len() > suffix.len() + 1 && host.ends_with(&format!(".{suffix}"))
             }
+            // Compared as an address, so `[fe80::1]` and `fe80::1` are one rule.
+            HostMatcher::Address(expected) => {
+                host_literal(&host).is_some_and(|actual| actual == *expected)
+            }
             // `is_match` on an anchored pattern is a full-hostname comparison,
             // because the pattern is required to carry ^ and $.
             HostMatcher::Regex(re) => re.is_match(&host),
         }
     }
 
+    /// Whether this rule's port constraint admits `port`.
+    ///
+    /// A rule that names no port allows every port. A rule that names one does **not**
+    /// match when the caller does not know the port: an unknown port must never
+    /// satisfy a constraint, or a rule written to narrow one service would quietly
+    /// allow all of them.
+    pub fn matches_port(&self, port: Option<u16>) -> bool {
+        match (self.port, port) {
+            (None, _) => true,
+            (Some(expected), Some(actual)) => expected == actual,
+            (Some(_), None) => false,
+        }
+    }
+
     /// Whether this rule matches the request. `path` is the request path when the
     /// transport exposes one, and `None` inside a `CONNECT` tunnel.
-    pub fn matches(&self, host: &str, path: Option<&str>) -> bool {
-        if !self.matches_host(host) {
+    pub fn matches(&self, host: &str, path: Option<&str>, port: Option<u16>) -> bool {
+        if !self.matches_host(host) || !self.matches_port(port) {
             return false;
         }
         match (&self.path_prefix, path) {
@@ -261,6 +336,17 @@ impl Rule {
             // A path prefix, but the transport is opaque (HTTPS via CONNECT), so
             // the prefix degrades to host-only. This is the documented caveat.
             (Some(_), None) => true,
+        }
+    }
+
+    /// The address and port this rule names, when it names an address literal.
+    ///
+    /// The netfilter needs this: an address entry is reachable without the proxy, so
+    /// the plan turns each one into an iptables rule of its own.
+    pub fn literal_target(&self) -> Option<(IpAddr, Option<u16>)> {
+        match &self.matcher {
+            HostMatcher::Address(address) => Some((*address, self.port)),
+            _ => None,
         }
     }
 
@@ -468,7 +554,11 @@ impl Allowlist {
     /// Deny rules are all evaluated first and short-circuit, so ordering in the
     /// list is irrelevant: this is what makes `*.example.com` + `!tracker.example.com`
     /// behave the way an operator expects.
-    pub fn decide(&self, host: &str, path: Option<&str>) -> Decision {
+    ///
+    /// `port` is the destination port when the caller knows it. `None` means "not
+    /// known", which is not the same as "any": a rule that names a port refuses to
+    /// match, because an unknown port must not be able to satisfy a narrower rule.
+    pub fn decide(&self, host: &str, path: Option<&str>, port: Option<u16>) -> Decision {
         let host = normalise_host(host);
         if host.is_empty() {
             return Decision::Denied {
@@ -477,7 +567,7 @@ impl Allowlist {
         }
 
         for rule in self.rules.iter().filter(|r| r.kind == RuleKind::Deny) {
-            if rule.matches(&host, path) {
+            if rule.matches(&host, path, port) {
                 return Decision::Denied {
                     rule: rule.raw.clone(),
                 };
@@ -493,7 +583,7 @@ impl Allowlist {
         }
 
         for rule in self.rules.iter().filter(|r| r.kind == RuleKind::Allow) {
-            if rule.matches(&host, path) {
+            if rule.matches(&host, path, port) {
                 return Decision::Allowed {
                     rule: rule.raw.clone(),
                 };
@@ -501,6 +591,91 @@ impl Allowlist {
         }
 
         Decision::NoMatch
+    }
+
+    /// Decide a request where only the host is known, ignoring port and path.
+    ///
+    /// This answers "is there a rule that reaches this destination at all?", which is
+    /// what telling the model it *already has* something needs. A rule that names a
+    /// port counts, because the sandbox really can reach that host — refusing to
+    /// acknowledge it would send the model to ask for something else it cannot have.
+    ///
+    /// Reporting only. It must never be used to enforce a connection: it is strictly
+    /// wider than [`Self::decide`], and enforcing with it would ignore the port.
+    pub fn decide_host_only(&self, host: &str) -> Decision {
+        let host = normalise_host(host);
+        if host.is_empty() {
+            return Decision::Denied {
+                rule: "empty hostname".to_string(),
+            };
+        }
+        for rule in self.rules.iter().filter(|r| r.kind == RuleKind::Deny) {
+            if rule.matches_host(&host) {
+                return Decision::Denied {
+                    rule: rule.raw.clone(),
+                };
+            }
+        }
+        if self.required.iter().any(|required| required == &host) {
+            return Decision::Allowed {
+                rule: format!("{host} (required)"),
+            };
+        }
+        for rule in self.rules.iter().filter(|r| r.kind == RuleKind::Allow) {
+            if rule.matches_host(&host) {
+                return Decision::Allowed {
+                    rule: rule.raw.clone(),
+                };
+            }
+        }
+        Decision::NoMatch
+    }
+
+    /// Every address literal this list allows, with its port when it named one.
+    ///
+    /// Address entries are enforceable without the proxy, so the plan turns each of
+    /// these into a netfilter rule and a published port. Hostname entries are absent
+    /// on purpose: they stay proxy-only, which is where the path rules and the
+    /// rebinding refusal live.
+    pub fn direct_targets(&self) -> Vec<(IpAddr, Option<u16>)> {
+        let mut found: Vec<(IpAddr, Option<u16>)> = self
+            .rules
+            .iter()
+            .filter(|rule| rule.kind == RuleKind::Allow)
+            .filter_map(Rule::literal_target)
+            .collect();
+        found.sort_by_key(|(address, port)| (address.to_string(), *port));
+        found.dedup();
+        found
+    }
+
+    /// The ports this list publishes on the host, for the entries that name an
+    /// address and a port.
+    ///
+    /// Deduplicated and sorted, because a port published twice would make `docker run`
+    /// fail with "port is already allocated" for a reason the operator cannot see.
+    pub fn published_ports(&self) -> Vec<u16> {
+        let mut ports: Vec<u16> = self
+            .direct_targets()
+            .into_iter()
+            .filter_map(|(_, port)| port)
+            .collect();
+        ports.sort_unstable();
+        ports.dedup();
+        ports
+    }
+
+    /// Addresses this list names literally that may be reached on `port`, even though
+    /// they are in loopback or private space.
+    ///
+    /// An address entry with no port covers every port, which is what makes
+    /// `127.0.0.1` mean the operator's own machine rather than nothing.
+    pub fn explicit_addresses_for_port(&self, port: u16) -> Vec<IpAddr> {
+        self.direct_targets()
+            .into_iter()
+            .filter(|(_, target_port)| target_port.is_none() || *target_port == Some(port))
+            .map(|(address, _)| address)
+            .collect()
     }
 
     /// Whether this list would let a secret leave, which is what the approval
@@ -544,6 +719,68 @@ fn path_prefix_matches(prefix: &str, path: &str) -> bool {
         Some('#') => true,
         Some(_) => false,
     }
+}
+
+/// Split a trailing `:port` off a host or an address literal.
+///
+/// The ambiguous case is IPv6, so the rules are stated rather than guessed:
+///
+/// * `[fe80::1]:8080` — a bracketed literal, port after the bracket.
+/// * `[fe80::1]` — a bracketed literal, no port.
+/// * `2001:db8::1` — more than one colon and no brackets, so it is an address and
+///   **not** a host with port `1`. Reading a port out of it would silently narrow a
+///   rule the operator wrote to cover every port.
+/// * `example.com:8080` — one colon, digits after it, so it is a port.
+/// * `example.com:http` — a non-numeric port is an error rather than a hostname,
+///   because `example.com:http` cannot be meant as a hostname either.
+fn split_port(value: &str) -> Result<(&str, Option<u16>), String> {
+    let value = value.trim();
+
+    if let Some(rest) = value.strip_prefix('[') {
+        let Some(close) = rest.find(']') else {
+            return Err("a '[' needs a matching ']'".to_string());
+        };
+        let host = rest[..close].trim();
+        let after = rest[close + 1..].trim();
+        if after.is_empty() {
+            return Ok((host, None));
+        }
+        let Some(digits) = after.strip_prefix(':') else {
+            return Err(format!("'{after}' cannot follow an address"));
+        };
+        return Ok((host, Some(parse_port(digits)?)));
+    }
+
+    match value.rsplit_once(':') {
+        // Exactly one colon and no ':' in the host part: host and port.
+        Some((host, digits)) if !host.contains(':') => {
+            Ok((host.trim(), Some(parse_port(digits)?)))
+        }
+        // A bare IPv6 literal, or no colon at all.
+        _ => Ok((value, None)),
+    }
+}
+
+fn parse_port(digits: &str) -> Result<u16, String> {
+    let port = digits
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| format!("'{digits}' is not a port number"))?;
+    if port == 0 {
+        return Err("port 0 is not a destination".to_string());
+    }
+    Ok(port)
+}
+
+/// Parse a host value as an address, if it is one. Brackets are tolerated, so a
+/// value straight out of an authority parses the same as the allowlist entry.
+fn host_literal(host: &str) -> Option<IpAddr> {
+    let host = host.trim();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
+    host.parse::<IpAddr>().ok()
 }
 
 pub fn normalise_host(host: &str) -> String {
@@ -751,41 +988,41 @@ mod tests {
     #[test]
     fn an_exact_host_does_not_permit_a_longer_hostname() {
         let allow = list(&["api.github.com"]);
-        assert!(allow.decide("api.github.com", None).is_allowed());
+        assert!(allow.decide("api.github.com", None, None).is_allowed());
         // The attack this guards against: a suffix match would permit this.
         assert_eq!(
-            allow.decide("api.github.com.attacker.com", None),
+            allow.decide("api.github.com.attacker.com", None, None),
             Decision::NoMatch
         );
         assert_eq!(
-            allow.decide("attacker.com.api.github.com", None),
+            allow.decide("attacker.com.api.github.com", None, None),
             Decision::NoMatch
         );
-        assert_eq!(allow.decide("github.com", None), Decision::NoMatch);
+        assert_eq!(allow.decide("github.com", None, None), Decision::NoMatch);
     }
 
     #[test]
     fn an_exact_host_does_not_permit_a_prefix_either() {
         let allow = list(&["github.com"]);
-        assert_eq!(allow.decide("api.github.com", None), Decision::NoMatch);
-        assert_eq!(allow.decide("notgithub.com", None), Decision::NoMatch);
+        assert_eq!(allow.decide("api.github.com", None, None), Decision::NoMatch);
+        assert_eq!(allow.decide("notgithub.com", None, None), Decision::NoMatch);
     }
 
     #[test]
     fn a_wildcard_covers_subdomains_but_not_the_apex_or_a_lookalike() {
         let allow = list(&["*.githubusercontent.com"]);
-        assert!(allow.decide("raw.githubusercontent.com", None).is_allowed());
-        assert!(allow.decide("a.b.githubusercontent.com", None).is_allowed());
+        assert!(allow.decide("raw.githubusercontent.com", None, None).is_allowed());
+        assert!(allow.decide("a.b.githubusercontent.com", None, None).is_allowed());
         assert_eq!(
-            allow.decide("githubusercontent.com", None),
+            allow.decide("githubusercontent.com", None, None),
             Decision::NoMatch
         );
         assert_eq!(
-            allow.decide("raw.githubusercontent.com.attacker.com", None),
+            allow.decide("raw.githubusercontent.com.attacker.com", None, None),
             Decision::NoMatch
         );
         assert_eq!(
-            allow.decide("notgithubusercontent.com", None),
+            allow.decide("notgithubusercontent.com", None, None),
             Decision::NoMatch
         );
     }
@@ -793,8 +1030,8 @@ mod tests {
     #[test]
     fn hostnames_are_compared_case_insensitively_and_without_a_trailing_dot() {
         let allow = list(&["Registry.NPMJS.org"]);
-        assert!(allow.decide("registry.npmjs.org", None).is_allowed());
-        assert!(allow.decide("REGISTRY.NPMJS.ORG.", None).is_allowed());
+        assert!(allow.decide("registry.npmjs.org", None, None).is_allowed());
+        assert!(allow.decide("REGISTRY.NPMJS.ORG.", None, None).is_allowed());
     }
 
     /* --------------------------------------------------------------------- */
@@ -804,9 +1041,9 @@ mod tests {
     #[test]
     fn a_deny_entry_beats_a_matching_allow_entry() {
         let allow = list(&["*.example.com", "!tracker.example.com"]);
-        assert!(allow.decide("app.example.com", None).is_allowed());
+        assert!(allow.decide("app.example.com", None, None).is_allowed());
         assert!(matches!(
-            allow.decide("tracker.example.com", None),
+            allow.decide("tracker.example.com", None, None),
             Decision::Denied { .. }
         ));
     }
@@ -817,19 +1054,19 @@ mod tests {
         let deny_last = list(&["*.example.com", "!tracker.example.com"]);
         for allow in [deny_first, deny_last] {
             assert!(matches!(
-                allow.decide("tracker.example.com", None),
+                allow.decide("tracker.example.com", None, None),
                 Decision::Denied { .. }
             ));
-            assert!(allow.decide("app.example.com", None).is_allowed());
+            assert!(allow.decide("app.example.com", None, None).is_allowed());
         }
     }
 
     #[test]
     fn a_deny_entry_beats_the_all_rule() {
         let allow = list(&["*", "!metadata.google.internal"]);
-        assert!(allow.decide("example.com", None).is_allowed());
+        assert!(allow.decide("example.com", None, None).is_allowed());
         assert!(matches!(
-            allow.decide("metadata.google.internal", None),
+            allow.decide("metadata.google.internal", None, None),
             Decision::Denied { .. }
         ));
     }
@@ -841,8 +1078,8 @@ mod tests {
     #[test]
     fn an_empty_allowlist_denies_everything() {
         let allow = Allowlist::empty();
-        assert_eq!(allow.decide("registry.npmjs.org", None), Decision::NoMatch);
-        assert_eq!(allow.decide("example.com", Some("/x")), Decision::NoMatch);
+        assert_eq!(allow.decide("registry.npmjs.org", None, None), Decision::NoMatch);
+        assert_eq!(allow.decide("example.com", Some("/x"), None), Decision::NoMatch);
     }
 
     #[test]
@@ -858,14 +1095,14 @@ mod tests {
             "objects.githubusercontent.com",
         ] {
             assert!(
-                allow.decide(host, None).is_allowed(),
+                allow.decide(host, None, None).is_allowed(),
                 "the developer preset should permit {host}"
             );
         }
         // And it should not be a blanket allow.
         for host in ["evil.example", "telemetry.vendor.io", "attacker.test"] {
             assert_eq!(
-                allow.decide(host, None),
+                allow.decide(host, None, None),
                 Decision::NoMatch,
                 "the developer preset must not permit {host}"
             );
@@ -887,15 +1124,15 @@ mod tests {
     #[test]
     fn an_anchored_regex_matches_the_full_hostname_only() {
         let allow = list(&[r"re:^api\d*\.example\.com$"]);
-        assert!(allow.decide("api.example.com", None).is_allowed());
-        assert!(allow.decide("api12.example.com", None).is_allowed());
+        assert!(allow.decide("api.example.com", None, None).is_allowed());
+        assert!(allow.decide("api12.example.com", None, None).is_allowed());
         // Anchoring is what forbids these.
         assert_eq!(
-            allow.decide("api.example.com.attacker.com", None),
+            allow.decide("api.example.com.attacker.com", None, None),
             Decision::NoMatch
         );
         assert_eq!(
-            allow.decide("xapi.example.com", None),
+            allow.decide("xapi.example.com", None, None),
             Decision::NoMatch
         );
     }
@@ -912,20 +1149,20 @@ mod tests {
     #[test]
     fn a_path_prefix_is_segment_aware() {
         let allow = list(&["github.com/org/repo"]);
-        assert!(allow.decide("github.com", Some("/org/repo")).is_allowed());
+        assert!(allow.decide("github.com", Some("/org/repo"), None).is_allowed());
         assert!(allow
-            .decide("github.com", Some("/org/repo/tree/main"))
+            .decide("github.com", Some("/org/repo/tree/main"), None)
             .is_allowed());
         assert!(allow
-            .decide("github.com", Some("/org/repo?tab=readme"))
+            .decide("github.com", Some("/org/repo?tab=readme"), None)
             .is_allowed());
         // `/org/repository` must not be covered by the `/org/repo` prefix.
         assert_eq!(
-            allow.decide("github.com", Some("/org/repository")),
+            allow.decide("github.com", Some("/org/repository"), None),
             Decision::NoMatch
         );
         assert_eq!(
-            allow.decide("github.com", Some("/other/repo")),
+            allow.decide("github.com", Some("/other/repo"), None),
             Decision::NoMatch
         );
     }
@@ -937,11 +1174,11 @@ mod tests {
     fn a_path_prefix_degrades_to_host_only_when_the_transport_hides_the_path() {
         let allow = list(&["github.com/org/repo"]);
         assert_eq!(
-            allow.decide("github.com", Some("/other/place")),
+            allow.decide("github.com", Some("/other/place"), None),
             Decision::NoMatch
         );
         // `None` means "opaque tunnel": the path cannot be checked.
-        assert!(allow.decide("github.com", None).is_allowed());
+        assert!(allow.decide("github.com", None, None).is_allowed());
     }
 
     #[test]
@@ -969,7 +1206,7 @@ mod tests {
     #[test]
     fn the_all_rule_is_flagged_as_broad() {
         let allow = list(&["*"]);
-        assert!(allow.decide("anything.example", None).is_allowed());
+        assert!(allow.decide("anything.example", None, None).is_allowed());
         let broad = allow.broad_allow_rules();
         assert_eq!(broad.len(), 1);
         assert_eq!(broad[0].raw, "*");
@@ -1001,8 +1238,8 @@ mod tests {
     #[test]
     fn a_required_host_is_allowed_even_when_the_rest_is_default_deny() {
         let allow = Allowlist::empty().with_required_hosts(["api.deepseek.com"]);
-        assert!(allow.decide("api.deepseek.com", None).is_allowed());
-        assert_eq!(allow.decide("example.com", None), Decision::NoMatch);
+        assert!(allow.decide("api.deepseek.com", None, None).is_allowed());
+        assert_eq!(allow.decide("example.com", None, None), Decision::NoMatch);
     }
 
     #[test]
@@ -1013,7 +1250,7 @@ mod tests {
             .with_required_hosts(["api.deepseek.com"])
             .with_entries(["!api.deepseek.com"]);
         assert!(matches!(
-            allow.decide("api.deepseek.com", None),
+            allow.decide("api.deepseek.com", None, None),
             Decision::Denied { .. }
         ));
     }
@@ -1047,7 +1284,7 @@ mod tests {
     fn the_lenient_parse_keeps_the_good_entries_and_reports_the_rest() {
         let (allow, problems) = Allowlist::parse_lenient(["good.example", "re:nope"]);
         assert_eq!(problems.len(), 1);
-        assert!(allow.decide("good.example", None).is_allowed());
+        assert!(allow.decide("good.example", None, None).is_allowed());
     }
 
     #[test]
@@ -1069,14 +1306,14 @@ mod tests {
     #[test]
     fn the_decision_explanation_names_the_rule_responsible() {
         let allow = list(&["registry.npmjs.org", "!evil.example"]);
-        let text = allow.decide("registry.npmjs.org", None).explain("registry.npmjs.org", None);
+        let text = allow.decide("registry.npmjs.org", None, None).explain("registry.npmjs.org", None);
         assert!(text.contains("allowed"), "{text}");
         assert!(text.contains("registry.npmjs.org"), "{text}");
 
-        let text = allow.decide("evil.example", None).explain("evil.example", None);
+        let text = allow.decide("evil.example", None, None).explain("evil.example", None);
         assert!(text.contains("denied"), "{text}");
 
-        let text = allow.decide("other.example", None).explain("other.example", None);
+        let text = allow.decide("other.example", None, None).explain("other.example", None);
         assert!(text.contains("default is to deny"), "{text}");
     }
 
@@ -1087,9 +1324,9 @@ mod tests {
         assert_eq!(allow.to_entries(), entries);
         // And the re-parsed list behaves identically.
         let again = Allowlist::parse(allow.to_entries()).unwrap();
-        assert!(again.decide("registry.npmjs.org", None).is_allowed());
+        assert!(again.decide("registry.npmjs.org", None, None).is_allowed());
         assert!(matches!(
-            again.decide("tracker.example", None),
+            again.decide("tracker.example", None, None),
             Decision::Denied { .. }
         ));
     }
@@ -1111,7 +1348,7 @@ mod tests {
     fn preset_polyglot_permits_the_extra_ecosystems() {
         let allow = Allowlist::parse(POLYGLOT_PRESET).unwrap();
         for host in ["crates.io", "static.crates.io", "proxy.golang.org", "rubygems.org"] {
-            assert!(allow.decide(host, None).is_allowed(), "missing {host}");
+            assert!(allow.decide(host, None, None).is_allowed(), "missing {host}");
         }
     }
 
@@ -1130,9 +1367,9 @@ mod tests {
     #[test]
     fn the_effective_list_is_the_union_of_global_and_project() {
         let allow = merged(&["registry.npmjs.org"], &["api.example.com"]);
-        assert!(allow.decide("registry.npmjs.org", None).is_allowed());
-        assert!(allow.decide("api.example.com", None).is_allowed());
-        assert_eq!(allow.decide("other.example", None), Decision::NoMatch);
+        assert!(allow.decide("registry.npmjs.org", None, None).is_allowed());
+        assert!(allow.decide("api.example.com", None, None).is_allowed());
+        assert_eq!(allow.decide("other.example", None, None), Decision::NoMatch);
     }
 
     /// The reason for keeping two levels: one lever to ban something everywhere.
@@ -1140,10 +1377,10 @@ mod tests {
     fn a_global_deny_overrides_a_project_allow() {
         let allow = merged(&["!metrics.vendor.io"], &["metrics.vendor.io", "app.example.com"]);
         assert!(matches!(
-            allow.decide("metrics.vendor.io", None),
+            allow.decide("metrics.vendor.io", None, None),
             Decision::Denied { .. }
         ));
-        assert!(allow.decide("app.example.com", None).is_allowed());
+        assert!(allow.decide("app.example.com", None, None).is_allowed());
     }
 
     #[test]
@@ -1151,18 +1388,18 @@ mod tests {
         let project_a = merged(&["*.example.com"], &["!internal.example.com"]);
         let project_b = merged(&["*.example.com"], &[]);
         assert!(matches!(
-            project_a.decide("internal.example.com", None),
+            project_a.decide("internal.example.com", None, None),
             Decision::Denied { .. }
         ));
         // Project B has no such deny, so the global wildcard still applies.
-        assert!(project_b.decide("internal.example.com", None).is_allowed());
+        assert!(project_b.decide("internal.example.com", None, None).is_allowed());
     }
 
     #[test]
     fn the_merge_is_case_insensitively_deduplicated() {
         let allow = merged(&["Registry.NPMJS.org"], &["registry.npmjs.org"]);
         assert_eq!(allow.to_entries().len(), 1, "{:?}", allow.to_entries());
-        assert!(allow.decide("registry.npmjs.org", None).is_allowed());
+        assert!(allow.decide("registry.npmjs.org", None, None).is_allowed());
     }
 
     #[test]
@@ -1182,7 +1419,7 @@ mod tests {
         let b = merged(&["!tracker.example"], &["tracker.example"]);
         for allow in [a, b] {
             assert!(matches!(
-                allow.decide("tracker.example", None),
+                allow.decide("tracker.example", None, None),
                 Decision::Denied { .. }
             ));
         }
@@ -1266,5 +1503,189 @@ mod tests {
     fn localhost_resolves_to_a_v4_endpoint_on_its_url_port() {
         let found = endpoints_for_url("http://localhost:9/");
         assert_eq!(found, vec!["127.0.0.1:9".to_string()]);
+    }
+
+    /* --------------------------------------------------------------------- */
+    /* Ports                                                                  */
+    /* --------------------------------------------------------------------- */
+
+    #[test]
+    fn an_entry_may_name_a_port() {
+        let allow = list(&["example.com:8443"]);
+        assert!(allow.decide("example.com", None, Some(8443)).is_allowed());
+        for other in [443, 80, 8444, 1] {
+            assert_eq!(
+                allow.decide("example.com", None, Some(other)),
+                Decision::NoMatch,
+                "port {other} must not be covered by a rule written for 8443"
+            );
+        }
+    }
+
+    #[test]
+    fn an_entry_without_a_port_covers_every_port() {
+        let allow = list(&["example.com"]);
+        for port in [1, 80, 443, 3306, 65535] {
+            assert!(allow.decide("example.com", None, Some(port)).is_allowed());
+        }
+    }
+
+    /// An unknown port is not "any port": a rule that names one must not match when the
+    /// caller cannot say what the port is, or narrowing a rule would widen it instead.
+    #[test]
+    fn a_rule_that_names_a_port_does_not_match_an_unknown_port() {
+        let allow = list(&["example.com:8443"]);
+        assert_eq!(allow.decide("example.com", None, None), Decision::NoMatch);
+        // ...while a rule that names no port still matches, which is what keeps this
+        // usable for callers that only know the host.
+        let any = list(&["example.com"]);
+        assert!(any.decide("example.com", None, None).is_allowed());
+    }
+
+    #[test]
+    fn a_deny_entry_with_a_port_only_denies_that_port() {
+        let allow = list(&["example.com", "!example.com:22"]);
+        assert!(allow.decide("example.com", None, Some(443)).is_allowed());
+        assert!(matches!(
+            allow.decide("example.com", None, Some(22)),
+            Decision::Denied { .. }
+        ));
+    }
+
+    #[test]
+    fn a_port_cannot_be_attached_to_the_all_rule() {
+        let err = Rule::parse("*:80").unwrap_err();
+        assert!(err.contains("port"), "unhelpful error: {err}");
+    }
+
+    #[test]
+    fn a_non_numeric_port_is_an_error_rather_than_a_hostname() {
+        assert!(Rule::parse("example.com:http").is_err());
+        assert!(Rule::parse("example.com:0").is_err());
+        assert!(Rule::parse("example.com:99999").is_err());
+    }
+
+    #[test]
+    fn a_port_survives_the_round_trip_through_the_textarea_form() {
+        let entries = ["example.com:8443", "192.168.1.50:5432", "!db.internal:6379"];
+        let allow = list(&entries);
+        assert_eq!(allow.to_entries(), entries);
+        let again = Allowlist::parse(allow.to_entries()).unwrap();
+        assert!(again.decide("example.com", None, Some(8443)).is_allowed());
+        assert!(matches!(
+            again.decide("db.internal", None, Some(6379)),
+            Decision::Denied { .. }
+        ));
+    }
+
+    /* --------------------------------------------------------------------- */
+    /* Address literals                                                       */
+    /* --------------------------------------------------------------------- */
+
+    #[test]
+    fn an_address_entry_matches_the_literal_and_not_the_text() {
+        let allow = list(&["192.168.1.50"]);
+        assert!(allow.decide("192.168.1.50", None, Some(5432)).is_allowed());
+        assert_eq!(allow.decide("192.168.1.51", None, Some(5432)), Decision::NoMatch);
+        // A hostname is not an address, in either direction.
+        assert_eq!(allow.decide("db.internal", None, Some(5432)), Decision::NoMatch);
+    }
+
+    #[test]
+    fn an_address_entry_narrows_to_its_port_when_it_names_one() {
+        let allow = list(&["192.168.1.50:5432"]);
+        assert!(allow.decide("192.168.1.50", None, Some(5432)).is_allowed());
+        assert_eq!(
+            allow.decide("192.168.1.50", None, Some(6379)),
+            Decision::NoMatch
+        );
+    }
+
+    #[test]
+    fn an_ipv6_address_may_be_bracketed_with_a_port() {
+        let allow = list(&["[fe80::1]:8080"]);
+        assert!(allow.decide("fe80::1", None, Some(8080)).is_allowed());
+        assert_eq!(allow.decide("fe80::1", None, Some(8081)), Decision::NoMatch);
+        // The bracketed form and the bare form are the same address.
+        let bare = list(&["fe80::1"]);
+        assert!(bare.decide("[fe80::1]", None, Some(9)).is_allowed());
+    }
+
+    /// A bare IPv6 literal has several colons, so it must not be read as a host with a
+    /// port — doing so would silently narrow a rule that was meant to cover every port.
+    #[test]
+    fn a_bare_ipv6_literal_is_not_read_as_a_host_and_port() {
+        let rule = Rule::parse("2001:db8::1").unwrap();
+        assert_eq!(rule.port, None);
+        assert!(rule.matches_host("2001:db8::1"));
+        // The trailing group is a real address component, not a port.
+        assert!(Rule::parse("2001:db8::1").unwrap().matches_port(Some(443)));
+    }
+
+    #[test]
+    fn an_address_entry_is_flagged_as_neither_broad_nor_a_hostname() {
+        let allow = list(&["127.0.0.1:8080"]);
+        assert!(allow.broad_allow_rules().is_empty());
+        assert!(validate(&["127.0.0.1:8080".to_string()]).is_acceptable());
+    }
+
+    /* --------------------------------------------------------------------- */
+    /* What the netfilter and the publish flags are derived from              */
+    /* --------------------------------------------------------------------- */
+
+    #[test]
+    fn direct_targets_are_only_the_address_entries_that_are_allowed() {
+        let allow = list(&[
+            "registry.npmjs.org",
+            "192.168.1.50:5432",
+            "127.0.0.1",
+            "!10.0.0.9",
+            "[fe80::1]:8080",
+        ]);
+        assert_eq!(
+            allow.direct_targets(),
+            vec![
+                ("127.0.0.1".parse::<IpAddr>().unwrap(), None),
+                ("192.168.1.50".parse::<IpAddr>().unwrap(), Some(5432)),
+                ("fe80::1".parse::<IpAddr>().unwrap(), Some(8080)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_denied_address_is_not_a_direct_target() {
+        let allow = list(&["!192.168.1.50:5432"]);
+        assert!(allow.direct_targets().is_empty());
+    }
+
+    #[test]
+    fn published_ports_are_deduplicated_and_sorted() {
+        let allow = list(&["192.168.1.50:5432", "127.0.0.1:5432", "10.0.0.1:3000"]);
+        assert_eq!(allow.published_ports(), vec![3000, 5432]);
+        // An entry with no port publishes nothing: it would otherwise publish every port.
+        let no_port = list(&["127.0.0.1"]);
+        assert!(no_port.published_ports().is_empty());
+    }
+
+    #[test]
+    fn an_explicit_address_covers_its_port_and_an_unported_entry_covers_all() {
+        let allow = list(&["192.168.1.50:5432", "127.0.0.1"]);
+        let named = allow.explicit_addresses_for_port(5432);
+        assert!(named.contains(&"192.168.1.50".parse().unwrap()));
+        assert!(named.contains(&"127.0.0.1".parse().unwrap()));
+        // Port 6379 is covered only by the entry that names no port.
+        let other = allow.explicit_addresses_for_port(6379);
+        assert!(!other.contains(&"192.168.1.50".parse().unwrap()));
+        assert!(other.contains(&"127.0.0.1".parse().unwrap()));
+    }
+
+    /// `decide_host_only` is the reporting form: it answers "can this sandbox reach this
+    /// destination at all", which is what telling the model it already has something
+    /// needs. It must be wider than `decide`, and that difference is the point.
+    #[test]
+    fn the_host_only_decision_ignores_the_port_while_the_real_one_does_not() {
+        let allow = list(&["192.168.1.50:5432"]);
+        assert_eq!(allow.decide("192.168.1.50", None, Some(6379)), Decision::NoMatch);
+        assert!(allow.decide_host_only("192.168.1.50").is_allowed());
     }
 }

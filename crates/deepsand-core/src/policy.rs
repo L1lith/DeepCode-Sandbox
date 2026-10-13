@@ -23,6 +23,8 @@ use crate::model::*;
 use crate::paths::{self, PathGuards};
 pub use crate::proxy::ProxyEndpoint;
 use crate::settings;
+use crate::allowlist;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 /// What a mount is for. Used for validation, display and tests.
@@ -339,6 +341,41 @@ pub fn plan_run(input: &PlanInput<'_>) -> Result<RunPlan> {
         ("DEEPSAND_GID".into(), settings::SANDBOX_GID.to_string()),
     ];
 
+    // The addresses the operator named in the allowlist, and the ports those entries
+    // publish. Both come from the *effective* list -- global plus project -- so an
+    // address allowed globally works in every project, which is what a global list
+    // means. `none` ignores the list entirely, hence the `honours_allowlist` guard.
+    let mut named_addresses: Vec<String> = Vec::new();
+    let mut published_ports: Vec<u16> = Vec::new();
+    if project.network.honours_allowlist() {
+        let (list, _) =
+            allowlist::effective(&input.app.egress_allowlist, project.network.allowlist());
+        let mut v6_skipped: Vec<String> = Vec::new();
+        for (address, port) in list.direct_targets() {
+            match address {
+                IpAddr::V4(v4) => named_addresses.push(match port {
+                    Some(port) => format!("{v4}:{port}"),
+                    None => v4.to_string(),
+                }),
+                // The container's IPv6 egress is deny-by-default, and the IPv4 rule set
+                // cannot express a v6 destination. Reported rather than dropped in
+                // silence: the entry still works through the proxy, so it is not broken,
+                // it is just narrower than it looks.
+                IpAddr::V6(v6) => v6_skipped.push(v6.to_string()),
+            }
+        }
+        published_ports = list.published_ports();
+        if !v6_skipped.is_empty() {
+            warnings.push(format!(
+                "the allowlist names IPv6 addresses ({}). The container's own rules cannot allow \
+                 those directly, so they are reachable only through the egress proxy -- which a \
+                 non-HTTP client such as a database driver does not use. List the IPv4 address \
+                 instead if that client needs to reach it.",
+                v6_skipped.join(", ")
+            ));
+        }
+    }
+
     if project.network.uses_proxy() {
         match (input.proxy, input.network_gateway.as_deref()) {
             (Some(proxy), Some(gateway)) => {
@@ -346,7 +383,7 @@ pub fn plan_run(input: &PlanInput<'_>) -> Result<RunPlan> {
                 // list is not consulted; `restricted` uses it.
                 let allow: Vec<String> = if project.network.honours_allowlist() {
                     match &project.network {
-                        NetworkPolicy::Restricted { allow } => allow.clone(),
+                        NetworkPolicy::Allowlisted { allow } => allow.clone(),
                         _ => Vec::new(),
                     }
                 } else {
@@ -459,6 +496,31 @@ pub fn plan_run(input: &PlanInput<'_>) -> Result<RunPlan> {
             "DEEPSAND_MODEL_ADDRS".into(),
             input.model_endpoints.join(","),
         ));
+    }
+
+    // The addresses the operator named, which the container's own rules allow directly
+    // so that a client which speaks no HTTP can reach them.
+    if !named_addresses.is_empty() {
+        env.push(("DEEPSAND_ALLOW_ADDRS".into(), named_addresses.join(",")));
+    }
+
+    // A port named on an address entry is published on the host's **loopback**, so a
+    // server the sandbox runs on it can be reached from the operator's side. Loopback
+    // and not 0.0.0.0: publishing on every interface would put it on the LAN, which
+    // nothing in the allowlist asked for.
+    if !published_ports.is_empty() {
+        env.push((
+            "DEEPSAND_PUBLISHED_PORTS".into(),
+            published_ports
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        ));
+        for port in &published_ports {
+            args.push("-p".into());
+            args.push(format!("127.0.0.1:{port}:{port}"));
+        }
     }
 
     // Secrets reach the sandbox through the environment, and only this way: never on
@@ -1192,13 +1254,13 @@ mod tests {
 
     #[test]
     fn restricted_mode_requires_the_proxy_and_wires_up_the_environment() {
-        let fixture = Fixture::new("restricted");
+        let fixture = Fixture::new("allowlisted");
         let mut app = fixture.app();
         app.egress_allowlist = vec!["api.deepseek.com".into()];
         let status = docker_status();
 
         let mut project = fixture.project.clone();
-        project.network = NetworkPolicy::Restricted { allow: app.egress_allowlist.clone() };
+        project.network = NetworkPolicy::Allowlisted { allow: app.egress_allowlist.clone() };
 
         // Without a proxy the plan must refuse rather than silently allow.
         let bare = PlanInput {
@@ -1236,6 +1298,84 @@ mod tests {
         // The proxy address is the only thing the netfilter script will allow,
         // so it must have been communicated.
         assert!(plan.env.iter().any(|(k, _)| k == "DEEPSAND_PROXY_ADDR"));
+    }
+
+    /// An address the operator named has to reach the container's own rules, and a port
+    /// named on one has to be published. Without both, the entry would appear in the UI
+    /// and do nothing -- which is worse than refusing it.
+    #[test]
+    fn a_named_address_becomes_a_netfilter_allowance_and_its_port_a_publication() {
+        let fixture = Fixture::new("named-addresses");
+        let mut app = fixture.app();
+        // One global entry, one project entry: both must take effect, because the
+        // effective list is the union and a global entry is not a project's business.
+        app.egress_allowlist = vec!["192.168.1.50:5432".into()];
+        let status = docker_status();
+
+        let mut project = fixture.project.clone();
+        project.network = NetworkPolicy::Allowlisted {
+            allow: vec!["db.internal".into(), "10.0.0.7".into()],
+        };
+
+        let proxy = ProxyEndpoint { host: "172.28.0.1".into(), port: 8917 };
+        let plan = plan_run(&PlanInput {
+            project: &project,
+            grants: &[],
+            app: &app,
+            docker_status: &status,
+            data_dir: &fixture.data_dir,
+            guards: &fixture.guards,
+            seccomp_host_path: Some(&fixture.seccomp_profile),
+            proxy: Some(&proxy),
+            network_gateway: Some("172.28.0.1".into()),
+            required_hosts: &[],
+            secrets_env_file: None,
+            model_endpoints: &[],
+            mcp_wait_ms: 1000,
+            resume: false,
+        })
+        .unwrap();
+
+        // The address with a port keeps it; the one without covers every port.
+        assert!(has_pair(
+            &plan,
+            "--env",
+            "DEEPSAND_ALLOW_ADDRS=10.0.0.7,192.168.1.50:5432"
+        ));
+        // The hostname entry is deliberately absent: it stays proxy-only, which is where
+        // the path rules and the rebinding refusal live.
+        assert!(!plan
+            .args
+            .iter()
+            .any(|arg| arg.contains("db.internal") && arg.starts_with("DEEPSAND_ALLOW_ADDRS")));
+
+        // The port is published on the host's loopback, and the container is told which
+        // ports to accept on INPUT.
+        assert!(has_pair(&plan, "-p", "127.0.0.1:5432:5432"));
+        assert!(has_pair(&plan, "--env", "DEEPSAND_PUBLISHED_PORTS=5432"));
+        assert!(
+            !plan.args.iter().any(|arg| arg.contains("0.0.0.0:5432")),
+            "publishing on every interface would put the port on the LAN"
+        );
+    }
+
+    /// An address entry must not leak into a mode that does not consult the list. The
+    /// fixture's project is in `internet` mode and the global list still names an
+    /// address, so neither the named-address allowance nor a published port may appear.
+    #[test]
+    fn named_addresses_are_ignored_in_modes_that_do_not_use_the_allowlist() {
+        let fixture = Fixture::new("named-addresses-internet");
+        assert!(
+            matches!(fixture.project.network, NetworkPolicy::Internet),
+            "this test is about a mode that ignores the list; the fixture must not be allowlisted"
+        );
+        let mut app = fixture.app();
+        app.egress_allowlist = vec!["192.168.1.50:5432".into()];
+        let status = docker_status();
+
+        let plan = plan_run(&fixture.input(&app, &status)).unwrap();
+        assert!(!plan.env.iter().any(|(k, _)| k == "DEEPSAND_ALLOW_ADDRS"));
+        assert!(!plan.args.iter().any(|arg| arg == "-p"));
     }
 
     #[test]

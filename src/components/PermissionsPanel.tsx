@@ -97,13 +97,13 @@ export function PermissionsPanel() {
     if (!current) return;
     setModeBusy(true);
     try {
-      // Switching into restricted mode keeps whatever this project already listed,
+      // Switching into allowlisted mode keeps whatever this project already listed,
       // and starts from an empty project list otherwise: the global list is
       // inherited automatically, so copying it in here would show the same entries
       // twice and make them look project-specific when they are not.
       const policy: NetworkPolicy =
-        next === "restricted"
-          ? { mode: "restricted", allow: allowlist()?.project ?? [] }
+        next === "allowlisted"
+          ? { mode: "allowlisted", allow: allowlist()?.project ?? [] }
           : ({ mode: next } as NetworkPolicy);
       await api.updateProjectSettings({ projectId: current.id, network: policy });
       await refreshProjects();
@@ -200,7 +200,7 @@ export function PermissionsPanel() {
                     [
                       { mode: "none" },
                       { mode: "internet" },
-                      { mode: "restricted", allow: [] },
+                      { mode: "allowlisted", allow: [] },
                       { mode: "full" },
                     ] as NetworkPolicy[]
                   }
@@ -227,7 +227,7 @@ export function PermissionsPanel() {
               <Show when={allowlist()} fallback={<span class="hint">Loading…</span>}>
                 {(view) => (
                   <>
-                    <Show when={!view().restricted}>
+                    <Show when={!view().allowlisted}>
                       <div class="callout callout-warn" style={{ "margin-top": "0.7rem" }}>
                         This project is in <span class="mono">{view().mode}</span> mode, so the
                         allowlist below is not consulted. Choose <strong>Allowlisted</strong> above for
@@ -272,7 +272,7 @@ export function PermissionsPanel() {
                         </For>
                         <button
                           class="btn btn-primary"
-                          disabled={allowlistBusy() || !view().restricted}
+                          disabled={allowlistBusy() || !view().allowlisted}
                           onClick={() => void saveAllowlist()}
                         >
                           {allowlistBusy() ? "Saving…" : "Save allowlist"}

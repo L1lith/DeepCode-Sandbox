@@ -333,7 +333,7 @@ pub struct AllowlistView {
     pub project_id: String,
     /// The project's network mode, so a UI can say whether any of this applies.
     pub mode: String,
-    pub restricted: bool,
+    pub allowlisted: bool,
     /// Entries belonging to this project. These are the ones the operator edits.
     pub project: Vec<String>,
     /// Operator-wide entries, inherited by every project. Read-only in this view.
