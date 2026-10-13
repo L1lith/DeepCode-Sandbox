@@ -201,13 +201,16 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   shell, set `MSYS2_ARG_CONV_EXCL='*'` or msys rewrites them.
 * **Release profile is `panic = "abort"`**, so no unwinding: a panic takes the
   process down. Prefer returning `Result` at the edges.
-* **Moving or renaming the checkout needs `cargo clean`.** Two things bake the
-  absolute path of the working directory into build output: `env!("CARGO_MANIFEST_DIR")`
-  in the test that reads `runtime/seccomp-hardened.json`, and Tauri's generated
-  permission files under `target/debug/build/tauri-*/out/`. After a rename the stale
-  binary or build script looks in the old directory and fails with `os error 3` and a
-  path you no longer have. `cargo clean -p tauri -p tauri-build` covers the second;
-  touching the file covers the first.
+* **Moving or renaming the checkout needs `cargo clean`, and that includes the
+  release profile.** Two things bake the absolute path of the working directory into
+  build output: `env!("CARGO_MANIFEST_DIR")` in the test that reads
+  `runtime/seccomp-hardened.json`, and Tauri's generated permission files under
+  `target/<profile>/build/tauri-*/out/`. After a rename the stale binary or build
+  script looks in the old directory and fails with `os error 3` and a path you no
+  longer have. `cargo clean -p tauri -p tauri-build -p deepsand-app` covers the
+  second in **both** profiles; touching the file covers the first. Do it before the
+  first build after a move, not after: `tauri build` otherwise fails at the *end* of
+  a long release build, which is where this note's second sentence comes from.
 
 ## Definition of done
 
