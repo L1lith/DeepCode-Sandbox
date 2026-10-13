@@ -528,3 +528,13 @@ function subscribe<T>(
   });
 }
 
+
+/**
+ * Start a project without waiting for its tools.
+ *
+ * The sandbox comes up on the image with no tools in it and the real build carries on behind it;
+ * when it finishes, the compiled binaries and npm globals are copied into the running container.
+ * A tool installed as a system package cannot arrive this way and still needs a restart.
+ */
+export const startSessionWithoutTools = (projectId: string, resume = true) =>
+  call<unknown>("start_session", { projectId, resume, withoutTools: true });

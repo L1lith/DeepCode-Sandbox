@@ -604,6 +604,10 @@ async fn dispatch(
                 state,
                 arg(args, "projectId")?,
                 optional(args, "resume")?,
+                // Remote callers get the same two choices the window has: waiting for the tools,
+                // or starting now and having them copied in. `optional` keeps an older client
+                // working, which never sends it.
+                optional(args, "withoutTools")?.unwrap_or(false),
             )
             .await?)
         }
@@ -686,6 +690,7 @@ async fn dispatch(
             state,
             optional(args, "projectId")?,
             optional(args, "buildTools")?,
+            false,
         )?)
         }
         "cleanup_orphans" => to_value(commands::cleanup_orphans_impl(state)?),

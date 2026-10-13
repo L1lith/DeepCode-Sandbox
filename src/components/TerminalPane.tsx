@@ -238,6 +238,27 @@ export function TerminalPane() {
     });
   }
 
+  /**
+   * Start now, with the tools built behind the session rather than in front of it.
+   *
+   * The same shape as `run`, deliberately: the button state, the toast and the fit all have to
+   * behave the same way, and a second path that skipped one of them is how a button ends up
+   * looking broken.
+   */
+  async function runWithoutTools() {
+    const current = project();
+    if (!current) return;
+    await sessionOperation(current.id, async () => {
+      try {
+        await api.startSessionWithoutTools(current.id);
+        toast("ok", `Starting ${current.name}`, "Installing the tools in the background.");
+        window.setTimeout(() => safeFit(), 120);
+      } catch (error) {
+        toast("error", "Could not start the sandbox", describeError(error));
+      }
+    });
+  }
+
   async function stop() {
     const current = project();
     if (!current) return;
@@ -407,6 +428,14 @@ export function TerminalPane() {
                           one, which is what this looked like while it waited for an answer that
                           never came. */}
                       {busy() ? "Starting…" : "Run project"}
+                    </button>
+                    <button
+                      class="btn"
+                      disabled={busy()}
+                      title="Start now on an image with no tools, and copy the built ones in when they are ready. A tool installed as a system package still needs a restart."
+                      onClick={() => void runWithoutTools()}
+                    >
+                      Start without tools
                     </button>
                   </Show>
                 </>

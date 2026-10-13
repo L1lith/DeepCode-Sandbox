@@ -827,11 +827,24 @@ fn gather_launch(state: &impl AsAppState, project_id: &str) -> CmdResult<Launch>
 }
 
 #[tauri::command]
-pub async fn start_session(app: AppHandle, state: State<'_, AppState>, project_id: String, resume: Option<bool>) -> CmdResult<SessionStatus> {
-    start_session_impl(&app, &state, project_id, resume).await
+pub async fn start_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    project_id: String,
+    resume: Option<bool>,
+    // Start now, with the tools built behind the session instead of in front of it.
+    without_tools: Option<bool>,
+) -> CmdResult<SessionStatus> {
+    start_session_impl(&app, &state, project_id, resume, without_tools.unwrap_or(false)).await
 }
 
-pub async fn start_session_impl(app: &AppHandle, state: &AppState, project_id: String, resume: Option<bool>) -> CmdResult<SessionStatus> {
+pub async fn start_session_impl(
+    app: &AppHandle,
+    state: &AppState,
+    project_id: String,
+    resume: Option<bool>,
+    without_tools: bool,
+) -> CmdResult<SessionStatus> {
 
     // Serialise starts. Two overlapping ones would each stop the other's half-built
     // container and then both run, and the second would fail on the container name.
@@ -846,12 +859,23 @@ pub async fn start_session_impl(app: &AppHandle, state: &AppState, project_id: S
     // A session may already be live; stop it first so start is idempotent.
     state.stop_session_internal(&project_id);
 
-    let launch = gather_launch(&state, &project_id)?;
+    let mut launch = gather_launch(&state, &project_id)?;
 
     let docker = state.docker().map_err(fail)?;
     docker
         .volume_create(&launch.volume)
         .map_err(|err| format!("could not create the session volume: {err}"))?;
+
+    // Started without waiting for the tools: the sandbox runs on the image with no tools in it,
+    // and the image this project actually wants is built behind it. What arrives later is copied
+    // into the running container -- the compiled binaries and the npm globals, which are the ones
+    // that take minutes. An apt package is a set of files in several places and cannot arrive
+    // this way, so a selection containing one still needs a restart.
+    if without_tools {
+        let settings =
+            container_settings::settings_for_project(store(&state).settings(), Some(&[] as &[String]));
+        launch.image = settings.image;
+    }
 
     // The first Run for a tool selection has no image yet. Build it here rather than
     // refusing: "run this project" plainly means "make it runnable", and the operator
@@ -868,7 +892,7 @@ pub async fn start_session_impl(app: &AppHandle, state: &AppState, project_id: S
         );
         let built = tauri::async_runtime::spawn_blocking(move || {
             let state = tauri::Manager::state::<AppState>(&handle);
-            build_runtime_image_impl(&handle, &state, Some(for_build), None)
+            build_runtime_image_impl(&handle, &state, Some(for_build), None, without_tools)
         })
         .await;
         match built {
@@ -887,6 +911,45 @@ pub async fn start_session_impl(app: &AppHandle, state: &AppState, project_id: S
             }
         }
         let _ = app.emit(events::BUILD_DONE, serde_json::json!({ "ok": true, "detail": "" }));
+    }
+
+    if without_tools {
+        // Recorded against the image the project actually wants, because that is what the build
+        // knows when it finishes.
+        let wanted = container_settings::settings_for_project(
+            store(&state).settings(),
+            store(&state).project(&project_id).map_err(fail)?.tools.as_deref(),
+        )
+        .image;
+        {
+            let mut queue = state.tools_arriving.lock().unwrap_or_else(|p| p.into_inner());
+            queue.entry(wanted.clone()).or_default().push(project_id.clone());
+        }
+        let handle = app.clone();
+        let for_build = project_id.clone();
+        let image_for_log = wanted;
+        std::thread::spawn(move || {
+            // A short wait for the sandbox to exist, because the tools are copied into it. A few
+            // seconds of polling is cheaper than threading a callback through the rest of the
+            // start path, and the build takes minutes anyway.
+            for _ in 0..60 {
+                let running = {
+                    let state = tauri::Manager::state::<AppState>(&handle);
+                    let sessions = state.sessions.lock().unwrap_or_else(|p| p.into_inner());
+                    sessions.contains_key(&for_build)
+                };
+                if running {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            let _ = handle.emit(
+                events::BUILD_LOG,
+                serde_json::json!({ "line": format!("Building {image_for_log} while the sandbox runs.") }),
+            );
+            let state = tauri::Manager::state::<AppState>(&handle);
+            let _ = build_runtime_image_impl(&handle, &state, Some(for_build), None, false);
+        });
     }
 
     let wants_resume = resume.unwrap_or(true);
@@ -1245,7 +1308,7 @@ pub async fn restart_session(app: AppHandle, state: State<'_, AppState>, project
 pub async fn restart_session_impl(app: &AppHandle, state: &AppState, project_id: String) -> CmdResult<SessionStatus> {
 
     state.stop_session_internal(&project_id);
-    start_session_impl(app, state, project_id, Some(true)).await
+    start_session_impl(app, state, project_id, Some(true), false).await
 }
 
 #[tauri::command]
@@ -1746,7 +1809,7 @@ async fn restart_after_grant(app: AppHandle, project_id: String) {
     tokio::time::sleep(Duration::from_millis(2500)).await;
     let state = app.state::<AppState>();
     state.stop_session_internal(&project_id);
-    let _ = start_session(app.clone(), state, project_id, Some(true)).await;
+    let _ = start_session(app.clone(), state, project_id, Some(true), None).await;
 }
 
 /// Background thread that surfaces requests from a running sandbox.
@@ -3283,7 +3346,7 @@ pub fn build_runtime_image(
     project_id: Option<String>,
     build_tools: Option<bool>,
 ) -> CmdResult<()> {
-    build_runtime_image_impl(&app, &state, project_id, build_tools)
+    build_runtime_image_impl(&app, &state, project_id, build_tools, false)
 }
 
 /// Build the runtime image for a project's tool selection.
@@ -3297,13 +3360,22 @@ pub fn build_runtime_image_impl(
     state: &AppState,
     project_id: Option<String>,
     build_tools: Option<bool>,
+    // Build with no tools selected at all. This is the image a sandbox can start on immediately:
+    // the runtime and the DeepCode CLI, but none of the tools being compiled. `Some(&[])` is a
+    // meaningful selection rather than a missing one, and it hashes to its own tag, so this is a
+    // different image from the one the project will end up with.
+    no_tools: bool,
 ) -> CmdResult<()> {
 
     let docker = state.docker().map_err(fail)?;
-    let selection = match &project_id {
-        Some(id) => store(&state).project(id).map_err(fail)?.tools.clone(),
-        // No project named: build the defaults, which is what a first-run build is.
-        None => None,
+    let selection = if no_tools {
+        Some(Vec::new())
+    } else {
+        match &project_id {
+            Some(id) => store(&state).project(id).map_err(fail)?.tools.clone(),
+            // No project named: build the defaults, which is what a first-run build is.
+            None => None,
+        }
     };
     let image = container_settings::settings_for_project(store(&state).settings(), selection.as_deref()).image;
 
@@ -3548,6 +3620,52 @@ pub fn build_runtime_image_impl(
                     write(line);
                     let _ =
                         app_handle.emit(events::BUILD_LOG, serde_json::json!({ "line": line }));
+                }
+            }
+        }
+
+        // Sandboxes that started before their tools existed: copy them in now. Only on success,
+        // and only into a session that is still running -- a project stopped since gets the tools
+        // from the image the next time it starts.
+        if result.is_ok() {
+            let waiting: Vec<String> = {
+                let state = tauri::Manager::state::<AppState>(&app_handle);
+                let mut queue = state.tools_arriving.lock().unwrap_or_else(|p| p.into_inner());
+                queue.remove(&image).unwrap_or_default()
+            };
+            for project_id in waiting {
+                let state = tauri::Manager::state::<AppState>(&app_handle);
+                let container = state
+                    .sessions
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get(&project_id)
+                    .map(|live| live.container_name.clone());
+                let Some(container) = container else {
+                    continue;
+                };
+                let copied = docker
+                    .copy_into_container(&container, &tool_cache.join("bin"), "/usr/local/bin")
+                    .and_then(|_| {
+                        docker.copy_into_container(
+                            &container,
+                            &tool_cache.join("node_modules"),
+                            "/usr/local/lib/node_modules",
+                        )
+                    })
+                    .is_ok();
+                let line = if copied {
+                    "deepsand: the tools finished building and were copied into the running sandbox"
+                } else {
+                    "deepsand: the tools finished building but could not be copied in; restart the project to pick them up"
+                };
+                write(line);
+                let _ = app_handle.emit(events::BUILD_LOG, serde_json::json!({ "line": line }));
+                if copied {
+                    let _ = app_handle.emit(
+                        events::TOOLS_ARRIVED,
+                        serde_json::json!({ "projectId": project_id, "image": image }),
+                    );
                 }
             }
         }

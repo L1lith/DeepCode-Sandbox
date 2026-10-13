@@ -42,6 +42,8 @@ pub mod events {
     /// when the build reports a step, so a subscriber can tell "no news" from
     /// "finished".
     pub const BUILD_PROGRESS: &str = "build://progress";
+    /// Tools finished building and were copied into a sandbox that had started without them.
+    pub const TOOLS_ARRIVED: &str = "build://tools-arrived";
     /// Any persisted change: the frontend re-reads what it needs.
     pub const STATE_CHANGED: &str = "state://changed";
     /// The egress proxy refused a host: `BlockedEgressView`
@@ -474,6 +476,12 @@ pub struct AppState {
     pub store: Mutex<Store>,
     pub docker: Mutex<Option<Docker>>,
     pub sessions: Mutex<HashMap<String, LiveSession>>,
+    /// Sandboxes that started before their tools existed, by the image being built for them.
+    ///
+    /// Keyed by image rather than by project because that is what the build knows when it
+    /// finishes: one build can have several projects waiting on it, and the queue is drained
+    /// when that build succeeds.
+    pub tools_arriving: Mutex<HashMap<String, Vec<String>>>,
     /// Images currently being built. Two builds of one image share one build log and one
     /// tag, and a second writer behind a first writer's file offset is how a log acquires a
     /// gap of NULs: whatever the second one writes lands where the first one had got to.
@@ -535,6 +543,7 @@ impl AppState {
             store: Mutex::new(store),
             docker: Mutex::new(None),
             sessions: Mutex::new(HashMap::new()),
+            tools_arriving: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             pending_order: Mutex::new(Vec::new()),
             brokers: Mutex::new(HashMap::new()),

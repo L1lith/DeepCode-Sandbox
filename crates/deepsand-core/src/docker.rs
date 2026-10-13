@@ -450,6 +450,21 @@ impl Docker {
         Ok(())
     }
 
+    /// Copy a directory's contents into a running container.
+    ///
+    /// A trailing `.` on the source is what makes this copy the *contents* rather than the
+    /// directory itself: `/usr/local/bin/.` lands in `/usr/local/bin`, while `/usr/local/bin`
+    /// would land in `/usr/local/bin/bin`. That distinction is the difference between a tool
+    /// being on `PATH` and being invisible.
+    ///
+    /// `docker cp` rather than a mount because the container is already running and its mounts
+    /// were fixed when it started.
+    pub fn copy_into_container(&self, container: &str, from: &Path, to: &str) -> Result<()> {
+        let source = format!("{}{}.", from.display(), std::path::MAIN_SEPARATOR);
+        self.run(&self.fmt(&["cp", &source, &format!("{container}:{to}")]))?;
+        Ok(())
+    }
+
     pub fn volume_create(&self, name: &str) -> Result<()> {
         if self
             .try_run(&self.fmt(&["volume", "inspect", name, "--format", "{{.Name}}"]))

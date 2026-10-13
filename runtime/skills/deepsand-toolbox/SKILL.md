@@ -119,3 +119,20 @@ exfiltration easy, and that warning is about exactly this.
 - Do not report a language as unavailable before calling `deepsand_sandbox_info`. It may already be there.
 - Do not request a package manager to install something that is already in the catalogue. Ask for the tool.
 - Do not request tools "just in case". Each one enlarges the image and the operator has to decide about it.
+
+
+## Tools can arrive while you are running
+
+A sandbox can be started before its tools have finished building, so that nobody waits ten minutes
+for a compiler. The tools are then compiled behind you and copied into this container when they
+are ready: it does not restart, and neither does your session.
+
+What that means in practice:
+
+- `deepsand_sandbox_info` lists the tools this sandbox was built with. If it lists one that is
+  not actually on `PATH` yet, the build has not finished. Try again in a minute or two rather
+  than reporting the tool as missing.
+- Only compiled binaries and npm globals arrive this way. A tool installed as a system package
+  needs the sandbox restarted, which the operator does from Deepsand.
+- None of this is a failure and none of it needs reporting as one. Do not install, reinstall or
+  work around a tool that is listed but not yet present -- wait, then use it.
