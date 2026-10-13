@@ -17,6 +17,7 @@ import {
   refreshProjectData,
   selectProject,
   selectedProject,
+  sessionOperation,
   store,
   toast,
   wireEvents,
@@ -42,9 +43,11 @@ export default function App() {
   const [showNewProject, setShowNewProject] = createSignal(false);
   const [showSettings, setShowSettings] = createSignal(false);
   const [showProjectSettings, setShowProjectSettings] = createSignal(false);
-  const [busy, setBusy] = createSignal(false);
 
   const project = () => selectedProject();
+  // The same state the terminal's button reads, so the two cannot disagree about whether a
+  // run is in flight -- which they did, and that is why one of them could be left greyed out.
+  const busy = () => store.sessionBusy === project()?.id;
 
   // The oldest outstanding request is the one on screen; the rest queue behind.
   const activeRequest = createMemo(() => {
@@ -64,43 +67,40 @@ export default function App() {
   async function run() {
     const current = project();
     if (!current) return;
-    setBusy(true);
-    try {
-      await api.startSession(current.id, true);
-      toast("ok", `Started ${current.name}`);
-      setTab("terminal");
-    } catch (error) {
-      toast("error", "Could not start the sandbox", describeError(error));
-    } finally {
-      setBusy(false);
-    }
+    await sessionOperation(current.id, async () => {
+      try {
+        await api.startSession(current.id, true);
+        toast("ok", `Started ${current.name}`);
+        setTab("terminal");
+      } catch (error) {
+        toast("error", "Could not start the sandbox", describeError(error));
+      }
+    });
   }
 
   async function stop() {
     const current = project();
     if (!current) return;
-    setBusy(true);
-    try {
-      await api.stopSession(current.id);
-    } catch (error) {
-      toast("error", "Could not stop the sandbox", describeError(error));
-    } finally {
-      setBusy(false);
-    }
+    await sessionOperation(current.id, async () => {
+      try {
+        await api.stopSession(current.id);
+      } catch (error) {
+        toast("error", "Could not stop the sandbox", describeError(error));
+      }
+    });
   }
 
   async function restart() {
     const current = project();
     if (!current) return;
-    setBusy(true);
-    try {
-      await api.restartSession(current.id);
-      toast("ok", "Sandbox restarted", "The session resumed where it left off.");
-    } catch (error) {
-      toast("error", "Could not restart the sandbox", describeError(error));
-    } finally {
-      setBusy(false);
-    }
+    await sessionOperation(current.id, async () => {
+      try {
+        await api.restartSession(current.id);
+        toast("ok", "Sandbox restarted", "The session resumed where it left off.");
+      } catch (error) {
+        toast("error", "Could not restart the sandbox", describeError(error));
+      }
+    });
   }
 
   async function pick(projectId: string) {
@@ -248,7 +248,7 @@ export default function App() {
                         when={current().running}
                         fallback={
                           <button class="btn btn-primary" disabled={busy()} onClick={() => void run()}>
-                            Run
+                            {busy() ? "Starting…" : "Run"}
                           </button>
                         }
                       >

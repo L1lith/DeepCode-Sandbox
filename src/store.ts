@@ -42,6 +42,14 @@ interface Store {
   buildLog: string[];
   building: boolean;
   /**
+   * The project whose session is being started, restarted or stopped right now, if any.
+   *
+   * This lives here rather than in each button because two buttons did own a copy of it and
+   * disagreed: the header's and the terminal's each had a local signal, so a run that failed
+   * could leave one greyed out for good while the other was fine. One project, one answer.
+   */
+  sessionBusy: string | null;
+  /**
    * The image being built, and how far along it is.
    *
    * `null` progress means the build has not reported a step yet, which is different
@@ -70,6 +78,7 @@ const [store, setStore] = createStore<Store>({
   audit: [],
   buildLog: [],
   building: false,
+  sessionBusy: null,
   buildImage: null,
   buildProgress: null,
   toasts: [],
@@ -229,6 +238,71 @@ export async function refreshSettings() {
   // it with null puts the strip back to "Checking Docker…" every time settings are reloaded,
   // which is what the operator saw as the app losing track of a daemon that was running.
   setStore({ settings, info: { ...info, docker: store.info?.docker ?? info.docker } });
+}
+
+/**
+ * How long an operation on a session may stay "in flight" before the button is let go.
+ *
+ * A first Run builds an image, which takes minutes, so this is not a timeout on the work --
+ * it is a floor on how long the operator can be locked out. The backend answers in every case
+ * it knows about; this is for the case it does not answer at all, and fifteen minutes of a
+ * disabled button with no explanation is what that looks like from the outside.
+ */
+const SESSION_BUSY_CEILING_MS = 15 * 60 * 1000;
+let sessionBusyTimer: number | null = null;
+
+/**
+ * Run an operation on a project's session, with the button state kept where every button reads
+ * it, and released whether the answer is a success, a failure, or nothing at all.
+ *
+ * The last case is the one that was missing: `finally` releases the button when a promise
+ * settles, which is every outcome except the promise never settling -- and a start that never
+ * answered left the button greyed out for the rest of the session, with the only way back being
+ * to restart the app.
+ */
+export async function sessionOperation(
+  projectId: string,
+  run: () => Promise<unknown>,
+): Promise<void> {
+  if (store.sessionBusy !== null) {
+    // Only this project's buttons are disabled, so a click on another project's Run would
+    // otherwise do nothing at all, which reads as a broken button rather than as a queue.
+    toast("warn", "Another sandbox is starting", "Wait for that to finish, then try again.");
+    return;
+  }
+  setStore("sessionBusy", projectId);
+  if (sessionBusyTimer !== null) window.clearTimeout(sessionBusyTimer);
+  sessionBusyTimer = window.setTimeout(() => {
+    sessionBusyTimer = null;
+    if (store.sessionBusy !== projectId) return;
+    setStore("sessionBusy", null);
+    toast(
+      "warn",
+      "The sandbox is not answering",
+      "Starting or stopping it has taken fifteen minutes without an answer, so the button is " +
+        "available again. It may still be working: the Activity tab and the log have the details.",
+    );
+    void api.logUiEvent(
+      "warn",
+      `a session operation for ${projectId} did not answer within fifteen minutes`,
+    );
+  }, SESSION_BUSY_CEILING_MS);
+
+  try {
+    await run();
+  } finally {
+    releaseSession(projectId);
+  }
+}
+
+/** Let go of the button, for a project whose operation has finished or has been answered. */
+export function releaseSession(projectId: string) {
+  if (store.sessionBusy !== projectId) return;
+  if (sessionBusyTimer !== null) {
+    window.clearTimeout(sessionBusyTimer);
+    sessionBusyTimer = null;
+  }
+  setStore("sessionBusy", null);
 }
 
 export async function refreshRequests() {

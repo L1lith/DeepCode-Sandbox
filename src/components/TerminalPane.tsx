@@ -10,19 +10,22 @@
  *    itself, which is what lets the container's TUI initialise at all.
  */
 
-import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, onCleanup, onMount, Show } from "solid-js";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import * as api from "../lib/api";
-import { attachTerminal, describeError, selectedProject, store, toast } from "../store";
+import { attachTerminal, describeError, selectedProject, sessionOperation, store, toast } from "../store";
 
 export function TerminalPane() {
   let host!: HTMLDivElement;
   let term: Terminal | undefined;
   let fit: FitAddon | undefined;
-  const [busy, setBusy] = createSignal(false);
+  // The button state lives in the store now: the header's Run and this one both act on the
+  // same project, and when each kept its own copy a failed run could leave this one greyed
+  // out for good while the header's was fine.
+  const busy = () => store.sessionBusy === project()?.id;
 
   const project = () => selectedProject();
 
@@ -127,29 +130,27 @@ export function TerminalPane() {
   async function run() {
     const current = project();
     if (!current) return;
-    setBusy(true);
-    try {
-      await api.startSession(current.id, true);
-      toast("ok", `Started ${current.name}`);
-      window.setTimeout(() => safeFit(), 120);
-    } catch (error) {
-      toast("error", "Could not start the sandbox", describeError(error));
-    } finally {
-      setBusy(false);
-    }
+    await sessionOperation(current.id, async () => {
+      try {
+        await api.startSession(current.id, true);
+        toast("ok", `Started ${current.name}`);
+        window.setTimeout(() => safeFit(), 120);
+      } catch (error) {
+        toast("error", "Could not start the sandbox", describeError(error));
+      }
+    });
   }
 
   async function stop() {
     const current = project();
     if (!current) return;
-    setBusy(true);
-    try {
-      await api.stopSession(current.id);
-    } catch (error) {
-      toast("error", "Could not stop the sandbox", describeError(error));
-    } finally {
-      setBusy(false);
-    }
+    await sessionOperation(current.id, async () => {
+      try {
+        await api.stopSession(current.id);
+      } catch (error) {
+        toast("error", "Could not stop the sandbox", describeError(error));
+      }
+    });
   }
 
   return (
@@ -201,7 +202,10 @@ export function TerminalPane() {
                     .
                   </p>
                   <button class="btn btn-primary" disabled={busy()} onClick={() => void run()}>
-                    Run project
+                    {/* A disabled button that says nothing is indistinguishable from a broken
+                        one, which is what this looked like while it waited for an answer that
+                        never came. */}
+                    {busy() ? "Starting…" : "Run project"}
                   </button>
                 </>
               )}
@@ -216,7 +220,7 @@ export function TerminalPane() {
             listed under Permissions.
           </span>
           <button class="btn btn-sm" disabled={busy()} onClick={() => void stop()}>
-            Stop
+            {busy() ? "Stopping…" : "Stop"}
           </button>
         </div>
       </Show>
