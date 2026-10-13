@@ -3551,6 +3551,16 @@ pub fn cleanup_orphans(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
 /// safe to run twice: every step is idempotent, and every step is best-effort. Failing
 /// to clean up must never be the reason the app will not close.
 pub fn shutdown_cleanup(state: &AppState) {
+    // Anything the polite shutdown could not finish is ended here, before this function
+    // returns: the app is about to exit, and on Windows nothing else will. This is what stops a
+    // `docker build` that has stopped answering from outliving the app that started it and
+    // holding the image tag the next build waits on -- one was found still running an hour and
+    // a half later.
+    let stopped = deepsand_core::docker::terminate_our_clients();
+    if !stopped.is_empty() {
+        tracing::warn!(?stopped, "ended docker clients that were still running");
+    }
+
     let project_ids: Vec<String> = {
         let store = store(state);
         store.projects().iter().map(|project| project.id.clone()).collect()

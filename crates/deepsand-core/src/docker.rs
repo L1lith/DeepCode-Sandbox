@@ -274,9 +274,46 @@ impl Docker {
 
         use std::io::{BufRead, BufReader};
 
+        // Both pipes are taken before the child is shared: the readers own the pipes and the
+        // watchdog owns the child.
+        let stdout = child.stdout.take().map(BufReader::new);
+        let stderr_reader = child.stderr.take().map(BufReader::new);
+
+        // The clock the watchdog reads, touched by every line whichever pipe it came from, and
+        // the child itself, shared so the watchdog can end it without going near a pid.
+        let quiet_since = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+        let quiet_for_watchdog = std::sync::Arc::clone(&quiet_since);
+        let child = std::sync::Arc::new(std::sync::Mutex::new(child));
+        let child_for_watchdog = std::sync::Arc::clone(&child);
+
+        // A build that stops talking is not going to finish. The readers below block on the
+        // pipe, so nothing but the process ending can interrupt them -- and the app's own budget
+        // for a build is half an hour, which is a long time to watch nothing happen. Silence
+        // rather than elapsed time, because every step that takes minutes prints as it goes.
+        let watchdog = std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(15));
+                let quiet = quiet_for_watchdog
+                    .lock()
+                    .map(|since| since.elapsed())
+                    .unwrap_or_default();
+                if !build_has_gone_quiet(quiet) {
+                    continue;
+                }
+                tracing::warn!(
+                    quiet_secs = quiet.as_secs(),
+                    "the build has produced no output for {}s; stopping it",
+                    quiet.as_secs()
+                );
+                if let Ok(mut child) = child_for_watchdog.lock() {
+                    let _ = child.kill();
+                }
+                return true;
+            }
+        });
+
         // Drain stdout on its own thread so a chatty build cannot deadlock
         // against the stderr reader.
-        let stdout = child.stdout.take().map(BufReader::new);
         let drain = stdout.map(|reader| {
             std::thread::spawn(move || {
                 let mut collected = Vec::new();
@@ -306,11 +343,14 @@ impl Docker {
             let Some(line) = sanitize_output_line(line) else {
                 return;
             };
+            if let Ok(mut since) = quiet_since.lock() {
+                *since = std::time::Instant::now();
+            }
             keep_tail(&line, &mut tail);
             sink(&line);
         };
 
-        if let Some(reader) = child.stderr.take().map(BufReader::new) {
+        if let Some(reader) = stderr_reader {
             for line in reader.lines().map_while(std::result::Result::ok) {
                 sink(&line);
             }
@@ -323,7 +363,25 @@ impl Docker {
             }
         }
 
-        let status = child.wait()?;
+        let status = child
+            .lock()
+            .map_err(|_| SandboxError::policy("the build's handle was lost"))?
+            .wait()?;
+        // The watchdog returns true only when it ended the build itself.
+        let stopped_for_silence = watchdog.join().unwrap_or(false);
+        if stopped_for_silence {
+            // A fact rather than a diagnosis: it produced nothing for ten minutes, so it was
+            // stopped. Whatever it did say is in the log and in the tail below.
+            return Err(SandboxError::Docker {
+                command: format!("docker build -t {tag} {}", context.display()),
+                stderr: format!(
+                    "the build produced no output for {} minutes, so it was stopped. Its output \
+                     up to that point is in the build log.\n\n{}",
+                    BUILD_SILENCE_LIMIT.as_secs() / 60,
+                    describe_build_failure(&tail)
+                ),
+            });
+        }
         if !status.success() {
             return Err(SandboxError::Docker {
                 command: format!("docker build -t {tag} {}", context.display()),
@@ -820,6 +878,125 @@ pub fn parse_info(json: &str) -> (String, String) {
     (text("OperatingSystem"), text("Name"))
 }
 
+/// How long a build may produce no output at all before it is stopped.
+///
+/// Generous on purpose: this is not a timeout on the work, it is a limit on silence, and every
+/// step that can take minutes -- apt, npm, cargo -- prints as it goes. A build that has said
+/// nothing for ten minutes is not one anybody is waiting for. On this machine it was an `npm
+/// install -g` behind a connection that had stopped answering, and the operator's only way out
+/// was to close the app and kill the `docker build` it had left behind.
+pub const BUILD_SILENCE_LIMIT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Whether a build that has been silent this long should be stopped.
+///
+/// Split out from the watchdog that applies it so the rule can be read, and tested, without
+/// running a build at all.
+pub fn build_has_gone_quiet(quiet_for: std::time::Duration) -> bool {
+    quiet_for >= BUILD_SILENCE_LIMIT
+}
+
+/// Stop a process, and anything it started.
+///
+/// `Child::kill` cannot reach a `docker` client's own children, and a build that has stopped
+/// answering usually has one: the helper behind it is what is actually stuck.
+pub fn kill_process_tree(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut command = std::process::Command::new("taskkill");
+        command.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        command.creation_flags(CREATE_NO_WINDOW);
+        return command.status().map(|status| status.success()).unwrap_or(false);
+    }
+    #[cfg(not(windows))]
+    {
+        // `kill` is in POSIX, so this needs no dependency; the group first, so a client's own
+        // children go with it.
+        return std::process::Command::new("kill")
+            .args(["-9", &format!("-{pid}")])
+            .status()
+            .or_else(|_| {
+                std::process::Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .status()
+            })
+            .map(|status| status.success())
+            .unwrap_or(false);
+    }
+}
+
+/// Stop any `docker` client this process started that is still running.
+///
+/// Windows does not end a child when its parent exits, so a build that has stopped answering
+/// outlives the app that started it -- one was found still running an hour and a half later,
+/// holding the image tag it was building, which is what the *next* build then waits for. The
+/// app's shutdown is polite first and bounded second; this is what happens to whatever is left
+/// when the budget runs out.
+///
+/// Children are found by asking the operating system for this process's own children rather than
+/// by keeping a list of every spawn: a list is one more thing to forget to update, and the hung
+/// `docker run` probes that were also left behind came from a call site that would have been
+/// easy to miss.
+pub fn terminate_our_clients() -> Vec<u32> {
+    let me = std::process::id();
+    let mut killed = Vec::new();
+    for (pid, name) in own_children(me) {
+        // Only what this app starts. Anything else a user has running is theirs.
+        if !name.to_lowercase().contains("docker") {
+            continue;
+        }
+        if kill_process_tree(pid) {
+            killed.push(pid);
+        }
+    }
+    killed
+}
+
+/// This process's children, as `(pid, executable name)`.
+fn own_children(me: u32) -> Vec<(u32, String)> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // `tasklist` cannot filter by parent, so this asks in PowerShell. It runs once, on the
+        // way out, which is the only place a few hundred milliseconds do not matter.
+        let script = format!(
+            "Get-CimInstance Win32_Process -Filter \"ParentProcessId={me}\" | ForEach-Object {{ \
+             \"$($_.ProcessId) $($_.Name)\" }}"
+        );
+        let mut command = std::process::Command::new("powershell");
+        command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+        command.creation_flags(CREATE_NO_WINDOW);
+        let Ok(output) = command.output() else {
+            return Vec::new();
+        };
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                let pid = parts.next()?.parse().ok()?;
+                let name = parts.next()?.to_string();
+                Some((pid, name))
+            })
+            .collect();
+    }
+    #[cfg(not(windows))]
+    {
+        let Ok(output) = std::process::Command::new("pgrep")
+            .args(["-P", &me.to_string()])
+            .output()
+        else {
+            return Vec::new();
+        };
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .map(|pid| (pid, "docker".to_string()))
+            .collect();
+    }
+}
+
 pub const BUILD_TAIL_LINES: usize = 8;
 
 /// The message a failed build reports, including the end of its own output.
@@ -1086,6 +1263,26 @@ mod probe_parsing_tests {
     fn the_operating_system_and_name_come_out_of_one_call() {
         let info = r#"{"OperatingSystem":"Docker Desktop","Name":"docker-desktop","NCPU":8}"#;
         assert_eq!(parse_info(info), ("Docker Desktop".to_string(), "docker-desktop".to_string()));
+    }
+}
+
+/// The build watchdog's rule. It is the one part of that machinery which is a decision rather
+/// than a side effect, so it is the part that can be asserted: silence, not elapsed time, is the
+/// signal, and the limit is generous because every slow step prints as it goes.
+#[cfg(test)]
+mod build_watchdog_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn a_build_is_only_stopped_after_it_has_been_quiet_for_the_limit() {
+        assert!(!build_has_gone_quiet(Duration::from_secs(0)));
+        assert!(!build_has_gone_quiet(Duration::from_secs(9 * 60)));
+        assert!(build_has_gone_quiet(BUILD_SILENCE_LIMIT));
+        assert!(build_has_gone_quiet(Duration::from_secs(11 * 60)));
+        // Long enough that a slow `cargo install` or a cold apt mirror is not mistaken for a
+        // hang, which is the failure mode of a watchdog set too tight.
+        assert!(BUILD_SILENCE_LIMIT >= Duration::from_secs(5 * 60));
     }
 }
 

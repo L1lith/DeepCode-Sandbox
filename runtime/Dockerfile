@@ -225,7 +225,7 @@ ARG WITH_NIX=0
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    --mount=type=cache,target=/root/.npm \
+    --mount=type=cache,target=/root/.npm,sharing=locked \
     set -eux; \
     # The app passes these three as comma-separated lists, because a build argument is one
     # argv entry and commas need no quoting. They are split here, once, rather than at each
@@ -258,7 +258,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     fi; \
     if [ -n "$NPM_GLOBALS" ]; then \
       for pkg in $NPM_GLOBALS; do \
-        npm install -g --no-fund --no-audit "$pkg@latest"; \
+        npm install -g --no-fund --no-audit --fetch-retries=2 --fetch-timeout=60000 --fetch-retry-maxtimeout=30000 "$pkg@latest"; \
       done; \
     fi; \
     if [ "$WITH_RUSTUP" = "1" ]; then \
@@ -347,10 +347,10 @@ ARG DEEPCODE_REFRESH=0
 # This layer runs on every image build, by design: the app passes a fresh DEEPCODE_REFRESH
 # so that "latest" means latest rather than latest-when-the-layer-was-cached. An npm cache
 # survives that, so the install fetches only what actually changed.
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     set -eux; \
     echo "deepsand: refreshing DeepCode (build $DEEPCODE_REFRESH)"; \
-    npm install -g --no-fund --no-audit "@vegamo/deepcode-cli@${DEEPCODE_CLI_VERSION}"; \
+    npm install -g --no-fund --no-audit --fetch-retries=2 --fetch-timeout=60000 --fetch-retry-maxtimeout=30000 "@vegamo/deepcode-cli@${DEEPCODE_CLI_VERSION}"; \
     deepcode --version
 
 LABEL deepsand.tools="$INSTALL_TOOLS"

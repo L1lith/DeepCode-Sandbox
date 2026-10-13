@@ -24,7 +24,7 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 350 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 351 tests |
 | `npm run app:test` | `cargo test -p deepsand-app` — the app crate's own tests, including the zombie guard. Part of `npm test`: it was not, and tests that never run are decoration |
 | `npm run core:check` | `cargo check --workspace` |
 | `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |
@@ -249,6 +249,21 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   depend on the file re-read it from the backend rather than being handed a second copy of the
   values. The poll compares a digest as well as a timestamp and a length, because a same-size
   edit inside one filesystem timestamp tick is otherwise invisible.
+* **A build that stops talking is stopped.** The readers are blocked on the child's pipe, so
+  the only thing that can interrupt a `docker build` which has stopped producing output is
+  ending the process: `BUILD_SILENCE_LIMIT` (ten minutes of *silence*, not of elapsed time, and
+  every slow step -- apt, npm, cargo -- prints as it goes) does exactly that, and the failure
+  says how long it was quiet for rather than guessing that it hung. This exists because an `npm
+  install -g` behind a connection that had stopped answering left an operator with a build that
+  had simply stopped, and no way back except closing the app. npm's own fetch timeouts are
+  bounded in the Dockerfile as well, so the common case fails in a minute instead of never.
+* **Nothing this app starts outlives it.** Windows does not end a child when its parent exits,
+  and `std::process::exit` in the shutdown path abandons whatever is still running: a hung
+  `docker build` was found an hour and a half after the app had gone, still holding the image
+  tag it was building, which is what the *next* build waits for. `docker::terminate_our_clients`
+  asks the operating system for this process's own children by name (`docker*`) and ends them,
+  and it is called at the start of `shutdown_cleanup` -- before the polite work, because the
+  polite work is what has a budget and can be abandoned.
 * **Attaching is the operator's action, and it is bounded.** Pasted or dropped files are copied
   into the sandbox's own `~/.deepcode/attachments` -- never into the workspace, which is the
   operator's repository -- and are size-capped on both sides. A path already inside the
