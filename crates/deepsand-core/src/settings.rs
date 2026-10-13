@@ -56,11 +56,18 @@ const STRICT_ALLOW: &[&str] = &[
 ];
 
 /// Build the `settings.json` the sandboxed CLI will read.
+///
+/// There is deliberately no session token here. One used to be injected as
+/// `DEEPSAND_SESSION_TOKEN` and echoed into every permission request, but nothing ever
+/// checked it: the sandbox can read its own environment and its own settings, and the
+/// bridge that writes a request is a child process of the agent making it, so a value the
+/// bridge can read is a value the agent can read. It was a credential-shaped value that
+/// authenticated nothing, and it is gone rather than left implying a control. See
+/// `docs/SECURITY.md`, "The request spool is not authenticated".
 pub fn build_deepcode_settings(
     project: &Project,
     grants: &[Grant],
     creds: &ResolvedCredentials,
-    session_token: &str,
     mcp_wait_ms: u32,
 ) -> serde_json::Value {
     let mut root = serde_json::Map::new();
@@ -126,10 +133,6 @@ pub fn build_deepcode_settings(
         serde_json::Value::String(Project::workspace_mount().into()),
     );
     bridge_env.insert("DEEPSAND_PROJECT".into(), serde_json::Value::String(project.id.clone()));
-    bridge_env.insert(
-        "DEEPSAND_SESSION_TOKEN".into(),
-        serde_json::Value::String(session_token.to_string()),
-    );
     bridge_env.insert("DEEPSAND_WAIT_MS".into(), serde_json::Value::String(mcp_wait_ms.to_string()));
 
     let mut servers = serde_json::Map::new();

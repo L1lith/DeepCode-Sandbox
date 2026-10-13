@@ -137,7 +137,6 @@ class Bridge {
         DEEPSAND_STATE_DIR: path.join(this.spool, "state"),
         DEEPSAND_WORKSPACE: "/workspace",
         DEEPSAND_PROJECT: "proj_test",
-        DEEPSAND_SESSION_TOKEN: "token_test",
         DEEPSAND_WAIT_MS: "1500",
         DEEPSAND_POLL_MS: "50",
       },
@@ -316,11 +315,22 @@ async function main() {
     assert.equal(dirReq.args.access, "write");
     assert.match(dirReq.args.purpose, /brand assets/);
   });
-  check("the request is scoped to this project and session", () => {
-    assert.equal(dirReq.token, "token_test");
+  check("the request is scoped to this project and workspace", () => {
     assert.equal(dirReq.project, "proj_test");
     assert.equal(dirReq.workspace, "/workspace");
     assert.equal(dirReq.v, 1);
+  });
+  check("the request carries no credential-shaped field", () => {
+    // There used to be a `token` here that nothing validated: the bridge is a child of the
+    // agent's own process, so anything it can read the agent can read. A field that looks
+    // like authentication but is not is worse than no field, so its absence is asserted.
+    for (const name of Object.keys(dirReq)) {
+      assert.doesNotMatch(
+        name,
+        /token|secret|password|credential|api_?key/i,
+        `the spool is unauthenticated; ${name} would imply otherwise`,
+      );
+    }
   });
   check("an approval tells the model where the resource now lives", () => {
     assert.match(approved, /APPROVED/);
@@ -345,7 +355,11 @@ async function main() {
   check("a denial names the decision plainly", () => assert.match(denied, /DENIED/));
   check("a denial forbids retrying or routing around it", () => {
     assert.match(denied, /Do not retry/);
-    assert.match(denied, /no[\s\S]*workaround exists/);
+    // It used to claim "no workaround exists", which round 3 of the escape assessment
+    // falsified on Docker Desktop. The instruction is what matters; the claim about the
+    // environment is what had to go.
+    assert.match(denied, /asking is the supported way/);
+    assert.doesNotMatch(denied, /no workaround exists/);
   });
   check("a denial is a normal result, not an error, so the turn can continue", () =>
     assert.notEqual(deniedResult.isError, true));

@@ -18,6 +18,7 @@
   ],
   "syscalls": [
     {
+      "comment": "Mount, namespace, module, key-management, tracing, io_uring, clock and NUMA control. Each is an escape primitive in its own right or the sibling of one that is: the mount-API family (fsopen/fsconfig/fsmount/fspick/move_mount/open_tree/mount_setattr) sits here rather than relying on CAP_SYS_ADMIN being absent, and pidfd_getfd/kcmp sit here because ptrace is already denied. crates/deepsand-core/tests/seccomp_profile.rs asserts this set, so dropping an entry fails a test rather than a review.",
       "names": [
         "mount",
         "umount",
@@ -74,12 +75,22 @@
         "migrate_pages",
         "afs_syscall",
         "vm86",
-        "vm86old"
+        "vm86old",
+        "pidfd_getfd",
+        "kcmp",
+        "fsopen",
+        "fsconfig",
+        "fsmount",
+        "fspick",
+        "move_mount",
+        "open_tree",
+        "mount_setattr"
       ],
       "action": "SCMP_ACT_ERRNO",
       "errnoRet": 1
     },
     {
+      "comment": "ENOSYS rather than EPERM: clone3 takes its flags in a struct the filter cannot read, so it is refused outright and glibc falls back to the argument-filterable clone(2) below.",
       "names": [
         "clone3"
       ],
@@ -87,6 +98,63 @@
       "errnoRet": 38
     },
     {
+      "comment": "Deny clone() when any CLONE_NEW* flag is set. One rule per bit, because several args in a single rule are ANDed and SCMP_CMP_MASKED_EQ can only test one bit at a time. CLONE_NEWUSER is the important one: it creates a namespace without needing any capability, and it is how the userns-dependent class is reached. The privilege-requiring bits are already refused by the empty capability set; listing them too means the closure does not depend on that second control surviving.",
+      "names": ["clone"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "args": [{ "index": 0, "value": 128, "op": "SCMP_CMP_MASKED_EQ" }]
+    },
+    {
+      "comment": "CLONE_NEWNS (0x00020000)",
+      "names": ["clone"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "args": [{ "index": 0, "value": 131072, "op": "SCMP_CMP_MASKED_EQ" }]
+    },
+    {
+      "comment": "CLONE_NEWCGROUP (0x02000000)",
+      "names": ["clone"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "args": [{ "index": 0, "value": 33554432, "op": "SCMP_CMP_MASKED_EQ" }]
+    },
+    {
+      "comment": "CLONE_NEWUTS (0x04000000)",
+      "names": ["clone"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "args": [{ "index": 0, "value": 67108864, "op": "SCMP_CMP_MASKED_EQ" }]
+    },
+    {
+      "comment": "CLONE_NEWIPC (0x08000000)",
+      "names": ["clone"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "args": [{ "index": 0, "value": 134217728, "op": "SCMP_CMP_MASKED_EQ" }]
+    },
+    {
+      "comment": "CLONE_NEWUSER (0x10000000) - needs no capability, so this is the load-bearing one",
+      "names": ["clone"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "args": [{ "index": 0, "value": 268435456, "op": "SCMP_CMP_MASKED_EQ" }]
+    },
+    {
+      "comment": "CLONE_NEWPID (0x20000000)",
+      "names": ["clone"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "args": [{ "index": 0, "value": 536870912, "op": "SCMP_CMP_MASKED_EQ" }]
+    },
+    {
+      "comment": "CLONE_NEWNET (0x40000000)",
+      "names": ["clone"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "args": [{ "index": 0, "value": 1073741824, "op": "SCMP_CMP_MASKED_EQ" }]
+    },
+    {
+      "comment": "AF_PACKET (17): raw frames. Denied because a registered family that is not IP has no business here, and this one gives direct access to the link layer.",
       "names": [
         "socket"
       ],
@@ -101,6 +169,7 @@
       ]
     },
     {
+      "comment": "AF_TIPC (30): cluster transport, historically reached through container boundaries.",
       "names": [
         "socket"
       ],
@@ -115,6 +184,7 @@
       ]
     },
     {
+      "comment": "AF_ALG (38): kernel crypto sockets, usable without any capability.",
       "names": [
         "socket"
       ],
@@ -129,6 +199,7 @@
       ]
     },
     {
+      "comment": "AF_VSOCK (40): this is F3. On a Hyper-V or VMware guest it reaches the host or the hypervisor directly, which is how round 1 of the escape assessment obtained a root shell in the Docker Desktop VM. The measured EAFNOSUPPORT on this family is only attributable to seccomp because the kernel was shown to have registered it (/proc/net/protocols, /sys/module/vsock, the VMBus device); on an unregistered family the kernel returns the same errno by itself.",
       "names": [
         "socket"
       ],
@@ -143,6 +214,7 @@
       ]
     },
     {
+      "comment": "AF_XDP (44): kernel-bypass packet access.",
       "names": [
         "socket"
       ],
@@ -157,6 +229,7 @@
       ]
     },
     {
+      "comment": "socketcall is the 32-bit multiplexer for socket(2); it cannot be argument-filtered here, so it is refused whole. Only the families above are enumerated: seccomp cannot express \"family not in a set\", so an unregistered family is left to the kernel, which refuses it too. Enumerating is why a kernel that registers a new dangerous family needs a new rule - the durable answer is an allow-list default action, which is not what this profile does.",
       "names": [
         "socketcall"
       ],

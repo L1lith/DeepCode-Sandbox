@@ -447,6 +447,13 @@ pub struct AppState {
     /// up -- so without this two overlapping starts would both proceed and the second
     /// would fail on the container name.
     pub starting: Mutex<std::collections::HashSet<String>>,
+    /// The image id whose seccomp profile has already been checked against the profile
+    /// being applied, with the digest that was found.
+    ///
+    /// Reading the digest out of an image means starting a throwaway container, so it is
+    /// done once per image build rather than once per sandbox start. It is keyed by image
+    /// id, which changes on every rebuild, so a rebuilt or re-tagged image is re-checked.
+    pub verified_seccomp: Mutex<Option<(String, String)>>,
     /// One producer (the session callbacks) and two consumers (the desktop event
     /// channel and any remote SSE subscriber), so the two views cannot drift.
     pub remote_events: tokio::sync::broadcast::Sender<crate::remote_server::RemoteEvent>,
@@ -482,6 +489,7 @@ impl AppState {
             proxies: Mutex::new(HashMap::new()),
             remote_servers: Mutex::new(HashMap::new()),
             starting: Mutex::new(std::collections::HashSet::new()),
+            verified_seccomp: Mutex::new(None),
             // Sized for a burst of terminal output; a slow subscriber lags and is
             // told so rather than blocking the sandbox's output path.
             remote_events: tokio::sync::broadcast::channel(2048).0,

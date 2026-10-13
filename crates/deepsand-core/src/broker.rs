@@ -416,11 +416,12 @@ mod tests {
             if let Some(path) = host_path {
                 args["host_path"] = serde_json::Value::String(path.into());
             }
+            // No `token`: the protocol does not carry one any more, because nothing ever
+            // checked it and a credential-shaped field implies a control that is not there.
             let payload = serde_json::json!({
                 "v": 1,
                 "id": id,
                 "kind": kind,
-                "token": "tok",
                 "project": "p1",
                 "workspace": "/workspace",
                 "args": args,
@@ -653,6 +654,40 @@ mod tests {
 
         // A partial write must never be observable.
         assert!(!fixture.broker.dirs().responses.join(".ddd_4444.part").exists());
+    }
+
+    /// The spool cannot tell a request the bridge wrote from one the agent wrote, so the
+    /// operator's decision is the whole control. That makes "a decision is required" an
+    /// invariant rather than a UI detail: surfacing a request must never answer it, or a
+    /// forged request becomes a silent grant.
+    #[test]
+    fn a_request_is_never_answered_without_an_explicit_decision() {
+        let fixture = Fixture::new();
+        fixture.write_request("req_fff_6666", "directory_access", Some("/home/me/secrets"));
+        let response = fixture.broker.dirs().responses.join("req_fff_6666.json");
+
+        // Reading the queue is what the dialog does. It is not a decision.
+        let pending = fixture.broker.scan();
+        assert_eq!(pending.len(), 1);
+        assert!(
+            !response.exists(),
+            "showing a request to the operator must not answer it"
+        );
+
+        // Writing snapshots, clearing and answering other ids are also not decisions.
+        fixture.broker.clear_request("req_nothing_0000");
+        fixture.broker.prune_responses(1);
+        assert!(!response.exists(), "nothing short of an answer may grant anything");
+
+        // Only an explicit answer produces a response the sandbox can read.
+        fixture
+            .broker
+            .answer(&PermissionResponse::deny("req_fff_6666", "not this one"))
+            .unwrap();
+        let parsed: PermissionResponse =
+            serde_json::from_str(&std::fs::read_to_string(&response).unwrap()).unwrap();
+        assert_eq!(parsed.decision, "deny");
+        assert!(parsed.grant.is_none());
     }
 
     #[test]

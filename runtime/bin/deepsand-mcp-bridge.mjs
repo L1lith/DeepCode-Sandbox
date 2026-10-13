@@ -38,7 +38,10 @@ const REQUESTS_DIR = process.env.DEEPSAND_IPC_REQUESTS || "/deepsand/ipc/request
 const RESPONSES_DIR = process.env.DEEPSAND_IPC_RESPONSES || "/deepsand/ipc/responses";
 const STATE_DIR = process.env.DEEPSAND_STATE_DIR || "/deepsand/state";
 const WORKSPACE = process.env.DEEPSAND_WORKSPACE || "/workspace";
-const SESSION_TOKEN = process.env.DEEPSAND_SESSION_TOKEN || "";
+// No session token. There used to be one, echoed into every request file, and nothing ever
+// checked it: this bridge is spawned by the agent's own DeepCode process as uid 1000, so
+// any value it can read the agent can read. Carrying it made the spool look authenticated
+// when it is not. See docs/SECURITY.md, "The request spool is not authenticated".
 const PROJECT_ID = process.env.DEEPSAND_PROJECT || "";
 /** Stay comfortably under DeepCode's 60 s tools/call budget. */
 const WAIT_MS = clampInt(process.env.DEEPSAND_WAIT_MS, 500, 55_000, 45_000);
@@ -304,6 +307,10 @@ const issuedRequestIds = new Set();
 /**
  * Submit a request and wait up to WAIT_MS for a human answer.
  * Returns { status: "answered", response } or { status: "pending", id }.
+ *
+ * The file is not authenticated and cannot be: `pid` is a hint for the operator's benefit,
+ * not a credential, and the host treats the whole file as hostile input. The control is
+ * that a human reads the request before anything is granted.
  */
 async function submitAndWait(kind, args) {
   const id = newRequestId();
@@ -312,7 +319,6 @@ async function submitAndWait(kind, args) {
     v: 1,
     id,
     kind,
-    token: SESSION_TOKEN,
     project: PROJECT_ID,
     workspace: WORKSPACE,
     args,
@@ -412,9 +418,16 @@ function renderDecision(kind, response) {
   const message = response.message ? `\n\nOperator note: ${response.message}` : "";
 
   if (decision === "deny") {
+    // An instruction, not a claim about the environment. The old wording said the resource
+    // "is not reachable from inside this sandbox and no workaround exists", which round 3 of
+    // the escape assessment falsified on Docker Desktop: a `grpcfuse` share resolves
+    // backslash path components, so a guessed host path can still be stat()ed for its size
+    // and mtime even though it cannot be opened. Telling the model something untrue about
+    // its own sandbox is how it learns to distrust the true statements too, so this now
+    // says what the operator decided rather than asserting a property of the sandbox.
     return textResult(
       `DENIED. The operator refused this request. Do not retry it and do not look for another way to reach the ` +
-        `resource - it is not reachable from inside this sandbox and no workaround exists. Continue with what you ` +
+        `resource: asking is the supported way to reach it, and the answer is no. Continue with what you ` +
         `have, or ask the operator how they would like to proceed.${message}`,
     );
   }

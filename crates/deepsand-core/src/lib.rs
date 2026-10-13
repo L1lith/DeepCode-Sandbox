@@ -13,6 +13,7 @@
 //! * [`proxy`] is the allowlisting egress proxy used by the `restricted`
 //!   network mode.
 //! * [`session`] owns the PTY that the terminal pane renders.
+//! * [`seccomp`] proves the profile being applied is the profile the image carries.
 
 pub mod allowlist;
 pub mod broker;
@@ -24,6 +25,7 @@ pub mod paths;
 pub mod remote;
 pub mod policy;
 pub mod proxy;
+pub mod seccomp;
 pub mod session;
 pub mod secrets;
 pub mod settings;

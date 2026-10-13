@@ -181,6 +181,36 @@ impl Docker {
             .is_some_and(|out| !out.is_empty())
     }
 
+    /// The image's content id. Changes on every rebuild, which makes it the right key for
+    /// caching a check that is only valid for one build of one image.
+    pub fn image_id(&self, tag: &str) -> Option<String> {
+        self.try_run(&self.fmt(&["image", "inspect", tag, "--format", "{{.Id}}"]))
+            .filter(|id| !id.is_empty())
+    }
+
+    /// Read a file out of an image without starting a sandbox.
+    ///
+    /// This is how Deepsand fetches the digest the image carries for its seccomp profile:
+    /// the file is inside the image, so reading it means running something, but the
+    /// entrypoint is overridden so nothing from the image gets a say, and the network is
+    /// off so the check cannot reach anything.
+    pub fn read_file_from_image(&self, image: &str, path: &str) -> Result<String> {
+        let args = self.fmt(&[
+            "run",
+            "--rm",
+            "--network=none",
+            "--entrypoint=/bin/cat",
+            image,
+            path,
+        ]);
+        self.run(&args).map_err(|err| match err {
+            SandboxError::Docker { stderr, .. } => SandboxError::policy(format!(
+                "could not read {path} out of the runtime image {image}: {stderr}"
+            )),
+            other => other,
+        })
+    }
+
     /// Stream a build, forwarding each output line to `sink`.
     /// Build the runtime image.
     ///

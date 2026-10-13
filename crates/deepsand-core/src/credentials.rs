@@ -103,6 +103,67 @@ pub struct ResolvedCredentials {
     pub warnings: Vec<String>,
 }
 
+/// Does this environment variable name look like it carries a credential?
+///
+/// `Credentials::extra_env` is a passthrough an operator can set on a project, and it exists
+/// for the things a project genuinely needs — a proxy, a registry URL, a locale. It must not
+/// double as a way to hand unrelated keys to the sandbox: every tool the agent runs inherits
+/// this environment, so anything in it is readable by the agent, and round 3 of the escape
+/// assessment found credential-shaped values readable inside the sandbox as a result.
+///
+/// This is a name heuristic, not a boundary. The boundary is the container; the point here is
+/// only to stop the passthrough being an accidental disclosure channel. The model API key is
+/// *not* covered by this: the CLI takes it from `env.API_KEY`, so it has to be there, and it
+/// is documented as visible to the agent rather than pretended otherwise.
+fn is_credential_shaped(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    const FRAGMENTS: [&str; 11] = [
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "APIKEY",
+        "API_KEY",
+        "PRIVATE_KEY",
+        "ACCESS_KEY",
+        "CREDENTIAL",
+        "SESSION_KEY",
+        "AUTH",
+    ];
+    const PREFIXES: [&str; 12] = [
+        "AWS_",
+        "AZURE_",
+        "GCP_",
+        "GOOGLE_",
+        "GITHUB_",
+        "GH_",
+        "GITLAB_",
+        "OPENAI_",
+        "ANTHROPIC_",
+        "DEEPSEEK_",
+        "DEEPSAND_",
+        "OPENSSH_",
+    ];
+    FRAGMENTS.iter().any(|fragment| upper.contains(fragment))
+        || PREFIXES.iter().any(|prefix| upper.starts_with(prefix))
+}
+
+/// Split a passthrough environment into what may travel and what may not.
+fn filter_extra_env(
+    extra: &BTreeMap<String, String>,
+) -> (BTreeMap<String, String>, Vec<String>) {
+    let mut keep = BTreeMap::new();
+    let mut dropped = Vec::new();
+    for (name, value) in extra {
+        if is_credential_shaped(name) {
+            dropped.push(name.clone());
+        } else {
+            keep.insert(name.clone(), value.clone());
+        }
+    }
+    (keep, dropped)
+}
+
 /// Merge, in order of increasing precedence:
 ///   1. Deepsand's own defaults
 ///   2. the host's `~/.deepcode/settings.json`   (when the project inherits)
@@ -183,7 +244,20 @@ pub fn resolve(project: &Project, app: &AppSettings, host: &HostConfig) -> Resol
         out.reasoning_effort = effort;
         overrode = true;
     }
-    out.extra_env = creds.extra_env.clone();
+    // The passthrough is filtered, not trusted: see `is_credential_shaped`. Dropping a name
+    // is announced rather than silent, because an operator who relied on it needs to know
+    // why their tool stopped seeing a variable.
+    let (extra_env, dropped_env) = filter_extra_env(&creds.extra_env);
+    out.extra_env = extra_env;
+    if !dropped_env.is_empty() {
+        out.warnings.push(format!(
+            "{} environment variable(s) in the host DeepCode configuration look like credentials \
+             and were not passed into the sandbox: {}. The agent can read the sandbox's environment, \
+             so a key that has nothing to do with this project would be readable there.",
+            dropped_env.len(),
+            dropped_env.join(", ")
+        ));
+    }
     if overrode {
         layers.push("this project's overrides");
     }
@@ -266,4 +340,108 @@ pub(crate) fn apply_to_settings_json(creds: &ResolvedCredentials, target: &mut s
 pub fn read_settings_file(path: &std::path::Path) -> Result<serde_json::Value> {
     let raw = std::fs::read_to_string(path)?;
     Ok(serde_json::from_str(&raw)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{DeepCodeMode, NetworkPolicy, ResourceLimits};
+
+    fn project() -> Project {
+        Project {
+            id: "p1".into(),
+            name: "my-website".into(),
+            slug: "my-website".into(),
+            root_dir: "/projects/my-website".into(),
+            created_at_ms: 0,
+            network: NetworkPolicy::Internet,
+            limits: ResourceLimits::default(),
+            credentials: Credentials::default(),
+            deepcode_mode: DeepCodeMode::AllowAll,
+            allowed_roots: vec![],
+            reasoning_effort: Default::default(),
+            tools: None,
+            notes: String::new(),
+        }
+    }
+
+    #[test]
+    fn credential_shaped_names_are_recognised_whatever_their_case() {
+        for name in [
+            "API_KEY",
+            "api_key",
+            "OPENAI_API_KEY",
+            "GH_TOKEN",
+            "github_token",
+            "AWS_SECRET_ACCESS_KEY",
+            "MY_PASSWORD",
+            "SERVICE_ACCOUNT_CREDENTIAL",
+            "GCP_CREDENTIALS",
+            "NPM_AUTH_TOKEN",
+        ] {
+            assert!(is_credential_shaped(name), "{name} should be recognised");
+        }
+    }
+
+    #[test]
+    fn ordinary_passthrough_names_are_left_alone() {
+        // The point of the passthrough: a project may legitimately need these.
+        for name in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "NPM_CONFIG_REGISTRY",
+            "CARGO_HOME",
+            "LANG",
+            "TZ",
+            "MODEL",
+            "BASE_URL",
+        ] {
+            assert!(!is_credential_shaped(name), "{name} must survive");
+        }
+    }
+
+    #[test]
+    fn the_passthrough_drops_credentials_and_keeps_the_rest() {
+        let mut extra = BTreeMap::new();
+        extra.insert("HTTP_PROXY".to_string(), "http://proxy:3128".to_string());
+        extra.insert("AWS_SECRET_ACCESS_KEY".to_string(), "shhh".to_string());
+        extra.insert("GH_TOKEN".to_string(), "shhh".to_string());
+
+        let (kept, dropped) = filter_extra_env(&extra);
+        assert_eq!(kept.keys().collect::<Vec<_>>(), vec!["HTTP_PROXY"]);
+        assert_eq!(dropped, vec!["AWS_SECRET_ACCESS_KEY", "GH_TOKEN"]);
+    }
+
+    #[test]
+    fn resolve_announces_what_it_dropped_rather_than_dropping_it_silently() {
+        // An operator whose tool stopped seeing a variable needs to know why, and the
+        // warning must name the variable without ever naming its value.
+        let mut project = project();
+        project.credentials.extra_env.insert(
+            "OPENAI_API_KEY".to_string(),
+            "sk-not-a-real-key".to_string(),
+        );
+        project
+            .credentials
+            .extra_env
+            .insert("HTTP_PROXY".to_string(), "http://proxy:3128".to_string());
+
+        let resolved = resolve(&project, &AppSettings::default(), &HostConfig::default());
+
+        assert_eq!(
+            resolved.extra_env.keys().collect::<Vec<_>>(),
+            vec!["HTTP_PROXY"],
+            "the credential-shaped name must not reach the sandbox"
+        );
+        let warning = resolved
+            .warnings
+            .iter()
+            .find(|w| w.contains("OPENAI_API_KEY"))
+            .expect("the drop is announced");
+        assert!(
+            !warning.contains("sk-not-a-real-key"),
+            "the warning names the variable, never the value: {warning}"
+        );
+    }
 }

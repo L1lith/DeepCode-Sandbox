@@ -157,6 +157,30 @@ fn cmd_doctor(data_dir: &Path) -> Result<()> {
         println!("note           : {}", docker_status.detail);
     }
 
+    // The profile that will actually be applied, and whether it is the profile the image
+    // carries. The daemon resolves `--security-opt=seccomp=` on the host, so this is the
+    // only place the two halves are ever compared -- R3-A of the escape assessment.
+    let hardening = matches!(store.settings().security.seccomp, SeccompProfile::Hardened);
+    match deepsand_core::seccomp::profile_path(hardening) {
+        Some(profile) if docker_status.image_present => match Docker::locate() {
+            Ok(docker) => {
+                if let Err(err) =
+                    verify_profile_against_image(&docker, store.settings().image.as_str(), &profile)
+                {
+                    println!("seccomp image  : MISMATCH - {err}");
+                }
+            }
+            Err(err) => println!("seccomp        : cannot be checked ({err})"),
+        },
+        Some(profile) => println!(
+            "seccomp        : {} (the runtime image is not present, so the applied profile could not be compared with it)",
+            profile.display()
+        ),
+        None => println!(
+            "seccomp        : none (hardening is off, or runtime/seccomp-hardened.json is missing)"
+        ),
+    }
+
     println!();
     println!("host file sharing (required: the project directory is bind-mounted):");
     match Docker::locate() {
@@ -197,8 +221,12 @@ fn cmd_doctor(data_dir: &Path) -> Result<()> {
     println!("  apparmor requested : {}", security.apparmor);
     println!("  netfilter required : {}", security.netfilter_required);
     if docker_status.desktop {
-        println!("  note               : Docker Desktop runs the daemon in a VM, so the hardened");
-        println!("                       seccomp profile and AppArmor are unavailable here.");
+        // The seccomp profile *is* attached here -- the code that skipped it on Docker
+        // Desktop was removed, and `the_seccomp_profile_is_attached_even_on_docker_desktop`
+        // covers it. AppArmor genuinely is not available in the VM, so the note says only
+        // that, rather than repeating a claim that was wrong about the profile.
+        println!("  note               : Docker Desktop runs the daemon in a VM. The seccomp");
+        println!("                       profile is still attached; AppArmor is not available.");
     }
     Ok(())
 }
@@ -429,18 +457,22 @@ fn emit(text: &str) {
 /// Assemble a plan for a project, writing the generated configuration first so
 /// the mounts the plan names actually exist.
 fn build_plan(store: &Store, project: &Project, resume: bool, offline: bool) -> Result<policy::RunPlan> {
-    let docker_status = if offline {
-        DockerStatus {
-            available: true,
-            client_version: "(offline review)".into(),
-            server_version: "(offline review)".into(),
-            operating_system: if cfg!(windows) { "Docker Desktop (assumed)" } else { "Linux (assumed)" }.into(),
-            desktop: cfg!(windows) || cfg!(target_os = "macos"),
-            image_present: false,
-            detail: "reviewed with --offline; nothing was started".into(),
-        }
+    let (docker_status, docker) = if offline {
+        (
+            DockerStatus {
+                available: true,
+                client_version: "(offline review)".into(),
+                server_version: "(offline review)".into(),
+                operating_system: if cfg!(windows) { "Docker Desktop (assumed)" } else { "Linux (assumed)" }.into(),
+                desktop: cfg!(windows) || cfg!(target_os = "macos"),
+                image_present: false,
+                detail: "reviewed with --offline; nothing was started".into(),
+            },
+            None,
+        )
     } else {
-        Docker::locate()?.probe(&store.settings().image)
+        let docker = Docker::locate()?;
+        (docker.probe(&store.settings().image), Some(docker))
     };
 
     store.ensure_project_dirs(&project.id)?;
@@ -463,9 +495,8 @@ fn build_plan(store: &Store, project: &Project, resume: bool, offline: bool) -> 
     );
     let grants_snapshot = container_settings::build_grants_snapshot(project, &grants);
 
-    let token = uuid::Uuid::new_v4().simple().to_string();
     let settings_json =
-        container_settings::build_deepcode_settings(project, &grants, &resolved, &token, 45_000);
+        container_settings::build_deepcode_settings(project, &grants, &resolved, 45_000);
 
     container_settings::write_project_config(
         &store.config_dir(&project.id),
@@ -477,6 +508,14 @@ fn build_plan(store: &Store, project: &Project, resume: bool, offline: bool) -> 
     )?;
 
     let seccomp = seccomp_path(store);
+    // The daemon reads its profile from the host, so check that it is the profile the image
+    // carries before anything starts. Refusing here is the point: a sandbox whose hardening
+    // cannot be attributed to the image it runs is a sandbox nobody can audit (R3-A).
+    if let (Some(profile), Some(docker)) = (seccomp.as_deref(), docker.as_ref()) {
+        if docker_status.image_present {
+            verify_profile_against_image(docker, store.settings().image.as_str(), profile)?;
+        }
+    }
     // The model endpoint is not optional in any mode, so it is passed separately
     // from the project's own allowlist.
     let model_addrs: Vec<String> = deepsand_core::allowlist::endpoints_for_url(&resolved.base_url);
@@ -496,24 +535,35 @@ fn build_plan(store: &Store, project: &Project, resume: bool, offline: bool) -> 
         required_hosts: &required_hosts,
         secrets_env_file: None,
         model_endpoints: &model_addrs,
-        session_token: &token,
         mcp_wait_ms: 45_000,
         resume,
     })
 }
 
 /// Locate the hardened seccomp profile, if this installation has one.
+///
+/// Shares the core resolver, so this agrees with the desktop app about which runtime tree
+/// the profile comes from rather than searching a set of places of its own.
 fn seccomp_path(store: &Store) -> Option<PathBuf> {
-    if !matches!(store.settings().security.seccomp, SeccompProfile::Hardened) {
-        return None;
-    }
-    let candidates = [
-        std::env::current_dir().ok().map(|c| c.join("runtime").join("seccomp-hardened.json")),
-        std::env::current_exe()
-            .ok()
-            .and_then(|e| e.parent().map(|p| p.join("seccomp-hardened.json"))),
-    ];
-    candidates.into_iter().flatten().find(|p| p.is_file())
+    deepsand_core::seccomp::profile_path(matches!(
+        store.settings().security.seccomp,
+        SeccompProfile::Hardened
+    ))
+}
+
+/// Check the profile being applied against the digest the image carries (R3-A).
+///
+/// Fails closed: a missing digest file, a malformed one and a mismatch are all refusals,
+/// because "I could not check" must not be usable as "the check passed".
+fn verify_profile_against_image(docker: &Docker, image: &str, profile: &Path) -> Result<()> {
+    let in_image = docker.read_file_from_image(image, deepsand_core::seccomp::IMAGE_DIGEST_PATH)?;
+    let digest = deepsand_core::seccomp::verify(profile, &in_image)?;
+    println!(
+        "seccomp        : {} (sha256 {}...)",
+        profile.display(),
+        &digest[..12.min(digest.len())]
+    );
+    Ok(())
 }
 
 /* ------------------------------------------------------------------------- */

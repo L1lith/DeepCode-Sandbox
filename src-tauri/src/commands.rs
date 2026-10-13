@@ -20,7 +20,7 @@ use deepsand_core::store::Store;
 use deepsand_core::{SandboxError, now_ms};
 use base64::Engine as _;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -469,9 +469,8 @@ fn prepare_plan(
             .to_string(),
     );
     let grants_snapshot = container_settings::build_grants_snapshot(&project, &grants);
-    let token = uuid::Uuid::new_v4().simple().to_string();
     let settings_json =
-        container_settings::build_deepcode_settings(&project, &grants, &resolved, &token, 45_000);
+        container_settings::build_deepcode_settings(&project, &grants, &resolved, 45_000);
 
     let project_dir = broker.dirs().state.parent().map(PathBuf::from);
     let config_dir = project_dir
@@ -498,6 +497,7 @@ fn prepare_plan(
     .map_err(fail)?;
 
     let mut warnings: Vec<String> = Vec::new();
+    let daemon_reachable = daemon.available;
     let docker_status = if assume_daemon && !daemon.available {
         warnings.push(
             "the Docker daemon is not reachable, so this is a preview only. Start Docker Desktop to run it."
@@ -516,6 +516,17 @@ fn prepare_plan(
         );
     }
 
+    // The daemon applies the host's copy of the profile, so the copy inside the image is
+    // only ever read by an auditor. Refuse to start when the two disagree: a sandbox whose
+    // hardening cannot be attributed to the image it is running is a sandbox nobody can
+    // audit, and this is exactly the drift R3-A of the escape assessment found.
+    if let Some(profile) = seccomp.as_deref() {
+        if daemon_reachable {
+            verify_seccomp_profile(state.app_state(), &app_settings.image, profile)
+                .map_err(|err| fail(err))?;
+        }
+    }
+
     let plan = policy::plan_run(&PlanInput {
         project: &project,
         grants: &grants,
@@ -529,7 +540,6 @@ fn prepare_plan(
         required_hosts,
         secrets_env_file: secrets_env_file.as_deref(),
         model_endpoints: &endpoints,
-        session_token: &token,
         mcp_wait_ms: 45_000,
         resume,
     })
@@ -539,24 +549,58 @@ fn prepare_plan(
 }
 
 fn seccomp_profile_path(settings: &AppSettings) -> Option<PathBuf> {
-    if !matches!(settings.security.seccomp, SeccompProfile::Hardened) {
-        return None;
-    }
-    for candidate in [
-        std::env::var_os("DEEPSAND_RUNTIME_DIR").map(|d| PathBuf::from(d).join("seccomp-hardened.json")),
-        std::env::current_dir().ok().map(|c| c.join("runtime").join("seccomp-hardened.json")),
-        std::env::current_exe()
-            .ok()
-            .and_then(|e| e.parent().map(|p| p.join("seccomp-hardened.json"))),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if candidate.is_file() {
-            return Some(candidate);
+    // One resolver for the runtime tree, shared with the image builder and the headless CLI.
+    // This used to be a second search order that looked beside the executable rather than in
+    // its `runtime/` subdirectory, which is one of the ways the applied profile and the
+    // shipped profile could come from different trees -- R3-A of the escape assessment.
+    deepsand_core::seccomp::profile_path(matches!(
+        settings.security.seccomp,
+        SeccompProfile::Hardened
+    ))
+}
+
+/// Compare the seccomp profile about to be applied with the digest the image carries.
+///
+/// The daemon resolves `--security-opt=seccomp=` on the host, so the file inside the image
+/// is only ever read by someone auditing it. Nothing compared the two until R3-A of the
+/// escape assessment measured a container where the applied profile had the socket-family
+/// rules and the shipped profile had none.
+///
+/// The digest file is cached per image id: reading it means starting a throwaway container,
+/// so it happens once per image build rather than once per start. The host profile is
+/// re-hashed on every call, because that is cheap and it is the half that can change.
+fn verify_seccomp_profile(
+    state: &AppState,
+    image: &str,
+    profile: &Path,
+) -> deepsand_core::Result<String> {
+    let docker = state.docker()?;
+    let Some(image_id) = docker.image_id(image) else {
+        // No image yet, so there is nothing to compare against. `start_session` builds the
+        // image before it plans, so this is only reachable from an explicit preview.
+        return Ok(String::new());
+    };
+
+    let cached = state
+        .verified_seccomp
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+
+    let digest_file = match cached {
+        Some((verified_id, raw)) if verified_id == image_id => raw,
+        _ => {
+            let raw =
+                docker.read_file_from_image(image, deepsand_core::seccomp::IMAGE_DIGEST_PATH)?;
+            *state
+                .verified_seccomp
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = Some((image_id, raw.clone()));
+            raw
         }
-    }
-    None
+    };
+
+    deepsand_core::seccomp::verify(profile, &digest_file)
 }
 
 #[tauri::command]
@@ -2699,24 +2743,12 @@ fn runtime_revision(runtime: &std::path::Path) -> String {
     format!("r{hash:08x}")
 }
 
+/// Locate the `runtime/` directory (Dockerfile, entrypoint, MCP bridge, seccomp profile).
+///
+/// Delegates to the core so this, the profile resolver and the headless CLI cannot
+/// disagree about which tree the runtime lives in.
 fn runtime_context_dir() -> Option<PathBuf> {
-    let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(PathBuf::from));
-    let mut candidates: Vec<Option<PathBuf>> = vec![
-        std::env::var_os("DEEPSAND_RUNTIME_DIR").map(PathBuf::from),
-        std::env::current_dir().ok().map(|c| c.join("runtime")),
-    ];
-    if let Some(dir) = exe_dir {
-        candidates.push(Some(dir.join("runtime")));
-        candidates.push(Some(dir.join("resources").join("runtime")));
-        candidates.push(Some(dir.join("_up_").join("runtime")));
-    }
-
-    for candidate in candidates.into_iter().flatten() {
-        if candidate.join("Dockerfile").is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    deepsand_core::seccomp::runtime_dir()
 }
 
 /// Remove managed containers, volumes and networks that no live project owns.

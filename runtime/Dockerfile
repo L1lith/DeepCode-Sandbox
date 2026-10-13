@@ -118,6 +118,17 @@ RUN set -eux; \
     sed -i 's/\r$$//' /usr/local/lib/deepsand/*.sh /usr/local/lib/deepsand/*.mjs; \
     chmod 0755 /usr/local/lib/deepsand/*.sh /usr/local/lib/deepsand/*.mjs; \
     chmod 0644 /usr/local/lib/deepsand/seccomp-hardened.json; \
+    # The profile's digest travels with the image so the host can prove that the bytes it
+    # hands to `--security-opt=seccomp=` are the same bytes this image was built with.
+    # The profile in the image is not the profile that gets applied -- the daemon reads
+    # the host's copy -- so without this the two can drift and nothing notices. Round 3
+    # of the escape assessment found exactly that: the applied rule set had the
+    # socket-family rules and the in-image copy did not. The digest is taken over the
+    # copied bytes, with no line-ending normalisation, because it must match the host
+    # file byte for byte.
+    test -s /usr/local/lib/deepsand/seccomp-hardened.json; \
+    sha256sum /usr/local/lib/deepsand/seccomp-hardened.json | cut -d' ' -f1 > /usr/local/lib/deepsand/seccomp-hardened.sha256; \
+    chmod 0644 /usr/local/lib/deepsand/seccomp-hardened.sha256; \
     ln -sf /usr/local/lib/deepsand/entrypoint.sh /usr/local/bin/deepsand-entrypoint; \
     ln -sf /usr/local/lib/deepsand/deepsand-mcp-bridge.mjs /usr/local/bin/deepsand-mcp-bridge; \
     # Fail the build rather than ship a broken shebang.

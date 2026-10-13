@@ -129,7 +129,6 @@ pub struct PlanInput<'a> {
     /// Without this a default-deny sandbox cannot reach the model it is supposed to
     /// be running, which is the one destination that can never be optional.
     pub required_hosts: &'a [String],
-    pub session_token: &'a str,
     /// How long the in-container bridge waits before reporting "pending".
     pub mcp_wait_ms: u32,
     /// Verified to be true only when the session volume really has an index.
@@ -759,7 +758,6 @@ mod tests {
             required_hosts: &[],
             secrets_env_file: None,
             model_endpoints: &[],
-                session_token: "tok",
                 mcp_wait_ms: 45_000,
                 resume: false,
             }
@@ -1032,7 +1030,6 @@ mod tests {
             required_hosts: &[],
             secrets_env_file: None,
             model_endpoints: &[],
-            session_token: "t",
             mcp_wait_ms: 1000,
             resume: false,
         };
@@ -1073,7 +1070,6 @@ mod tests {
             required_hosts: &[],
             secrets_env_file: Some(&env_file),
             model_endpoints: &[],
-            session_token: "t",
             mcp_wait_ms: 1000,
             resume: false,
         })
@@ -1121,7 +1117,6 @@ mod tests {
             required_hosts: &[],
             secrets_env_file: None,
             model_endpoints: &[],
-            session_token: "t",
             mcp_wait_ms: 1000,
             resume: false,
         })
@@ -1158,7 +1153,6 @@ mod tests {
                 required_hosts: &required,
                 secrets_env_file: None,
                 model_endpoints: endpoints,
-                session_token: "t",
                 mcp_wait_ms: 1000,
                 resume: false,
             })
@@ -1220,7 +1214,6 @@ mod tests {
             required_hosts: &[],
             secrets_env_file: None,
             model_endpoints: &[],
-            session_token: "t",
             mcp_wait_ms: 1000,
             resume: false,
         };
