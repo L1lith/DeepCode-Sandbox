@@ -24,7 +24,7 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 296 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 301 tests |
 | `npm run core:check` | `cargo check --workspace` |
 | `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |
 | `npm test` | the two suites above, in order |
@@ -116,21 +116,32 @@ These are load-bearing. Breaking one is how this project gets a CVE.
 12. **LF line endings for everything Linux reads or executes.** `.gitattributes`
     enforces this. A shell script with a CRLF shebang fails inside the container
     with `bash\r: No such file or directory` and the sandbox never starts.
-13. **`reference/` is never committed, vendored or bundled.** Upstream DeepCode CLI
+13. **A state file that cannot be read is not a state file that is corrupt.** The
+    distinction is the difference between losing an operator's projects and not:
+    `ReadOutcome::Unreadable` is retried and then reported, and the file is left
+    alone; only `Corrupt` is moved aside. Two rules go with it. A store built
+    because nothing could be read (`Store::fallback`) must never rotate the rolling
+    backup, because its state is a substitute and promoting a substitute destroys
+    the last good copy. And a set-aside copy with projects beats an empty fallback,
+    because an empty answer is far more likely to be wreckage than an operator with
+    no projects left. All four are asserted in `store::durability_tests`; a replay
+    against a real data directory is what caught the empty-backup case, so run the
+    tests against real data when the failure being fixed was real.
+14. **`reference/` is never committed, vendored or bundled.** Upstream DeepCode CLI
     source is downloaded there read-only, and gitignored.
-14. **The update signing key never enters the repository, and its loss is
+15. **The update signing key never enters the repository, and its loss is
     permanent.** The private half lives in `~/.tauri/deepsand.key` and in the
     `TAURI_SIGNING_PRIVATE_KEY` secret; the public half is pinned in
     `src-tauri/tauri.conf.json`, which is what every installed copy verifies
     against. Whoever holds the private key can sign an update that all of them
     will install, and losing it means no installed copy can ever be updated.
     `.gitignore` covers `*.key` as a backstop, not as permission to be careless.
-15. **The three version fields move together** — `src-tauri/tauri.conf.json`,
+16. **The three version fields move together** — `src-tauri/tauri.conf.json`,
     `package.json`, and `version` in the workspace `Cargo.toml`. The release
     workflow fails early when they disagree, because a release whose manifest
     version is wrong tells every installed copy it is already up to date: a
     silent failure where nobody gets an error and nobody gets the update.
-16. **The updater is reachable only through our own two commands.** The plugin is
+17. **The updater is reachable only through our own two commands.** The plugin is
     initialised in Rust and the webview is not given `updater:*` — installing an
     update replaces the binary, which is the most powerful thing a frontend could
     ask for. The commands are absent from the remote command table on purpose: a

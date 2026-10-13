@@ -338,7 +338,7 @@ enumerates families and flags so that dropping one fails a test rather than a re
 Everything above is asserted by tests you can run:
 
 ```bash
-cargo test -p deepsand-core                   # 296 tests, including the seccomp and allowlist claims
+cargo test -p deepsand-core                   # 301 tests, including the seccomp, allowlist and durability claims
 node runtime/scripts/test-mcp-bridge.mjs      # 55 checks: the permission protocol end to end
 ```
 
@@ -369,6 +369,12 @@ The most load-bearing ones:
 | `a_named_address_becomes_a_netfilter_allowance_and_its_port_a_publication` | an entry in the UI is an entry in the container, or it is a lie |
 | `a_directory_inside_the_workspace_is_already_covered` | a request the sandbox did not need to make never reaches the operator |
 | `a_write_request_for_a_read_only_grant_is_not_covered` | auto-refusal only where there is nothing left to decide |
+| `a_state_file_that_cannot_be_opened_is_not_corruption` | a file that cannot be read is never moved aside, and never replaced with defaults |
+| `a_nul_filled_state_file_falls_back_to_the_rolling_backup` | the torn write a power loss leaves behind |
+| `a_valid_state_misjudged_as_corrupt_comes_back_by_itself` | the state that was wrongly set aside is rescued, not lost |
+| `an_empty_rolling_backup_does_not_hide_a_set_aside_copy` | an empty fallback cannot stand in for a copy that has projects |
+| `a_substitute_store_never_overwrites_the_rolling_backup` | an unreadable configuration cannot cost you the last good copy |
+| `salvage_prefers_the_copy_with_the_most_projects` | among set-aside copies, the richest one wins |
 
 To read the exact command for any project:
 

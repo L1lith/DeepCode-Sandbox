@@ -34,6 +34,15 @@ pub enum SandboxError {
     #[error("malformed state file {path}: {message}")]
     StateCorrupt { path: PathBuf, message: String },
 
+    /// The file is there but could not be opened.
+    ///
+    /// Deliberately distinct from `StateCorrupt`, because the responses have to differ: a
+    /// malformed file is moved aside and replaced, while a file that could not be opened
+    /// may be perfectly good. Treating the second as the first renamed a valid state
+    /// aside and let the app start empty over it.
+    #[error("the state file {path} could not be read: {message}")]
+    StateUnreadable { path: PathBuf, message: String },
+
     #[error("permission broker: {0}")]
     Broker(String),
 

@@ -17,7 +17,7 @@ use deepsand_core::proxy::{EgressProxy, ProxyConfig};
 use deepsand_core::session::{Session, SessionOptions};
 use deepsand_core::settings as container_settings;
 use deepsand_core::store::Store;
-use deepsand_core::{SandboxError, now_ms};
+use deepsand_core::now_ms;
 use base64::Engine as _;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -2969,10 +2969,29 @@ pub fn startup_error_impl(state: &AppState) -> CmdResult<Option<String>> {
     Ok(state.startup_error.lock().unwrap().clone())
 }
 
-/// Load the store, falling back to a fresh one so the app can still open and
-/// explain itself when the state file is unreadable.
+/// Load the store, falling back to a store that has read nothing so the app can still
+/// open and explain itself when the saved configuration is unusable.
+///
+/// The fallback must come from `Store::fallback` and not from a second `Store::load`.
+/// A second load finds the damaged file already moved aside, mistakes that for a first
+/// run, and writes an empty state over a situation that was still recoverable -- which
+/// is exactly how an operator lost five projects while the app showed a notice telling
+/// them to re-add those projects.
 pub fn load_store() -> (Store, Option<String>) {
-    match Store::load(Store::default_data_dir()) {
+    let data_dir = Store::default_data_dir();
+    match Store::load(data_dir.clone()) {
+        Ok(store) if store.recovered_from_salvage().is_some() => {
+            let from = store
+                .recovered_from_salvage()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+            let notice = format!(
+                "Deepsand's saved configuration could not be read, so it was recovered from {from}, \
+                 a copy that had been set aside earlier. Your projects and permissions are there. \
+                 Check anything you changed most recently: the recovered copy may predate it."
+            );
+            (store, Some(notice))
+        }
         Ok(store) if store.recovered_from_backup() => {
             let notice = "Deepsand's saved configuration could not be read, so the previous copy was \
                           restored from state.json.bak. Your projects and permissions are there; any \
@@ -2982,24 +3001,59 @@ pub fn load_store() -> (Store, Option<String>) {
             (store, Some(notice))
         }
         Ok(store) => (store, None),
-        Err(SandboxError::StateCorrupt { path, message }) => {
+        // Malformed beyond recovery, or present but not openable. The app still has to
+        // open, but it must not write a fresh empty state over the last good copy.
+        // `Store::fallback` is what stops that: it refuses to rotate the backup.
+        Err(err) => {
             let notice = format!(
-                "Deepsand's saved configuration at {} could not be read ({message}). A fresh one has been created; \
-                 re-add your projects and permissions.",
-                path.display()
+                "Deepsand could not read its saved configuration: {err}\n\nNothing has been deleted. \
+                 The live file and every copy set aside earlier are still in {}:\n{}\n\nDeepsand has \
+                 started with an empty configuration so you can look around, and it will not \
+                 overwrite those files or the rolling backup while you do. Report this with the list \
+                 above before re-adding anything by hand.",
+                data_dir.display(),
+                set_aside_list(&data_dir)
             );
-            match Store::load(Store::default_data_dir()) {
-                Ok(store) => (store, Some(notice)),
-                Err(err) => (Store::load(fallback_dir()).unwrap_or_else(|_| panic!("{err}")), Some(notice)),
-            }
+            (Store::fallback(data_dir), Some(notice))
         }
-        Err(err) => (
-            Store::load(fallback_dir()).unwrap_or_else(|_| panic!("{err}")),
-            Some(format!("Deepsand could not open its data directory: {err}")),
-        ),
     }
 }
 
-fn fallback_dir() -> PathBuf {
-    std::env::temp_dir().join("Deepsand")
+
+/// Every state file kept beside the live one, newest first.
+///
+/// For a notice that has to tell an operator where their data went. Naming the files is
+/// the difference between "your projects are gone" and "your projects are in this list";
+/// the second one is usually true.
+fn set_aside_list(data_dir: &std::path::Path) -> String {
+    let mut found: Vec<(std::time::SystemTime, String)> = std::fs::read_dir(data_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    name.starts_with("state.") && name.ends_with(".json")
+                })
+                .filter_map(|entry| {
+                    let modified = entry.metadata().ok()?.modified().ok()?;
+                    Some((modified, entry.file_name().to_string_lossy().to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    if found.is_empty() {
+        return "  (no state files found)".to_string();
+    }
+    found
+        .into_iter()
+        .map(|(modified, name)| {
+            let stamp = modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.as_secs())
+                .unwrap_or_default();
+            format!("  {name}  (mtime {stamp})")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
