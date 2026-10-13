@@ -24,7 +24,7 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 326 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 336 tests |
 | `npm run app:test` | `cargo test -p deepsand-app` — the app crate's own tests, including the zombie guard. Part of `npm test`: it was not, and tests that never run are decoration |
 | `npm run core:check` | `cargo check --workspace` |
 | `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |
@@ -229,6 +229,15 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   was kept forever: the probe runs once, after the window is ready, which is routinely while
   Docker Desktop is still starting. It is retried while the answer is no, and re-asked when the
   window takes focus. If you move a field out of a command, grep the frontend for it.
+* **The runtime files are read from disk, so they are checked before they are used.** A
+  machine that loses the contents of a write while keeping its size leaves a `Dockerfile` of
+  NULs, and Docker's answer to that -- `dockerfile parse error on line 1: unknown instruction:`
+  -- names nothing an operator can act on. `runtime_files` embeds every file under `runtime/`
+  (there is a test that the list is the whole tree, so a new file cannot be forgotten) and
+  repairs only what is *not text*: NULs, empty where content belongs, or missing. A file that
+  merely **differs** is an edit or another build's tree, and is never touched -- overwriting
+  those would be a much worse bug than the one being repaired. The build path repairs and says
+  which files it replaced; `deepsandctl doctor` reports the state without writing anything.
 * **When something is unreachable, say which part.** Docker Desktop running with a daemon that
   is not answering is not the same situation as Docker Desktop not running, and they get
   different sentences (`docker::unreachable_detail`, chosen by asking whether the Desktop

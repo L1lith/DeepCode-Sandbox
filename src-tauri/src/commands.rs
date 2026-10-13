@@ -2900,6 +2900,40 @@ pub fn build_runtime_image_impl(
             );
         }
 
+        // Before anything is built: the files it is built from are read from disk, and this has
+        // been a machine that lost the contents of writes while keeping their sizes. An
+        // installed Dockerfile of 18,412 NULs is answered by Docker with `dockerfile parse
+        // error on line 1: unknown instruction:`, which names nothing an operator can act on
+        // and cannot be fixed by trying again. The bytes this build carries are the repair.
+        match deepsand_core::runtime_files::repair(&context) {
+            Ok(repaired) if !repaired.is_empty() => {
+                let line = format!(
+                    "the runtime files in {} were damaged -- the size of a write survived, its \
+                     contents did not -- and have been repaired from this build's own copy: {}",
+                    context.display(),
+                    repaired.join(", ")
+                );
+                write(&line);
+                tracing::warn!("{line}");
+                let _ = app_for_log.emit(events::BUILD_LOG, serde_json::json!({ "line": line }));
+            }
+            Ok(_) => {}
+            Err(err) => {
+                let detail = format!(
+                    "{err}\n\nThe files the image is built from are unreadable and could not be \
+                     repaired from this build's own copy. Reinstalling Deepsand replaces them."
+                );
+                write(&detail);
+                let state = tauri::Manager::state::<AppState>(&app_handle);
+                end_build(&state, &image);
+                let _ = app_handle.emit(
+                    events::BUILD_DONE,
+                    serde_json::json!({ "ok": false, "detail": detail }),
+                );
+                return;
+            }
+        }
+
         // A build that dies because the daemon went away is retried once, after the daemon
         // comes back. The layer cache survives it, so the second attempt resumes rather than
         // starting over -- and the alternative is an operator reading an RPC error and

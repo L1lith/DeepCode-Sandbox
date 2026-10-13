@@ -193,6 +193,21 @@ fn cmd_doctor(data_dir: &Path) -> Result<()> {
         (Err(err), _) => println!("seccomp        : cannot be checked ({err})"),
     }
 
+    // The files an image is built from, and whether the copy on disk is still readable. A
+    // machine that loses the contents of a write while keeping its size leaves a Dockerfile of
+    // NULs behind, and Docker's answer to that names nothing an operator can act on.
+    if let Some(dir) = deepsand_core::seccomp::runtime_dir() {
+        let damage = deepsand_core::runtime_files::audit(&dir);
+        if damage.is_empty() {
+            println!("runtime files : readable ({})", dir.display());
+        } else {
+            for entry in damage {
+                println!("runtime files : DAMAGED - {}", entry.describe());
+            }
+            println!("                a build repairs these from the copy inside the app");
+        }
+    }
+
     println!();
     println!("host file sharing (required: the project directory is bind-mounted):");
     match Docker::locate() {

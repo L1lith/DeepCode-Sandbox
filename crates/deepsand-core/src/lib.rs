@@ -26,6 +26,7 @@ pub mod paths;
 pub mod remote;
 pub mod policy;
 pub mod proxy;
+pub mod runtime_files;
 pub mod seccomp;
 pub mod session;
 pub mod secrets;
