@@ -213,13 +213,41 @@ desktop app and the headless CLI cannot behave differently.
 
 ```bash
 npm run app:dev              # app with hot reload
-npm run core:test            # 309 Rust tests: paths, policy, broker, proxy, credentials, seccomp, durability
+npm run core:test            # 310 Rust tests: paths, policy, broker, proxy, credentials, seccomp, durability
 npm run test:bridge          # 55 checks: the permission protocol end to end
 npm test                     # both suites
 npm run core:check           # cargo check --workspace
 npm run build                # typecheck + bundle the frontend
 npm run runtime:icons        # regenerate src-tauri/icons from code
 ```
+
+### Building an installer locally
+
+`npm run app:build` produces what you would ship, and it is slow on purpose: the release
+profile is `lto = true` with `codegen-units = 1`, which makes the final link a
+whole-program one. The other three exist because most local builds are not shipping:
+
+| Command | What it does | When it is right |
+| --- | --- | --- |
+| `npm run app:dev` | dev profile, hot reload, no bundling | iterating on code — seconds, not minutes |
+| `npm run app:build:debug` | debug profile, NSIS installer only | you want to *install* your change and click around |
+| `npm run app:build:fast` | release profile with **LTO off**, NSIS only, unsigned | you want something close to the real thing, quickly |
+| `npm run app:build:binary` | builds the executable, packages nothing | checking that it compiles |
+| `npm run app:build` | release, every bundle target, LTO on, signed | making a release |
+
+On Windows the release build makes **two** installers (MSI and NSIS) because
+`bundle.targets` is `"all"` so that each platform in the release matrix builds its own.
+The `--bundles nsis` in the fast variants skips WiX and the MSI entirely.
+
+`app:build:fast` turns LTO off because that is the only thing that measurably helps.
+Swapping the *linker* does not: a release relink after touching one file measures 219 s
+with the MSVC linker and 212 s with `rust-lld`, because with `lto = true` the time is LLVM
+optimizing across every crate *before* a linker is invoked. Turning LTO off is what takes
+the minutes out. It produces a slightly larger, slightly slower binary, which is why the
+shipping build keeps `lto = true`.
+
+A release build also needs the updater key in the environment, or it stops with an error
+about updater artifacts (see [Install](#install)).
 
 The interesting tests are the ones that assert containment rather than behaviour — `a_plan_never_mounts_a_container_runtime_socket`, `the_reply_channel_can_never_be_written_by_the_sandbox`, `symlinks_are_resolved_before_guards_run`. They are listed in [docs/SECURITY.md](docs/SECURITY.md).
 

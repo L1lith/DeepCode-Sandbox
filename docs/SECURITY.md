@@ -338,7 +338,7 @@ enumerates families and flags so that dropping one fails a test rather than a re
 Everything above is asserted by tests you can run:
 
 ```bash
-cargo test -p deepsand-core                   # 309 tests, including the seccomp, allowlist and durability claims
+cargo test -p deepsand-core                   # 310 tests, including the seccomp, allowlist and durability claims
 node runtime/scripts/test-mcp-bridge.mjs      # 55 checks: the permission protocol end to end
 cargo test -p deepsand-core --test runtime_dockerfile   # claims about the image build, no Docker needed
 ```
@@ -375,6 +375,7 @@ The most load-bearing ones:
 | `a_valid_state_misjudged_as_corrupt_comes_back_by_itself` | the state that was wrongly set aside is rescued, not lost |
 | `an_empty_rolling_backup_does_not_hide_a_set_aside_copy` | an empty fallback cannot stand in for a copy that has projects |
 | `a_substitute_store_never_overwrites_the_rolling_backup` | an unreadable configuration cannot cost you the last good copy |
+| `a_destination_that_never_answers_is_bounded_and_reported` | an allowlisted destination that swallows packets cannot tie the proxy up |
 | `an_older_build_can_read_what_this_one_writes` | the on-disk mode name stays at the spelling older builds know |
 | `both_mode_names_are_read_and_the_older_one_is_written` | the same property at the serde level, both directions |
 | `a_state_file_from_a_newer_build_is_reported_and_left_alone` | a version skew is not corruption, and is not filed as it |

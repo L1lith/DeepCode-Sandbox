@@ -223,9 +223,15 @@ mod tests {
         }
     }
 
-    /// Run a short-lived command through a PTY, answering terminal queries, and
-    /// return everything the child printed.
-    fn probe(options: SessionOptions, needle: &str) -> Probe {
+    /// Run a short-lived command through a PTY, answering terminal queries, and return
+    /// everything the child printed.
+    ///
+    /// `needle` is what to wait for, and `None` means "wait only for the exit code". That
+    /// case exists because a deliberately tiny terminal cannot be asked for a particular
+    /// line: at a clamped-to-minimum size the echo comes back wrapped and cut short, so
+    /// waiting for a needle waited for the deadline instead -- 30 seconds of this suite for
+    /// a fact the exit code had already established.
+    fn probe(options: SessionOptions, needle: Option<&str>) -> Probe {
         let (output_tx, output_rx) = mpsc::channel::<Vec<u8>>();
         let (exit_tx, exit_rx) = mpsc::channel::<i32>();
 
@@ -260,7 +266,8 @@ mod tests {
             if let Ok(code) = exit_rx.try_recv() {
                 exit_code = Some(code);
             }
-            if exit_code.is_some() && contains(&collected, needle.as_bytes()) {
+            let saw_needle = needle.is_none_or(|needle| contains(&collected, needle.as_bytes()));
+            if exit_code.is_some() && saw_needle {
                 break;
             }
         }
@@ -285,7 +292,7 @@ mod tests {
 
     #[test]
     fn output_is_delivered_and_the_exit_code_is_reported() {
-        let result = probe(shell_options(&echo_command(None), vec![]), "deepsand-pty-ok");
+        let result = probe(shell_options(&echo_command(None), vec![]), Some("deepsand-pty-ok"));
         assert!(
             result.text.contains("deepsand-pty-ok"),
             "captured: {:?}",
@@ -301,7 +308,7 @@ mod tests {
                 &echo_command(Some("DEEPSAND_TEST_VAR")),
                 vec![("DEEPSAND_TEST_VAR".into(), "sentinel-value".into())],
             ),
-            "sentinel-value",
+            Some("sentinel-value"),
         );
         assert!(
             result.text.contains("sentinel-value"),
@@ -360,7 +367,8 @@ mod tests {
         options.cols = 0;
         // Some window managers report 0x0 before the first layout pass, so this
         // must start rather than error out.
-        let result = probe(options, "deepsand-pty-ok");
+        // Only the exit code: see `probe` on why a clamped terminal has no line to wait for.
+        let result = probe(options, None);
         assert!(result.exit_code.is_some(), "captured: {:?}", result.text);
     }
 }

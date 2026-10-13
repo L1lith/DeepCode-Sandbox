@@ -19,7 +19,10 @@
     "runtime:build": "node runtime/scripts/build-image.mjs",
     "runtime:icons": "tauri icon assets/icon.png",
     "icon:generate-from-code": "node runtime/scripts/make-icon.mjs && tauri icon assets/icon.png",
-    "signer:generate": "tauri signer generate -w ~/.tauri/deepsand.key"
+    "signer:generate": "tauri signer generate -w ~/.tauri/deepsand.key",
+    "app:build:fast": "node scripts/build-app.mjs",
+    "app:build:debug": "node scripts/build-app.mjs --debug",
+    "app:build:binary": "tauri build --no-bundle"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.3",

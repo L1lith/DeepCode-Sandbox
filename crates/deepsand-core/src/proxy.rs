@@ -31,6 +31,7 @@ use crate::model::BlockedEgress;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
@@ -60,6 +61,19 @@ pub struct ProxyConfig {
     pub allow: Vec<String>,
     /// Maximum bytes accepted for the request head.
     pub max_head_bytes: usize,
+    /// How long the attempt on the other side may take: resolving the name, then
+    /// connecting.
+    ///
+    /// Both stages were unbounded, and both hang on a real network in ways that look like a
+    /// frozen app rather than a failure. `TcpStream::connect` with several resolved
+    /// addresses waits out the kernel's SYN retry once per address, so an allowlisted host
+    /// on a *filtered* port sat there for most of a minute per address; resolution is
+    /// bounded only by the system resolver, which on a bad network is tens of seconds.
+    ///
+    /// The budget covers the attempt rather than each stage, because what has to be true is
+    /// that the request comes back. Measured in this crate's own tests, four such requests
+    /// took 168 seconds before and under one second after.
+    pub upstream_timeout: Duration,
 }
 
 impl Default for ProxyConfig {
@@ -68,6 +82,7 @@ impl Default for ProxyConfig {
             bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
             allow: Vec::new(),
             max_head_bytes: 16 * 1024,
+            upstream_timeout: Duration::from_secs(10),
         }
     }
 }
@@ -128,6 +143,7 @@ impl EgressProxy {
         let accept_blocked = Arc::clone(&blocked);
         let accept_counters = Arc::clone(&counters);
         let max_head = config.max_head_bytes;
+        let upstream_timeout = config.upstream_timeout;
 
         tokio::spawn(async move {
             loop {
@@ -140,8 +156,16 @@ impl EgressProxy {
                         let blocked = Arc::clone(&accept_blocked);
                         let counters = Arc::clone(&accept_counters);
                         tokio::spawn(async move {
-                            if let Err(err) =
-                                serve(stream, allow, malformed, blocked, counters, max_head).await
+                            if let Err(err) = serve(
+                                stream,
+                                allow,
+                                malformed,
+                                blocked,
+                                counters,
+                                max_head,
+                                upstream_timeout,
+                            )
+                            .await
                             {
                                 tracing::debug!("egress proxy connection from {peer} ended: {err}");
                             }
@@ -243,6 +267,7 @@ async fn serve(
     blocked: Arc<Mutex<Vec<BlockedEgress>>>,
     counters: Arc<Counters>,
     max_head: usize,
+    upstream_timeout: Duration,
 ) -> std::io::Result<()> {
     let head = match read_head(&mut client, max_head).await? {
         Some(head) => head,
@@ -328,15 +353,34 @@ async fn serve(
     // Resolve ourselves, then refuse anything that lands on local or private address
     // space -- unless the operator named that address, in which case reaching it is
     // the entire point of the entry.
-    let mut resolved = match tokio::net::lookup_host((request.host.as_str(), request.port)).await {
-        Ok(addrs) => addrs.collect::<Vec<_>>(),
-        Err(err) => {
+    let mut resolved = match tokio::time::timeout(
+        upstream_timeout,
+        tokio::net::lookup_host((request.host.as_str(), request.port)),
+    )
+    .await
+    {
+        Ok(Ok(addrs)) => addrs.collect::<Vec<_>>(),
+        Ok(Err(err)) => {
             counters.failed.fetch_add(1, Ordering::Relaxed);
             write_status(
                 &mut client,
                 502,
                 "Bad Gateway",
                 &format!("Deepsand could not resolve '{}': {err}", request.host),
+            )
+            .await?;
+            return Ok(());
+        }
+        Err(_elapsed) => {
+            counters.failed.fetch_add(1, Ordering::Relaxed);
+            write_status(
+                &mut client,
+                504,
+                "Gateway Timeout",
+                &format!(
+                    "Deepsand could not resolve '{}' within {upstream_timeout:?}.",
+                    request.host
+                ),
             )
             .await?;
             return Ok(());
@@ -391,15 +435,36 @@ async fn serve(
         return Ok(());
     }
 
-    let mut upstream = match TcpStream::connect(&resolved[..]).await {
-        Ok(stream) => stream,
-        Err(err) => {
+    let mut upstream = match tokio::time::timeout(
+        upstream_timeout,
+        TcpStream::connect(&resolved[..]),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(err)) => {
             counters.failed.fetch_add(1, Ordering::Relaxed);
             write_status(
                 &mut client,
                 502,
                 "Bad Gateway",
                 &format!("Deepsand could not reach '{}': {err}", request.host),
+            )
+            .await?;
+            return Ok(());
+        }
+        Err(_elapsed) => {
+            counters.failed.fetch_add(1, Ordering::Relaxed);
+            write_status(
+                &mut client,
+                504,
+                "Gateway Timeout",
+                &format!(
+                    "Deepsand could not reach '{}' within {upstream_timeout:?}. The allowlist \
+                     permits it, so the connection was attempted and nothing answered; a \
+                     filtered port behaves this way.",
+                    request.host
+                ),
             )
             .await?;
             return Ok(());
@@ -918,7 +983,7 @@ mod tests {
         let proxy = EgressProxy::start(ProxyConfig {
             bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
             allow: patterns(&["example.com:8443"]),
-            ..ProxyConfig::default()
+            ..decision_only()
         })
         .await
         .unwrap();
@@ -944,7 +1009,7 @@ mod tests {
         let proxy = EgressProxy::start(ProxyConfig {
             bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
             allow: patterns(&["example.com"]),
-            ..ProxyConfig::default()
+            ..decision_only()
         })
         .await
         .unwrap();
@@ -962,6 +1027,44 @@ mod tests {
     /// refused, but an address the operator named literally is allowed through to the
     /// connection attempt. Asserted through the live proxy so the call site is covered,
     /// not just the matcher.
+    /// A destination that swallows packets instead of refusing them must not tie the proxy
+    /// up for the kernel's retry budget, and the model has to be told what happened rather
+    /// than left waiting. This covers the resolution stage too: the name here is an address
+    /// literal, so what is under test at that stage is only that it is bounded. `192.0.2.1` is TEST-NET-1: reserved for documentation and not
+    /// routed, which is the closest thing to "hangs" a test can rely on. Should a network
+    /// answer with a refusal instead, that is a 502 -- still bounded, still explained, which
+    /// is the property under test.
+    #[tokio::test]
+    async fn a_destination_that_never_answers_is_bounded_and_reported() {
+        let proxy = EgressProxy::start(ProxyConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            // An address literal, which is the form allowed to reach an unroutable
+            // address: a hostname that resolved there would be refused.
+            allow: patterns(&["192.0.2.1"]),
+            upstream_timeout: Duration::from_millis(300),
+            ..ProxyConfig::default()
+        })
+        .await
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        let response = request(&proxy, "CONNECT 192.0.2.1:443 HTTP/1.1\r\n\r\n").await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            !response.starts_with("HTTP/1.1 403"),
+            "the allowlist permits this address, so it must not be a refusal: {response}"
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 504") || response.starts_with("HTTP/1.1 502"),
+            "an unreachable destination must be reported as a gateway failure: {response}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the attempt must be bounded by upstream_timeout, not by the kernel: took {elapsed:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_named_address_reaches_private_space_where_a_hostname_may_not() {
         let proxy = EgressProxy::start(ProxyConfig {
@@ -1082,7 +1185,7 @@ mod tests {
         let proxy = EgressProxy::start(ProxyConfig {
             bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
             allow: patterns(&["api.github.com"]),
-            ..ProxyConfig::default()
+            ..decision_only()
         })
         .await
         .unwrap();
@@ -1143,7 +1246,7 @@ mod tests {
         let proxy = EgressProxy::start(ProxyConfig {
             bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
             allow: patterns(&["github.com/org/repo"]),
-            ..ProxyConfig::default()
+            ..decision_only()
         })
         .await
         .unwrap();
@@ -1177,7 +1280,7 @@ mod tests {
         let proxy = EgressProxy::start(ProxyConfig {
             bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
             allow: patterns(&["github.com/org/repo"]),
-            ..ProxyConfig::default()
+            ..decision_only()
         })
         .await
         .unwrap();
@@ -1230,11 +1333,44 @@ mod tests {
     }
 
     /// Drive one request through a proxy and return the raw response.
+    /// A config for tests that assert on the *decision* the proxy makes rather than on
+    /// completing a connection to the internet.
+    ///
+    /// Every one of them asserts "not a 403" -- the code says as much: a request that
+    /// reaches DNS and fails there is what "not refused by the allowlist" looks like
+    /// without a network. What they must not do is wait out the kernel's SYN retry on a
+    /// filtered port once per address a name resolves to, which is where 168 seconds of
+    /// this suite's 169 went. The decision is identical either way; only the waiting is not.
+    fn decision_only() -> ProxyConfig {
+        ProxyConfig {
+            upstream_timeout: Duration::from_millis(150),
+            ..ProxyConfig::default()
+        }
+    }
+
+    /// Send one request to the proxy and return what it says back.
+    ///
+    /// Deliberately not `read_to_end`. When the proxy accepts a tunnel it answers
+    /// "200 Connection Established" and then relays, so the connection stays open until the
+    /// *far end* closes it -- GitHub's and Cloudflare's idle timeouts are tens of seconds,
+    /// and a helper waiting for them is where most of this suite's runtime went: 91 seconds
+    /// for one test that asserts on a status line it already had.
+    ///
+    /// The loop ends at end-of-stream, at an error, or when a read takes longer than the
+    /// quiet period below, which means the proxy has nothing further to say right now. Every
+    /// assertion here is about what the proxy says, and that arrives in one write.
     async fn request(proxy: &EgressProxy, head: &str) -> String {
+        const QUIET: Duration = Duration::from_millis(500);
         let mut stream = TcpStream::connect(proxy.local_addr()).await.unwrap();
         stream.write_all(head.as_bytes()).await.unwrap();
         let mut response = Vec::new();
-        stream.read_to_end(&mut response).await.unwrap();
+        let mut chunk = [0u8; 1024];
+        while let Ok(Ok(read)) = tokio::time::timeout(QUIET, stream.read(&mut chunk)).await {
+            if read == 0 {
+                break;
+            }
+            response.extend_from_slice(&chunk[..read]);
+        }
         String::from_utf8_lossy(&response).to_string()
     }
 

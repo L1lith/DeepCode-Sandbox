@@ -24,7 +24,7 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 309 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 310 tests |
 | `npm run core:check` | `cargo check --workspace` |
 | `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |
 | `npm test` | the two suites above, in order |
@@ -187,6 +187,12 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   also refuses `chmod` on a volume mount root, the entrypoint verifies the
   property that matters (uid 1000 can read its credentials and write its volume)
   and stops with an explanation instead of assuming.
+* **An egress-proxy test must not read the connection to the end.** The proxy answers a
+  tunnel with `200 Connection Established` and then relays, so the connection closes when
+  the *far end* closes it: measured here, GitHub at 91 s and Cloudflare at 15 s, which is
+  where 170 of this suite's 175 seconds went. Read until a quiet period instead, and bound
+  the upstream attempt in the proxy itself (`ProxyConfig::upstream_timeout`, which covers
+  resolution as well as connect) rather than relying on the network to answer promptly.
 * **MCP `tools/call` is capped at 60 s.** The bridge waits ~45 s and then replies
   `PENDING` with a request id; the model collects the answer later with
   `deepsand_check_request`. Do not make the bridge block indefinitely.
@@ -201,6 +207,26 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   shell, set `MSYS2_ARG_CONV_EXCL='*'` or msys rewrites them.
 * **Release profile is `panic = "abort"`**, so no unwinding: a panic takes the
   process down. Prefer returning `Result` at the edges.
+* **`lto = true` with `codegen-units = 1` makes the link the cost of a release
+  build.** That is the right trade for a shipped binary and the wrong one for a
+  local loop, which is why `app:build:debug` and `app:build:fast` exist.
+  **The linker is not the lever, and that is measured, not assumed.** A release
+  relink of `deepsand-app` after touching one file takes 219 s with the MSVC
+  `link.exe` and 212 s with `rust-lld` — 3%, which is noise. With `lto = true` the
+  time is LLVM optimizing across every crate *before* any linker runs, so swapping
+  the linker cannot help. Do not spend an afternoon on it twice. The lever is LTO
+  itself: turn it off for local builds, which is what `app:build:fast` does. Note
+  that changing any of this changes cargo's fingerprints, so the first build after
+  such a change recompiles everything — including in CI, where it costs one cache
+  miss on the next release. Changing `RUSTFLAGS` does the same.
+* **The image's slow step depends on the tool selection, not on the app.** The
+  tools layer (`apt` plus `cargo install`, e.g. htmlq) is ~70 s and only rebuilds
+  when a project's tools change; the DeepCode layer rebuilds on *every* image build
+  because the app passes a fresh `DEEPCODE_REFRESH`. Both are covered by BuildKit
+  cache mounts for apt's lists/archives and npm's cache, which is why the apt
+  branches must not `rm -rf /var/lib/apt/lists/*` any more: that would empty a cache
+  rather than shrink a layer. Cargo's registry is deliberately *not* mounted — the
+  tools step deletes `$CARGO_HOME`, and deleting a mounted path fails the build.
 * **Moving or renaming the checkout needs `cargo clean`, and that includes the
   release profile.** Two things bake the absolute path of the working directory into
   build output: `env!("CARGO_MANIFEST_DIR")` in the test that reads

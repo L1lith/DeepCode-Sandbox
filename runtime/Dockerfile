@@ -53,7 +53,13 @@ ENV LANG=C.UTF-8 \
 # Deliberately no: sudo, docker-cli, podman, nerdctl, sshd, gcc-setuid tools,
 # nfs/cifs clients. Nothing in here grants a path out of the container.
 # ---------------------------------------------------------------------------
-RUN set -eux; \
+# The apt lists and the downloaded packages live in build caches rather than in this
+# layer. Without them every build re-downloads the index and every .deb; with them a
+# rebuild fetches only what changed. `sharing=locked` matters: two projects can be
+# building at once and apt's lists are not safe for two writers.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -70,13 +76,14 @@ RUN set -eux; \
         patch \
         make \
         socat \
-        tini; \
-    rm -rf /var/lib/apt/lists/*
+        tini
 
 # ---------------------------------------------------------------------------
 # Optional compiler toolchain (off by default; keeps the image ~250 MB smaller)
 # ---------------------------------------------------------------------------
-RUN set -eux; \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    set -eux; \
     if [ "$INSTALL_BUILD_TOOLS" = "1" ]; then \
         apt-get update; \
         apt-get install -y --no-install-recommends \
@@ -86,7 +93,6 @@ RUN set -eux; \
             python3-pip \
             python3-venv \
             python3-dev; \
-        rm -rf /var/lib/apt/lists/*; \
     fi
 
 # ---------------------------------------------------------------------------
@@ -217,7 +223,10 @@ ARG WITH_GO=0
 ARG WITH_BREW=0
 ARG WITH_NIX=0
 
-RUN set -eux; \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    --mount=type=cache,target=/root/.npm \
+    set -eux; \
     # The app passes these three as comma-separated lists, because a build argument is one
     # argv entry and commas need no quoting. They are split here, once, rather than at each
     # use. The apt branch used to expand $APT_PACKAGES directly, so apt was handed the whole
@@ -238,17 +247,14 @@ RUN set -eux; \
     if [ "$WITH_NODE_REPO" = "1" ]; then \
       curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -; \
       apt-get install -y --no-install-recommends nodejs; \
-      rm -rf /var/lib/apt/lists/*; \
     fi; \
     if [ -n "$APT_PACKAGES" ]; then \
       apt-get update; \
       apt-get install -y --no-install-recommends $APT_PACKAGES; \
-      rm -rf /var/lib/apt/lists/*; \
     fi; \
     if [ "$WITH_GO" = "1" ]; then \
       apt-get update; \
       apt-get install -y --no-install-recommends golang-go; \
-      rm -rf /var/lib/apt/lists/*; \
     fi; \
     if [ -n "$NPM_GLOBALS" ]; then \
       for pkg in $NPM_GLOBALS; do \
@@ -269,7 +275,6 @@ RUN set -eux; \
       # built at all unless the operator happened to also want the full build tools.
       apt-get update; \
       apt-get install -y --no-install-recommends gcc libc6-dev; \
-      rm -rf /var/lib/apt/lists/*; \
       export RUSTUP_HOME=/home/deepcode/.rustup CARGO_HOME=/home/deepcode/.cargo; \
       export PATH="$CARGO_HOME/bin:$PATH"; \
       if ! command -v cargo >/dev/null 2>&1; then \
@@ -281,7 +286,6 @@ RUN set -eux; \
       done; \
       apt-get purge -y gcc libc6-dev || true; \
       apt-get autoremove -y || true; \
-      rm -rf /var/lib/apt/lists/*; \
       case ",$INSTALL_TOOLS," in \
         *,cargo*) echo "deepsand: keeping the Rust toolchain, cargo was selected"; ;; \
         *) rm -rf /home/deepcode/.cargo /home/deepcode/.rustup; ;; \
@@ -296,7 +300,6 @@ RUN set -eux; \
     if [ "$WITH_NIX" = "1" ]; then \
       apt-get update; \
       apt-get install -y --no-install-recommends xz-utils; \
-      rm -rf /var/lib/apt/lists/*; \
       # A downloaded script rather than `sh <(...)`: process substitution is a bash
       # feature, and the Dockerfile's shell is dash, where it is a *parse* error that
       # fails the RUN even when this branch is not taken.
@@ -341,10 +344,13 @@ ENV PATH="/home/deepcode/.cargo/bin:/home/deepcode/.local/bin:/home/deepcode/.ni
 # image, which is what made every launch rebuild all of the tool steps.
 # ---------------------------------------------------------------------------
 ARG DEEPCODE_REFRESH=0
-RUN set -eux; \
+# This layer runs on every image build, by design: the app passes a fresh DEEPCODE_REFRESH
+# so that "latest" means latest rather than latest-when-the-layer-was-cached. An npm cache
+# survives that, so the install fetches only what actually changed.
+RUN --mount=type=cache,target=/root/.npm \
+    set -eux; \
     echo "deepsand: refreshing DeepCode (build $DEEPCODE_REFRESH)"; \
     npm install -g --no-fund --no-audit "@vegamo/deepcode-cli@${DEEPCODE_CLI_VERSION}"; \
-    npm cache clean --force; \
     deepcode --version
 
 LABEL deepsand.tools="$INSTALL_TOOLS"
