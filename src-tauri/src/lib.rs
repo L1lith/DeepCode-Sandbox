@@ -89,6 +89,11 @@ pub fn run() {
             {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
+                    // After the window has had a moment. This sweeps Docker for leftovers,
+                    // and every Docker CLI call it makes is one the first paint cannot make:
+                    // on this machine that is 180-600 ms per invocation. Nothing can Run
+                    // before the operator has a window, and Run reclaims the name anyway.
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     let state = tauri::Manager::state::<AppState>(&handle);
                     if let Ok(removed) = commands::cleanup_orphans_impl(&state) {
                         if !removed.is_empty() {
@@ -117,6 +122,13 @@ pub fn run() {
                     use tauri::Emitter as _;
                     let mut last: Option<bool> = None;
                     loop {
+                        // The window asks `docker_status` as soon as it is up, so waiting a
+                        // moment before this loop's first probe means Docker is asked once
+                        // rather than twice during the same second of startup. From then on
+                        // this is the watcher, which is what it is for.
+                        if last.is_none() {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
                         let probe = handle.clone();
                         let available = tauri::async_runtime::spawn_blocking(move || {
                             let state = tauri::Manager::state::<AppState>(&probe);

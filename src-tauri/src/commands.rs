@@ -80,19 +80,15 @@ pub fn app_info_impl(state: &AppState) -> CmdResult<AppInfo> {
     let data_dir = store.data_dir().to_path_buf();
     drop(store);
 
-    let docker = match state.docker() {
-        Ok(docker) => docker.probe(&settings.image),
-        Err(err) => DockerStatus {
-            available: false,
-            detail: err.to_string(),
-            ..DockerStatus::default()
-        },
-    };
-
+    // Deliberately not a Docker probe. This is the first call the window makes, and a probe
+    // is three Docker CLI invocations (~0.4 s here, and 1.5 s before they were overlapped) --
+    // time the UI spent with nothing drawn, to learn something no part of the first paint
+    // needs. `None` is "not checked yet": the window asks with `docker_status` once it is up,
+    // and the status strip says so until then rather than claiming the daemon is down.
     Ok(AppInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         data_dir: data_dir.display().to_string(),
-        docker,
+        docker: None,
         host_config: credentials::describe_host_config(&credentials::read_host_config()),
         settings,
     })

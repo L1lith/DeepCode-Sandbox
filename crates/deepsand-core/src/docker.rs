@@ -146,27 +146,49 @@ impl Docker {
     pub fn probe(&self, image: &str) -> DockerStatus {
         let mut status = DockerStatus::default();
 
-        status.client_version = self
-            .try_run(&self.fmt(&["version", "--format", "{{.Client.Version}}"]))
-            .unwrap_or_default();
+        // Three calls, not five, and made at the same time.
+        //
+        // Every one of these spawns the Docker CLI, which costs 180-600 ms here -- measured:
+        // 181 for `version`, 175 for the server version, 420 for one `info`, 588 for the
+        // other, 185 for `image inspect`. Five of them in sequence is ~1.5 s, on a path the
+        // app's first paint used to wait behind. `{{json .}}` returns everything the two
+        // `version` calls and the two `info` calls were each asking for separately, and
+        // `thread::scope` overlaps what is left, so the probe costs about as much as its
+        // slowest call.
+        let (version_json, info_json, image_id) = std::thread::scope(|scope| {
+            let version = scope.spawn(|| self.try_run(&self.fmt(&["version", "--format", "{{json .}}"])));
+            let info = scope.spawn(|| self.try_run(&self.fmt(&["info", "--format", "{{json .}}"])));
+            let image = scope.spawn(|| self.image_id(image));
+            (
+                version.join().ok().flatten(),
+                info.join().ok().flatten(),
+                image.join().ok().flatten(),
+            )
+        });
 
-        match self.try_run(&self.fmt(&["version", "--format", "{{.Server.Version}}"])) {
-            Some(version) if !version.is_empty() && !version.contains("error") => {
+        let (client, server) = version_json
+            .as_deref()
+            .map(parse_versions)
+            .unwrap_or_default();
+        status.client_version = client;
+        match server {
+            Some(version) if !version.is_empty() => {
                 status.available = true;
                 status.server_version = version;
             }
             _ => {
-                status.detail = "the Docker daemon is not reachable. Start Docker Desktop and try again.".to_string();
+                status.detail =
+                    "the Docker daemon is not reachable. Start Docker Desktop and try again."
+                        .to_string();
                 return status;
             }
         }
 
-        status.operating_system = self
-            .try_run(&self.fmt(&["info", "--format", "{{.OperatingSystem}}"]))
-            .unwrap_or_default();
-        let name = self.try_run(&self.fmt(&["info", "--format", "{{.Name}}"])).unwrap_or_default();
-        status.desktop = status.operating_system.contains("Docker Desktop") || name.contains("docker-desktop");
-        status.image_present = self.image_present(image);
+        let (operating_system, name) = info_json.as_deref().map(parse_info).unwrap_or_default();
+        status.operating_system = operating_system;
+        status.desktop =
+            status.operating_system.contains("Docker Desktop") || name.contains("docker-desktop");
+        status.image_present = image_id.is_some();
         status.detail = if status.desktop {
             "Docker Desktop detected: the daemon runs inside a VM, so limited hardening options are available."
                 .to_string()
@@ -614,6 +636,47 @@ impl Docker {
 /// an indeterminate bar instead of a fabricated number.
 /// How many lines of build output a failure carries. Enough for the failing step's own
 /// message and its last line of context; not so many that the toast is a wall of text.
+/// The client and server versions out of `docker version --format '{{json .}}'`.
+///
+/// A daemon that is not running still prints a `Client` block, and may omit `Server` or
+/// report it as null, so the server half is optional rather than an error: the caller turns
+/// its absence into "the daemon is not reachable".
+pub fn parse_versions(json: &str) -> (String, Option<String>) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return (String::new(), None);
+    };
+    let text = |at: Option<&serde_json::Value>| {
+        at.and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    let client = text(value.get("Client").and_then(|client| client.get("Version")));
+    let server = value
+        .get("Server")
+        .and_then(|server| server.get("Version"))
+        .and_then(|version| version.as_str())
+        .map(|version| version.trim().to_string())
+        .filter(|version| !version.is_empty());
+    (client, server)
+}
+
+/// The operating system and daemon name out of `docker info --format '{{json .}}'`.
+pub fn parse_info(json: &str) -> (String, String) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return (String::new(), String::new());
+    };
+    let text = |key: &str| {
+        value
+            .get(key)
+            .and_then(|field| field.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    (text("OperatingSystem"), text("Name"))
+}
+
 pub const BUILD_TAIL_LINES: usize = 8;
 
 /// The message a failed build reports, including the end of its own output.
@@ -742,6 +805,51 @@ fn which(program: &str) -> Option<PathBuf> {
         assert_eq!(parse_build_step("#1 [9/4] FROM node"), None);
         assert_eq!(parse_build_step("#1 [a/b] FROM node"), None);
     }
+
+/// The probe reads JSON that Docker produces, and the two pieces it needs from it. Worth
+/// testing on its own: the shapes below are trimmed copies of real output, including the
+/// daemon-less case, which is the one that has to be distinguished from a parse failure.
+#[cfg(test)]
+mod probe_parsing_tests {
+    use super::*;
+
+    const WITH_SERVER: &str = r#"{"Client":{"Version":"29.8.2","Os":"windows"},
+        "Server":{"Version":"29.8.2","Os":"linux"}}"#;
+
+    /// With no daemon the client block is still printed and the server one is null.
+    const WITHOUT_SERVER: &str = r#"{"Client":{"Version":"29.8.2"},"Server":null}"#;
+
+    #[test]
+    fn the_versions_come_out_of_one_call() {
+        assert_eq!(
+            parse_versions(WITH_SERVER),
+            ("29.8.2".to_string(), Some("29.8.2".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_daemon_that_is_not_running_is_a_missing_server_not_an_error() {
+        let (client, server) = parse_versions(WITHOUT_SERVER);
+        assert_eq!(client, "29.8.2", "the client version is still known");
+        assert_eq!(server, None, "and the server one is what tells the caller to refuse");
+    }
+
+    /// Anything that is not the expected JSON is "unknown", never a panic and never a
+    /// half-filled version string.
+    #[test]
+    fn nonsense_is_reported_as_unknown() {
+        assert_eq!(parse_versions(""), (String::new(), None));
+        assert_eq!(parse_versions("error during connect"), (String::new(), None));
+        assert_eq!(parse_versions("{}"), (String::new(), None));
+        assert_eq!(parse_info("not json"), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn the_operating_system_and_name_come_out_of_one_call() {
+        let info = r#"{"OperatingSystem":"Docker Desktop","Name":"docker-desktop","NCPU":8}"#;
+        assert_eq!(parse_info(info), ("Docker Desktop".to_string(), "docker-desktop".to_string()));
+    }
+}
 
 #[cfg(test)]
 mod build_failure_tests {

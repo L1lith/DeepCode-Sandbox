@@ -24,7 +24,7 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 316 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 320 tests |
 | `npm run core:check` | `cargo check --workspace` |
 | `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |
 | `npm test` | the two suites above, in order |
@@ -187,6 +187,16 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   also refuses `chmod` on a volume mount root, the entrypoint verifies the
   property that matters (uid 1000 can read its credentials and write its volume)
   and stops with an explanation instead of assuming.
+* **Nothing on the first-paint path may call Docker.** Every `docker` invocation spawns
+  the CLI, which costs 180-600 ms on this machine, so a probe is user-visible time. A probe
+  was 1549 ms: five sequential calls for two versions, two `info` fields and an image
+  inspect. It is now three concurrent calls (`version --format '{{json .}}'`,
+  `info --format '{{json .}}'`, `image inspect`) and costs 379 ms measured, and `app_info`
+  -- the window's first call -- no longer probes at all: it returns `docker: null` and the
+  window asks with `docker_status` once it is up, drawing "Checking Docker…" until then.
+  The startup sweeps (orphan cleanup, the availability poll) wait two seconds so they do not
+  race the window for the same CLI. If you add a startup path, ask whether the first paint
+  needs the answer; if it does not, do not ask the question there.
 * **An egress-proxy test must not read the connection to the end.** The proxy answers a
   tunnel with `200 Connection Established` and then relays, so the connection closes when
   the *far end* closes it: measured here, GitHub at 91 s and Cloudflare at 15 s, which is

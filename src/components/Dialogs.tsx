@@ -1300,10 +1300,17 @@ export function SettingsDialog(props: { settings: AppSettings; onClose: () => vo
           <span class="hint">
             Built from <span class="mono">runtime/Dockerfile</span>.{" "}
             <Show
-              when={store.info?.docker.image_present}
-              fallback={<span class="badge badge-warn">not built yet</span>}
+              when={store.info?.docker}
+              fallback={<span class="badge">checking…</span>}
             >
-              <span class="badge badge-ok">present</span>
+              {(docker) => (
+                <Show
+                  when={docker().image_present}
+                  fallback={<span class="badge badge-warn">not built yet</span>}
+                >
+                  <span class="badge badge-ok">present</span>
+                </Show>
+              )}
             </Show>
           </span>
         </div>

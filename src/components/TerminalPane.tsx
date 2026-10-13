@@ -176,12 +176,16 @@ export function TerminalPane() {
                       Remove the project or recreate the folder.
                     </div>
                   </Show>
-                  <Show when={store.info && !store.info.docker.available}>
+                  {/* Only once the answer is in: this used to fire during the first
+                      moments of every launch, when the question had not been asked. */}
+                  <Show when={store.info?.docker && !store.info.docker.available}>
                     <div class="callout callout-danger">
                       The Docker daemon is not reachable. Start Docker Desktop, then try again.
                     </div>
                   </Show>
-                  <Show when={store.info && store.info.docker.available && !store.info.docker.image_present}>
+                  <Show
+                    when={store.info?.docker?.available && !store.info.docker.image_present}
+                  >
                     <div class="callout callout-warn">
                       The runtime image <span class="mono">{store.info?.settings.image}</span> has not been built
                       yet. Build it from the Activity tab, or run{" "}

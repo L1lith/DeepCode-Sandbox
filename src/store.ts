@@ -116,15 +116,36 @@ export function describeError(error: unknown): string {
 
 export async function bootstrap() {
   try {
-    const info = await api.appInfo();
+    // In parallel, because these are four independent local calls and awaiting them in
+    // sequence made the window's first paint the sum of their latencies rather than the
+    // slowest one.
+    const [info, notice] = await Promise.all([api.appInfo(), api.startupError()]);
     setStore({ info, settings: info.settings });
-    const notice = await api.startupError();
     if (notice) setStore("startupNotice", notice);
-    await refreshProjects();
-    await refreshRequests();
+    await Promise.all([refreshProjects(), refreshRequests()]);
     setStore("ready", true);
+    // Then Docker. Not awaited: the app is usable now, and a probe is three CLI calls, so
+    // the status strip fills in when it answers instead of holding up the window.
+    void refreshDockerStatus();
   } catch (error) {
     setStore({ fatal: describeError(error), ready: true });
+  }
+}
+
+/**
+ * Ask the backend about Docker, and put the answer where the status strip reads it.
+ *
+ * Separate from `bootstrap` on purpose: this is the slow part of starting up and none of
+ * the first paint depends on it. A failure leaves `docker` as null, which the strip renders
+ * as "checking" -- the honest state, rather than claiming the daemon is unreachable when
+ * what failed was the question.
+ */
+export async function refreshDockerStatus() {
+  try {
+    const docker = await api.dockerStatus();
+    setStore("info", "docker", docker);
+  } catch {
+    /* left as null: the strip keeps saying it is still checking */
   }
 }
 

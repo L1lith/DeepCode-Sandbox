@@ -173,24 +173,35 @@ export default function App() {
 
           <div class="sidebar-foot">
             <Show
-              when={store.info?.docker.available}
+              when={store.info?.docker}
               fallback={
-                <>
-                  <span class="badge badge-danger">
-                    <span class="dot" /> Docker daemon unreachable
-                  </span>
-                  <span class="faint">{store.info?.docker.detail}</span>
-                </>
+                <span class="badge">
+                  <span class="dot" /> Checking Docker…
+                </span>
               }
             >
-              <div class="row-inline">
-                <span class="badge badge-ok">
-                  <span class="dot" /> Docker {store.info?.docker.server_version}
-                </span>
-                <Show when={!store.info?.docker.image_present}>
-                  <span class="badge badge-warn">image missing</span>
+              {(docker) => (
+                <Show
+                  when={docker().available}
+                  fallback={
+                    <>
+                      <span class="badge badge-danger">
+                        <span class="dot" /> Docker daemon unreachable
+                      </span>
+                      <span class="faint">{docker().detail}</span>
+                    </>
+                  }
+                >
+                  <div class="row-inline">
+                    <span class="badge badge-ok">
+                      <span class="dot" /> Docker {docker().server_version}
+                    </span>
+                    <Show when={!docker().image_present}>
+                      <span class="badge badge-warn">image missing</span>
+                    </Show>
+                  </div>
                 </Show>
-              </div>
+              )}
             </Show>
             <button class="btn btn-ghost btn-sm" onClick={() => setShowSettings(true)}>
               Settings

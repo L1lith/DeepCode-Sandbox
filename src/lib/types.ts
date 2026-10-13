@@ -277,7 +277,12 @@ export interface DockerStatus {
 export interface AppInfo {
   version: string;
   dataDir: string;
-  docker: DockerStatus;
+  /**
+   * `null` until the window has asked (`dockerStatus()`), which it does once it is up.
+   * Deliberately not fetched during the first paint: a probe is three Docker CLI calls, and
+   * nothing drawn before the app is usable needs an answer to them.
+   */
+  docker: DockerStatus | null;
   hostConfig: Record<string, string>;
   settings: AppSettings;
 }

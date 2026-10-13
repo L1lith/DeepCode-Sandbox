@@ -105,11 +105,15 @@ export function ActivityPanel() {
         </p>
         <div class="row-inline" style={{ "margin-top": "0.6rem" }}>
           <span class="tag">{store.info?.settings.image}</span>
-          <Show
-            when={store.info?.docker.image_present}
-            fallback={<span class="badge badge-warn">not built</span>}
-          >
-            <span class="badge badge-ok">present</span>
+          <Show when={store.info?.docker} fallback={<span class="badge">checking…</span>}>
+            {(docker) => (
+              <Show
+                when={docker().image_present}
+                fallback={<span class="badge badge-warn">not built</span>}
+              >
+                <span class="badge badge-ok">present</span>
+              </Show>
+            )}
           </Show>
           <button class="btn" disabled={busy() || store.building} onClick={() => void buildImage()}>
             {store.building ? "Building…" : "Build image"}
@@ -213,15 +217,24 @@ export function ActivityPanel() {
               <th>Docker</th>
               <td>
                 <Show
-                  when={store.info?.docker.available}
-                  fallback={<span class="badge badge-danger">daemon not reachable</span>}
+                  when={store.info?.docker}
+                  fallback={<span class="badge">checking…</span>}
                 >
-                  <span class="badge badge-ok">server {store.info?.docker.server_version}</span>
-                </Show>
-                <Show when={store.info?.docker.desktop}>
-                  <span class="badge badge-warn" style={{ "margin-left": "0.4rem" }}>
-                    Docker Desktop: limited hardening
-                  </span>
+                  {(docker) => (
+                    <>
+                      <Show
+                        when={docker().available}
+                        fallback={<span class="badge badge-danger">daemon not reachable</span>}
+                      >
+                        <span class="badge badge-ok">server {docker().server_version}</span>
+                      </Show>
+                      <Show when={docker().desktop}>
+                        <span class="badge badge-warn" style={{ "margin-left": "0.4rem" }}>
+                          Docker Desktop: limited hardening
+                        </span>
+                      </Show>
+                    </>
+                  )}
                 </Show>
               </td>
             </tr>

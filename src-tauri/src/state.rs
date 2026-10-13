@@ -186,7 +186,10 @@ pub struct BlockedEgressView {
 pub struct AppInfo {
     pub version: String,
     pub data_dir: String,
-    pub docker: DockerStatus,
+    /// `None` until the window has asked (`docker_status`). Probing here would put three
+    /// Docker CLI calls in front of the first paint, and nothing the first paint draws needs
+    /// an answer to them.
+    pub docker: Option<DockerStatus>,
     pub host_config: std::collections::BTreeMap<String, String>,
     pub settings: AppSettings,
 }
