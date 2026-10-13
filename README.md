@@ -138,15 +138,21 @@ depth.
   `none` to leave only the model API reachable — package installs, clones and web
   requests fail, which is a deliberate choice rather than a broken default.
 * **Kernel hardening.** A hardened seccomp profile is **on by default** and
-  attached with `--security-opt=seccomp=`. It denies 63 syscalls, among them
+  attached with `--security-opt=seccomp=`. Its 16 rules deny 69 syscalls, among them
   `mount`, `unshare`, `setns`, `pivot_root`, `chroot`, `bpf`, `ptrace`, `keyctl`,
-  `init_module`, `open_by_handle_at`, `userfaultfd`, `perf_event_open`,
-  `io_uring_*`, and the exotic socket families (`AF_VSOCK`, `AF_ALG`,
-  `AF_PACKET`, `AF_TIPC`, `AF_XDP`). If the profile cannot be found, no plan is
-  built at all rather than a weaker container being started.
+  `pidfd_getfd`, `init_module`, `open_by_handle_at`, `userfaultfd`,
+  `perf_event_open`, `io_uring_*`, every `CLONE_NEW*` flag, and the exotic socket
+  families (`AF_VSOCK`, `AF_ALG`, `AF_PACKET`, `AF_TIPC`, `AF_XDP`). The image also
+  carries the profile's digest, and a sandbox refuses to start unless the profile
+  being applied is byte-for-byte the one the image was built with. If the profile
+  cannot be found, no plan is built at all rather than a weaker container starting.
 * **Permissions.** The sandbox can *write* requests and *read* answers. The
   answer directory is mounted read-only, so a compromised sandbox cannot forge
-  an approval or rewrite its own grant list. It can only ask.
+  an approval or rewrite its own grant list. It can only ask. The request file
+  itself is not authenticated — it cannot be, since the bridge is the agent's own
+  child process — so the prompt you answer *is* the control, and there is
+  deliberately no auto-approve path that could turn a forged request into a silent
+  grant. See [docs/SECURITY.md](docs/SECURITY.md#the-request-spool-is-not-authenticated).
 
 Every one of those claims has tests. See [docs/SECURITY.md](docs/SECURITY.md),
 which also lists what this does **not** protect against.
@@ -178,8 +184,8 @@ desktop app and the headless CLI cannot behave differently.
 
 ```bash
 npm run app:dev              # app with hot reload
-npm run core:test            # 233 Rust tests: paths, policy, broker, proxy, secrets
-npm run test:bridge          # 47 checks: the permission protocol end to end
+npm run core:test            # 252 Rust tests: paths, policy, broker, proxy, secrets, seccomp
+npm run test:bridge          # 48 checks: the permission protocol end to end
 npm test                     # both suites
 npm run core:check           # cargo check --workspace
 npm run build                # typecheck + bundle the frontend

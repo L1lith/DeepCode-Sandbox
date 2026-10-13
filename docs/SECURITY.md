@@ -145,6 +145,44 @@ Everything arriving on the request spool is treated as hostile input
 * answering requires a well-formed id, so a crafted id cannot write outside the
   spool
 
+### The request spool is not authenticated
+
+Round 3 of the escape assessment hand-wrote three request files without calling the
+MCP tool at all, and the host processed all three: a correct token with a bogus pid,
+a correct token with the real pid, and a *wrong* token. Nothing checked any of it.
+That was correct about the behaviour and wrong about the design intent, so this is
+the honest version.
+
+**It cannot be fixed by authenticating the file, and the attempt should not be made.**
+The bridge is spawned by the sandboxed DeepCode as uid 1000, which is the same uid the
+agent runs as: the bridge is not a separate principal, it is the agent's own child.
+Any value the bridge can read — an environment variable, a file, a kernel keyring
+entry — the agent can read too, so a nonce it can echo into a request is a nonce the
+agent can forge. Isolating the bridge in its own mount namespace would need
+`unshare`/`setns`, which this profile deliberately denies. The channel is therefore
+unauthenticated *by construction*, and the control is the one the design already
+relies on: **a human reads the request and decides**. Nothing is granted without that
+decision.
+
+What follows from that, and what was changed:
+
+* The session token is **gone** — from the settings, from the container environment
+  and from the request. It authenticated nothing, and a field shaped like a credential
+  is worse than no field, because it invites the reader to assume a check exists.
+  Nothing should be added back in its place unless it is a principal the agent cannot
+  impersonate, which needs a second uid, not another string.
+* There is **no auto-approve path**, and there must not be one. A rule like "already
+  covered by an existing grant" or "the operator approved this path before" would turn
+  dialog spoofing into a silent host-directory grant, because the spool cannot tell a
+  request the bridge wrote from one the agent wrote. `broker.rs` records every request
+  and answers only on an explicit decision; a test asserts that a request is never
+  answered without one.
+* The pid in a request is a **hint for the operator, not provenance**. It is not
+  verified, because the agent can read the real pid from `ps` and copy it, so
+  verifying it would add a check that cannot fail in the case that matters.
+* The flood caps stay: at most 25 requests are surfaced at once, and the request
+  filename, id and size are validated before a dialog exists.
+
 ## What this does *not* protect against
 
 Being explicit here is more useful than a longer list of things it does.
@@ -167,36 +205,71 @@ Being explicit here is more useful than a longer list of things it does.
    still put a secret in the workspace: the sandbox can read everything in
    `/workspace`, always.
 
-5. **The `full` network mode.** It does what it says. DeepCode can reach the
+5. **The model API key is readable inside the sandbox, by design.** This is worth
+   stating rather than implying otherwise. The CLI resolves its credential from
+   `env.API_KEY` in the settings file and nowhere else, so the key has to be in the
+   container, and the agent runs as the same user as the CLI — anything the CLI can
+   read, the agent can read. Deepsand's `extra_env` passthrough *is* filtered, so an
+   unrelated key cannot be smuggled in beside it, but the model key itself is not a
+   secret from the agent and cannot be made one in this architecture. What the
+   container buys is confinement, not secrecy: the sandbox is the only thing that
+   can read it, and it can only send it to the model endpoint.
+
+6. **Dialog spoofing through the request spool.** See
+   [The request spool is not authenticated](#the-request-spool-is-not-authenticated)
+   below: anything inside the sandbox can write a request, so the operator's
+   decision is the control, and an operator who approves without reading the path is
+   the attack.
+
+7. **A filesystem metadata oracle on Docker Desktop.** `/workspace` is a
+   `grpcfuse` share on Windows and macOS, and the share's jail checks content
+   operations but not attribute lookups: a path component containing backslashes
+   (`..\..\..\..\Windows`) is resolved by the share daemon as a Windows relative
+   path, so `stat` on a guessed host path returns the real type, size and mtime even
+   though `open`, `readdir` and every write are refused. Nothing is disclosed beyond
+   existence, type, size and mtime, one guessed name at a time, and the mounts
+   Deepsand chose are unaffected — but it does mean there is *a* path to host
+   metadata outside the grants, which is why the instruction given to the contained
+   model no longer claims that no such path exists. It is Docker's component and
+   belongs upstream; it is recorded here so that nobody re-derives it as a Deepsand
+   escape.
+
+8. **The `full` network mode.** It does what it says. DeepCode can reach the
    host's own services. Filesystem isolation is unaffected, but this is why it is
    not the default and why choosing it produces a warning in the plan preview.
 
-6. **A kernel or container-runtime escape.** Docker and the Linux kernel are the
+9. **A kernel or container-runtime escape.** Docker and the Linux kernel are the
    trust base. Deepsand reduces the attack surface (`--cap-drop=ALL`,
    `no-new-privileges`, read-only rootfs, resource limits) but cannot fix a
    kernel bug. Keeping Docker Desktop and the host OS updated is part of the
    security model, not an optional nicety.
 
-7. **Hosts running without a container VM.** On Linux the daemon runs on the
-   host, so a container escape is a host escape. Docker Desktop on Windows and
-   macOS adds a VM boundary that Linux does not have. This is a real difference
-   in defence in depth and is worth knowing.
+10. **Hosts running without a container VM.** On Linux the daemon runs on the
+    host, so a container escape is a host escape. Docker Desktop on Windows and
+    macOS adds a VM boundary that Linux does not have. This is a real difference
+    in defence in depth and is worth knowing.
 
 ### The hardened seccomp profile
 
-`runtime/seccomp-hardened.json` is **attached by default**. `impl Default for
-SeccompProfile` returns `Hardened`, which is what a store without the field
-deserialises to, so existing projects get hardening rather than Docker's
-permissive built-in profile. Docker's built-in profile is already good, so this
-is an *additive* denylist on top, and `policy::plan_run` attaches it with
-`--security-opt=seccomp=<path>`:
+`runtime/seccomp-hardened.json` is **attached by default** and `policy::plan_run`
+applies it with `--security-opt=seccomp=<path>`. `impl Default for SeccompProfile`
+returns `Hardened`, which is what a store without the field deserialises to, so
+existing projects get it rather than Docker's built-in profile. The profile has 16
+rules:
 
-* 56 syscalls return `EPERM`: `mount`, `unshare`, `setns`, `pivot_root`,
+* 65 syscalls return `EPERM` outright: `mount`, `unshare`, `setns`, `pivot_root`,
   `chroot`, `bpf`, `perf_event_open`, `keyctl`, `kexec_*`, `init_module`,
-  `open_by_handle_at`, `ptrace`, `process_vm_readv/writev`, `userfaultfd`,
-  `io_uring_*`, `reboot`, and friends.
+  `open_by_handle_at`, `ptrace`, `process_vm_readv/writev`, `pidfd_getfd`, `kcmp`,
+  `userfaultfd`, `io_uring_*`, the new mount API (`fsopen`, `fsconfig`, `fsmount`,
+  `fspick`, `move_mount`, `open_tree`, `mount_setattr`), `reboot`, and friends.
 * `clone3` returns `ENOSYS`, so glibc falls back to the argument-filterable
   `clone`.
+* Eight `clone` rules deny `CLONE_NEWUSER`, `CLONE_NEWNS`, `CLONE_NEWPID`,
+  `CLONE_NEWNET`, `CLONE_NEWIPC`, `CLONE_NEWUTS`, `CLONE_NEWCGROUP` and
+  `CLONE_NEWTIME`. One rule per bit is required — several `args` entries inside one
+  rule are ANDed, and `SCMP_CMP_MASKED_EQ` tests a single bit — so "any
+  `CLONE_NEW*` flag" is expressible after all, as eight rules rather than one.
+  `CLONE_NEWUSER` is the load-bearing one, because it needs no capability.
 * Five `socket` rules reject exotic address families with `EAFNOSUPPORT`:
   `AF_PACKET`, `AF_TIPC`, `AF_ALG`, `AF_VSOCK` and `AF_XDP`, with `socketcall`
   refused outright. `AF_VSOCK` is the one that matters: on some configurations it
@@ -206,21 +279,39 @@ is an *additive* denylist on top, and `policy::plan_run` attaches it with
 `plan_run` returns an error instead of a plan, so a missing file stops the sandbox
 rather than quietly weakening it.
 
-**Known deviation, stated plainly.** With `defaultAction: ALLOW` the profile
-cannot express Docker's "deny `clone()` when any `CLONE_NEW*` flag is set" rule,
-because `SCMP_CMP_MASKED_EQ` only tests single-bit equality in that direction.
-The containment argument does not depend on it — a nested user namespace grants
-`CAP_SYS_ADMIN` only *inside* that namespace, where it can at most remount its own
-namespace's view of the same read-only mounts. But it is a deviation, and it is
-documented here rather than glossed over.
+**The profile applied is the profile the image carries.** The daemon resolves
+`--security-opt=seccomp=` on the *host*, so the copy inside the image is only ever
+read by an auditor, and the two can drift: round 3 of the escape assessment found a
+container whose applied rules included the socket-family denials while the shipped
+profile had no `socket` rule at all, which makes the hardening unattributable to the
+artifact the project ships. The Dockerfile therefore writes the profile's SHA-256
+beside it, and `seccomp::verify` compares that against the digest of the bytes about
+to be handed to the daemon. A mismatch, a missing digest file or a malformed one is
+a refusal, not a warning. `deepsandctl doctor` reports the result.
+
+**What a denylist cannot say, and the residual that follows.** Two things are not
+expressible in this shape, and both are handled by enumeration rather than by a rule:
+
+* "address family not in a set". Only registered families need a rule, because the
+  kernel refuses an unregistered one by itself — but a kernel that registers a new
+  dangerous family needs a new rule here.
+* "any flag in a mask", in a single rule. Eight rules cover the eight namespace
+  bits; one rule with a combined mask would instead mean "all of these bits set".
+
+The durable answer to both is an allow-list (`defaultAction: DENY` plus the syscalls
+the sandbox needs), which is what Docker's built-in profile is. This profile is a
+denylist over an allow default, so a syscall that is not listed is *permitted* here
+where Docker's built-in profile would refuse it. That is a real difference in
+strength rather than a detail, and `crates/deepsand-core/tests/seccomp_profile.rs`
+enumerates families and flags so that dropping one fails a test rather than a review.
 
 ## Verifying the claims
 
 Everything above is asserted by tests you can run:
 
 ```bash
-cargo test -p deepsand-core                   # 233 tests: paths, policy, broker, proxy, secrets
-node runtime/scripts/test-mcp-bridge.mjs      # 47 checks: the permission protocol end to end
+cargo test -p deepsand-core                   # 252 tests, including the seccomp profile claims
+node runtime/scripts/test-mcp-bridge.mjs      # 48 checks: the permission protocol end to end
 ```
 
 The most load-bearing ones:
@@ -238,6 +329,12 @@ The most load-bearing ones:
 | `local_and_private_addresses_are_never_targets` | the proxy cannot be aimed inward |
 | `an_allowlisted_but_private_resolving_host_is_refused` | rebinding is useless |
 | `a_path_that_only_looks_like_a_container_path_is_kept` | the guard is not over-broad (a Linux-breaking bug this caught) |
+| `clone_is_refused_when_any_namespace_flag_is_set` | all eight `CLONE_NEW*` bits, not just the one that was remembered |
+| `every_filtered_address_family_is_refused` | the socket-family set, and that `AF_UNIX`/`INET`/`INET6`/`NETLINK` survive |
+| `the_ptrace_family_is_closed_including_pidfd_getfd` | the sibling of `ptrace` that was missing |
+| `a_stale_image_is_refused_and_says_which_side_is_which` | the applied profile *is* the shipped profile (R3-A) |
+| `a_request_is_never_answered_without_an_explicit_decision` | dialog spoofing cannot become a silent grant |
+| `resolve_announces_what_it_dropped_rather_than_dropping_it_silently` | the env passthrough cannot smuggle an unrelated key in |
 
 To read the exact command for any project:
 

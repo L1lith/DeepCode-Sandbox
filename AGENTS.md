@@ -24,9 +24,9 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 233 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 252 tests |
 | `npm run core:check` | `cargo check --workspace` |
-| `npm run test:bridge` | 47 checks of the MCP bridge against a simulated spool |
+| `npm run test:bridge` | 48 checks of the MCP bridge against a simulated spool |
 | `npm test` | the two suites above, in order |
 | `npm run build` | `tsc --noEmit` + `vite build` (frontend typecheck) |
 | `npm run runtime:build` | build and tag the sandbox image |
@@ -44,6 +44,8 @@ npm run app:dev         # app with hot reload
 | `crates/deepsand-core/src/secrets.rs` | ChaCha20-Poly1305 secrets, keyed from the OS keystore. |
 | `crates/deepsand-core/src/tools.rs` | Tool catalogue and the image tag a selection produces. |
 | `crates/deepsand-core/src/remote.rs` | What a remote client may do. Kept separate from HTTP so it is testable. |
+| `crates/deepsand-core/src/seccomp.rs` | The profile's digest, the runtime-tree resolver, and the check that the applied profile is the shipped one. |
+| `crates/deepsand-core/tests/seccomp_profile.rs` | Claims about the profile itself: address families, `CLONE_NEW*` bits, the ptrace family. Reads the repo artifact, so no Docker needed. |
 | `crates/deepsand-core/src/bin/deepsandctl.rs` | Headless driver: `doctor`, `project`, `grants`, `plan`, `run`, `watch`, `requests`, `network`. |
 | `src-tauri/src/commands.rs` | The ~30 desktop commands, and `runtime_revision`. |
 | `src-tauri/src/remote_server.rs` | HTTP translation of the command surface. Binds loopback, bearer token. |
@@ -77,11 +79,25 @@ These are load-bearing. Breaking one is how this project gets a CVE.
    with `ps`. A test asserts no value-shaped `--env` pair can appear in a plan.
 7. **Credentials and generated config go to Deepsand's data directory, never into
    the user's project.** Project directories get committed, published and synced.
-8. **LF line endings for everything Linux reads or executes.** `.gitattributes`
-   enforces this. A shell script with a CRLF shebang fails inside the container
-   with `bash\r: No such file or directory` and the sandbox never starts.
-9. **`reference/` is never committed, vendored or bundled.** Upstream DeepCode CLI
-   source is downloaded there read-only, and gitignored.
+8. **The profile that gets applied must be provably the profile the image carries.**
+   The daemon resolves `--security-opt=seccomp=` on the *host*, so the image's copy
+   is only ever read by an auditor. The Dockerfile writes the profile's digest beside
+   it and `seccomp::verify` compares the two before anything starts, refusing on a
+   mismatch, a missing digest or a malformed one. `seccomp::runtime_dir()` is the
+   single resolver for the runtime tree — do not add a second search order, which is
+   how the applied and shipped profiles drifted apart once already.
+9. **The request spool is not authenticated, and cannot be.** The bridge is a child
+   of the agent's own process as uid 1000, so any secret it can read the agent can
+   read. Do not add a token, nonce or pid check to a request expecting it to be a
+   control: it will be forgeable, and a credential-shaped field that authenticates
+   nothing is worse than no field. The human decision is the control — which means
+   **never add an auto-approve path** ("already granted", "approved before"), because
+   that converts dialog spoofing into a silent host-directory grant.
+10. **LF line endings for everything Linux reads or executes.** `.gitattributes`
+    enforces this. A shell script with a CRLF shebang fails inside the container
+    with `bash\r: No such file or directory` and the sandbox never starts.
+11. **`reference/` is never committed, vendored or bundled.** Upstream DeepCode CLI
+    source is downloaded there read-only, and gitignored.
 
 ## Conventions
 
