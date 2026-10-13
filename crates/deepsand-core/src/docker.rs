@@ -659,36 +659,83 @@ impl Docker {
             ));
         }
 
-        let mut args = self.fmt(&[
-            "run",
-            "--rm",
-            "--network=none",
-            "--read-only",
-            "--cap-drop=ALL",
-            "--security-opt=no-new-privileges",
-            "--user=0:0",
-            "--entrypoint=/bin/cat",
-            "-v",
-        ]);
-        args.push(format!("{}:/deepsand-probe:ro", dir.display()));
-        args.push(image.to_string());
-        args.push(format!("/deepsand-probe/{token}"));
+        // The probe answers one question -- can a container read this host directory? -- so it is
+        // run against whichever image can answer it. The image the plan would use is tried first,
+        // but an image that has not been built yet is not a reason to fail: docker would try to
+        // pull it and report "pull access denied", which says nothing about the mount. A local
+        // runtime image answers just as well.
+        let attempt = |image: &str| -> crate::Result<String> {
+            let mut args = self.fmt(&[
+                "run",
+                "--rm",
+                "--network=none",
+                "--read-only",
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges",
+                "--user=0:0",
+                "--entrypoint=/bin/cat",
+                "-v",
+            ]);
+            args.push(format!("{}:/deepsand-probe:ro", dir.display()));
+            args.push(image.to_string());
+            args.push(format!("/deepsand-probe/{token}"));
+            self.run(&args)
+        };
 
-        let result = self.try_run(&args);
+        let candidates: Vec<String> = std::iter::once(image.to_string())
+            .chain(
+                self.local_runtime_images()
+                    .into_iter()
+                    .filter(|tag| tag != image)
+                    .take(1),
+            )
+            .collect();
+
+        let mut last_detail = String::from("no image was available to run the probe");
+        for candidate in &candidates {
+            match attempt(candidate) {
+                Ok(out) if out.contains(&token) => {
+                    let _ = std::fs::remove_file(&probe);
+                    return SharingCheck::ok();
+                }
+                Ok(out) => {
+                    last_detail = format!(
+                        "the probe ran on {candidate} but did not return its token ({out:?})"
+                    )
+                }
+                Err(err) => {
+                    last_detail = format!("running the probe on {candidate} failed: {err}")
+                }
+            }
+        }
         let _ = std::fs::remove_file(&probe);
 
-        match result {
-            Some(out) if out.contains(&token) => SharingCheck::ok(),
-            _ => SharingCheck::unavailable(format!(
-                "Docker cannot read files from {} inside a container.\n\n\
-                 Docker Desktop only shares the directories listed under\n\
-                 Settings -> Resources -> File Sharing. This machine currently lists none, so a bind\n\
-                 mount silently produces empty directories instead of a readable tree. Add the drive that\n\
-                 holds your projects (for example C:\\) there, choose Apply & Restart, then try again.\n\n\
-                 On Linux, check that the path is not under a mount your Docker daemon cannot see.",
-                dir.display()
-            )),
-        }
+        SharingCheck::unavailable(format!(
+            "Docker could not read a probe file from {} inside a container, so a bind mount would \
+             look like an empty directory to DeepCode.\n\n\
+             On Docker Desktop, add the drive that holds your projects under Settings -> Resources \
+             -> File Sharing, choose Apply & Restart, then try again. On Linux, check that the path \
+             is visible to the daemon.\n\n\
+             Docker itself said: {last_detail}",
+            dir.display()
+        ))
+    }
+
+    /// Every local runtime image, newest first.
+    ///
+    /// The sharing probe can run on any of them; a plan whose image has not been built yet must
+    /// not turn "image missing" into "the mount is unreadable".
+    fn local_runtime_images(&self) -> Vec<String> {
+        let mut found: Vec<(String, String)> = self
+            .try_run(&self.fmt(&["images", "--format", "{{.CreatedAt}}\t{{.Repository}}:{{.Tag}}"]))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .filter(|(_, tag)| tag.starts_with("deepsand/runtime:"))
+            .map(|(when, tag)| (when.to_string(), tag.to_string()))
+            .collect();
+        found.sort_by(|a, b| b.0.cmp(&a.0));
+        found.into_iter().map(|(_, tag)| tag).collect()
     }
 
     /// Create the per-project bridge network used by the restricted egress mode.
