@@ -41,7 +41,7 @@ impl SessionOptions {
 /// A live pseudo-terminal attached to the sandbox container.
 pub struct Session {
     master: Box<dyn MasterPty + Send>,
-    writer: std::sync::Arc<std::sync::Mutex<Box<dyn Write + Send>>>,
+    writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     description: String,
 }
@@ -110,23 +110,15 @@ impl Session {
             .master
             .try_clone_reader()
             .map_err(|err| SandboxError::Broker(format!("could not read from the pseudo-terminal: {err}")))?;
-        // Shared, because two threads write here: the one forwarding the operator's keystrokes, and
-        // the reader answering the terminal's own questions. `take_writer` hands out one handle, so
-        // it goes round rather than being cloned.
-        let writer = std::sync::Arc::new(std::sync::Mutex::new(
-            pair.master.take_writer().map_err(|err| {
-                SandboxError::Broker(format!("could not write to the pseudo-terminal: {err}"))
-            })?,
-        ));
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|err| SandboxError::Broker(format!("could not write to the pseudo-terminal: {err}")))?;
         let killer = child.clone_killer();
 
         let description = options.command_line();
 
-        // Reader thread: stream output to the UI until the PTY closes. It also answers the
-        // terminal's own questions -- see `terminal_replies` -- because the program on the other end
-        // is *blocked* until they are answered, and the question arrives long before a window can.
-        let replies = std::sync::Arc::clone(&writer);
-        let (pty_rows, pty_cols) = (options.rows.max(1), options.cols.max(1));
+        // Reader thread: stream output to the UI until the PTY closes.
         std::thread::Builder::new()
             .name("deepsand-pty-reader".into())
             .spawn(move || {
@@ -134,16 +126,7 @@ impl Session {
                 loop {
                     match reader.read(&mut buffer) {
                         Ok(0) => break,
-                        Ok(n) => {
-                            let chunk = &buffer[..n];
-                            if let Some(reply) = terminal_replies(chunk, pty_rows, pty_cols) {
-                                if let Ok(mut writer) = replies.lock() {
-                                    let _ = writer.write_all(reply.as_bytes());
-                                    let _ = writer.flush();
-                                }
-                            }
-                            on_output(chunk);
-                        }
+                        Ok(n) => on_output(&buffer[..n]),
                         Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
                         Err(_) => break,
                     }
@@ -172,9 +155,8 @@ impl Session {
     }
 
     pub fn send(&mut self, data: &[u8]) -> Result<()> {
-        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
-        writer.write_all(data)?;
-        writer.flush()?;
+        self.writer.write_all(data)?;
+        self.writer.flush()?;
         Ok(())
     }
 
@@ -406,65 +388,5 @@ mod tests {
         // Only the exit code: see `probe` on why a clamped terminal has no line to wait for.
         let result = probe(options, None);
         assert!(result.exit_code.is_some(), "captured: {:?}", result.text);
-    }
-}
-
-/// The answers a terminal owes, given the bytes a program has just written to it.
-///
-/// Both of these are blocking questions, which is what makes them worth answering here rather than
-/// leaving to a front end:
-///
-///  * `ESC[6n` -- "where is the cursor?" ConPTY and the docker client ask this on Windows before
-///    anything else, and nothing continues until `ESC[<row>;<col>R` comes back. The window can
-///    answer, but only if the question arrives after it has attached; this one arrives in the first
-///    milliseconds, so nobody answers it and the launch sits there with no container and no log
-///    line. That was a bug that looked exactly like a hung daemon.
-///  * `ESC[c` -- "what kind of terminal are you?" A full-screen TUI asks before it draws anything,
-///    and waits for the same reason.
-///
-/// The size is the one this terminal was created with, which is the truth as far as anything on the
-/// other end can tell: the UI resizes it afterwards and reports that separately.
-pub fn terminal_replies(chunk: &[u8], rows: u16, cols: u16) -> Option<String> {
-    let text = String::from_utf8_lossy(chunk);
-    let mut reply = String::new();
-    if text.contains("\x1b[6n") {
-        reply.push_str(&format!("\x1b[{};{}R", rows.max(1), cols.max(1)));
-    }
-    if text.contains("\x1b[c") || text.contains("\x1b[0c") {
-        // A VT100 with advanced video, which is what everything expects to hear.
-        reply.push_str("\x1b[?1;2c");
-    }
-    (!reply.is_empty()).then_some(reply)
-}
-
-#[cfg(test)]
-mod terminal_query_tests {
-    use super::*;
-
-    /// The one that hung a launch: a cursor question gets an answer, with the size we were given.
-    #[test]
-    fn the_cursor_question_is_answered_with_the_size_of_this_terminal() {
-        assert_eq!(
-            terminal_replies(b"\x1b[6n", 24, 80).as_deref(),
-            Some("\x1b[24;80R")
-        );
-    }
-
-    /// And the question a TUI asks before it draws anything.
-    #[test]
-    fn the_terminal_identity_question_is_answered_too() {
-        assert_eq!(
-            terminal_replies(b"\x1b[c", 24, 80).as_deref(),
-            Some("\x1b[?1;2c")
-        );
-    }
-
-    /// Ordinary output is not a question, and answering one that was not asked would put stray
-    /// characters in front of the program reading the terminal.
-    #[test]
-    fn ordinary_output_is_not_answered() {
-        assert_eq!(terminal_replies(b"hello", 24, 80), None);
-        assert_eq!(terminal_replies(b"\x1b[2J\x1b[H", 24, 80), None);
-        assert_eq!(terminal_replies(b"", 24, 80), None);
     }
 }
