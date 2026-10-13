@@ -24,7 +24,7 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 310 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 316 tests |
 | `npm run core:check` | `cargo check --workspace` |
 | `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |
 | `npm test` | the two suites above, in order |
@@ -219,6 +219,16 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   that changing any of this changes cargo's fingerprints, so the first build after
   such a change recompiles everything — including in CI, where it costs one cache
   miss on the next release. Changing `RUSTFLAGS` does the same.
+* **One image tag, derived in one place.** The `image` in settings is a *stem*: the tool
+  selection and the runtime revision are appended to it, so the stem is not what any project
+  runs. `settings::settings_for_project` is the only place that substitution happens, and
+  every caller that builds a plan goes through it. This was wrong for a while in the most
+  expensive way: two call sites derived the tag, one was forgotten, and the plan named the
+  stem while the app built, labelled and digest-checked the derived tag -- so the selected
+  tools were never in the sandbox and the revision that forces a rebuild never reached a
+  container. If you add a plan path, add a test that the argv names the project's tag.
+  `deepsandctl plan <project> --offline` prints the argv without touching Docker, which is
+  how this was caught.
 * **The image's slow step depends on the tool selection, not on the app.** The
   tools layer (`apt` plus `cargo install`, e.g. htmlq) is ~70 s and only rebuilds
   when a project's tools change; the DeepCode layer rebuilds on *every* image build

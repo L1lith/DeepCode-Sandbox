@@ -64,6 +64,26 @@ const STRICT_ALLOW: &[&str] = &[
 /// bridge can read is a value the agent can read. It was a credential-shaped value that
 /// authenticated nothing, and it is gone rather than left implying a control. See
 /// `docs/SECURITY.md`, "The request spool is not authenticated".
+/// The application settings as one project sees them: the same values, with `image`
+/// replaced by the tag that project actually runs.
+///
+/// Every caller that builds a plan has to go through this. The base tag in settings is a
+/// stem -- [`crate::seccomp::project_image`] appends the tool selection and the runtime
+/// revision -- and a plan that names the stem starts a container from whatever that tag
+/// happens to hold.
+///
+/// This is not a hypothetical. The app built the derived tag, read the tool list out of its
+/// label, checked its seccomp digest and told the sandbox what tools it had, and then
+/// planned the *stem*: so the tools a project selected were never the tools in its sandbox,
+/// and the runtime revision, whose whole purpose is to force a rebuild when a script
+/// changes, never reached a container. Two call sites deriving the same tag and one of them
+/// being forgotten is what this function exists to make impossible.
+pub fn settings_for_project(app: &AppSettings, selection: Option<&[String]>) -> AppSettings {
+    let mut settings = app.clone();
+    settings.image = crate::seccomp::project_image(&app.image, selection);
+    settings
+}
+
 pub fn build_deepcode_settings(
     project: &Project,
     grants: &[Grant],
@@ -384,4 +404,53 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     std::fs::write(&tmp, serde_json::to_string_pretty(value)?)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod project_settings_tests {
+    use super::*;
+
+    /// The image is the one field that must change, and it must change to the project's tag.
+    /// Two call sites used to derive that tag and one of them was forgotten, which is how the
+    /// plan came to name the stem while the app built, labelled and digest-checked the tag.
+    #[test]
+    fn a_project_settings_image_is_the_project_tag_and_nothing_else_moves() {
+        let base = AppSettings {
+            image: "deepsand/runtime:9.9.9".to_string(),
+            ..AppSettings::default()
+        };
+        let selection = vec!["htmlq".to_string()];
+        let for_project = settings_for_project(&base, Some(&selection));
+
+        assert_ne!(for_project.image, base.image, "the stem is not what a project runs");
+        assert!(
+            for_project.image.starts_with("deepsand/runtime:9.9.9-t"),
+            "the project tag is derived from the stem: {}",
+            for_project.image
+        );
+
+        // Everything else is the operator's settings, unchanged.
+        assert_eq!(for_project.security.seccomp, base.security.seccomp);
+        assert_eq!(for_project.egress_allowlist, base.egress_allowlist);
+        assert_eq!(for_project.default_limits, base.default_limits);
+        assert_eq!(
+            serde_json::to_value(&for_project).unwrap()["image"],
+            serde_json::json!(for_project.image)
+        );
+    }
+
+    /// Two projects with different tools do not share an image, which is the whole reason the
+    /// tag exists.
+    #[test]
+    fn two_tool_selections_do_not_share_an_image() {
+        let base = AppSettings {
+            image: "deepsand/runtime:9.9.9".to_string(),
+            ..AppSettings::default()
+        };
+        let one = settings_for_project(&base, Some(&["htmlq".to_string()]));
+        let two = settings_for_project(&base, Some(&["jq".to_string()]));
+        let none = settings_for_project(&base, None);
+        assert_ne!(one.image, two.image);
+        assert_ne!(one.image, none.image);
+    }
 }

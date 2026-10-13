@@ -315,7 +315,16 @@ profile had no `socket` rule at all, which makes the hardening unattributable to
 artifact the project ships. The Dockerfile therefore writes the profile's SHA-256
 beside it, and `seccomp::verify` compares that against the digest of the bytes about
 to be handed to the daemon. A mismatch, a missing digest file or a malformed one is
-a refusal, not a warning. `deepsandctl doctor` reports the result.
+a refusal, not a warning. `deepsandctl doctor` reports the result, per project.
+
+That comparison is only worth anything if it checks the image the project actually runs,
+and for a while it did not: the tag in settings is a *stem*, and the tools and the runtime
+revision are appended to it, so the app built, labelled and digest-checked
+`…-t<tools>-r<revision>` while the plan it handed to `docker run` named the bare stem. The
+sandbox therefore ran whichever image that tag happened to hold -- a project's selected
+tools were never the tools in its sandbox, and the revision that exists to force a rebuild
+never reached a container. One derivation now feeds every call site
+(`settings::settings_for_project`), and both the app and `deepsandctl` go through it.
 
 **What a denylist cannot say, and the residual that follows.** Two things are not
 expressible in this shape, and both are handled by enumeration rather than by a rule:
@@ -338,7 +347,7 @@ enumerates families and flags so that dropping one fails a test rather than a re
 Everything above is asserted by tests you can run:
 
 ```bash
-cargo test -p deepsand-core                   # 310 tests, including the seccomp, allowlist and durability claims
+cargo test -p deepsand-core                   # 316 tests, including the seccomp, allowlist and durability claims
 node runtime/scripts/test-mcp-bridge.mjs      # 55 checks: the permission protocol end to end
 cargo test -p deepsand-core --test runtime_dockerfile   # claims about the image build, no Docker needed
 ```
@@ -362,6 +371,9 @@ The most load-bearing ones:
 | `every_filtered_address_family_is_refused` | the socket-family set, and that `AF_UNIX`/`INET`/`INET6`/`NETLINK` survive |
 | `the_ptrace_family_is_closed_including_pidfd_getfd` | the sibling of `ptrace` that was missing |
 | `a_stale_image_is_refused_and_says_which_side_is_which` | the applied profile *is* the shipped profile (R3-A) |
+| `the_runtime_revision_changes_when_any_input_changes` | the tag covers every image build input, so a rebuild cannot be skipped |
+| `a_project_image_extends_the_base_tag_rather_than_replacing_it` | a plan names the project's image, never the stem |
+| `a_project_settings_image_is_the_project_tag_and_nothing_else_moves` | one derivation, and it changes only the image |
 | `a_request_is_never_answered_without_an_explicit_decision` | dialog spoofing cannot become a silent grant |
 | `resolve_announces_what_it_dropped_rather_than_dropping_it_silently` | the env passthrough cannot smuggle an unrelated key in |
 | `a_named_port_is_allowed_and_every_other_port_is_refused` | a port-qualified entry narrows rather than widens |

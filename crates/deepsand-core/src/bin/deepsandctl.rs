@@ -148,37 +148,49 @@ fn cmd_doctor(data_dir: &Path) -> Result<()> {
     println!("docker platform: {}", or_unknown(&docker_status.operating_system));
     println!("docker desktop : {}", docker_status.desktop);
     println!("daemon ready   : {}", docker_status.available);
+    // The settings tag is the stem every project's tag is derived from, and it is not the
+    // image any project runs. Printing it alone read as "the runtime image is present" while
+    // a project's own tag could be missing entirely, so both are shown.
     println!(
-        "runtime image  : {} ({})",
+        "runtime stem   : {} ({})",
         store.settings().image,
-        if docker_status.image_present { "present" } else { "MISSING - run `deepsandctl` after building it" }
+        if docker_status.image_present { "present" } else { "MISSING - build it from the app, or run the project" }
     );
     if !docker_status.detail.is_empty() {
         println!("note           : {}", docker_status.detail);
     }
 
-    // The profile that will actually be applied, and whether it is the profile the image
-    // carries. The daemon resolves `--security-opt=seccomp=` on the host, so this is the
-    // only place the two halves are ever compared -- R3-A of the escape assessment.
+    // Each project's own image, and whether the profile the daemon will apply is the profile
+    // that image carries. The daemon resolves `--security-opt=seccomp=` on the host, so this
+    // is the only place the two halves are ever compared -- R3-A of the escape assessment.
+    //
+    // Per project, and not once against the stem: the stem is not the image any project runs,
+    // so a check against it would compare the host's profile with an artifact nothing starts.
+    // An image that is not present is reported as unchecked rather than as a mismatch,
+    // because a missing image is what the next Run builds.
     let hardening = matches!(store.settings().security.seccomp, SeccompProfile::Hardened);
-    match deepsand_core::seccomp::profile_path(hardening) {
-        Some(profile) if docker_status.image_present => match Docker::locate() {
-            Ok(docker) => {
-                if let Err(err) =
-                    verify_profile_against_image(&docker, store.settings().image.as_str(), &profile)
-                {
-                    println!("seccomp image  : MISMATCH - {err}");
-                }
+    let profile = deepsand_core::seccomp::profile_path(hardening);
+    match (Docker::locate(), profile) {
+        (Ok(docker), Some(profile)) => {
+            for project in store.projects() {
+                let image =
+                    container_settings::settings_for_project(store.settings(), project.tools.as_deref())
+                        .image;
+                let verdict = if docker.image_present(&image) {
+                    match verify_profile_against_image(&docker, &image, &profile) {
+                        Ok(_) => "present, profile matches".to_string(),
+                        Err(err) => format!("SECCOMP MISMATCH - {err}"),
+                    }
+                } else {
+                    "MISSING - built on the next run".to_string()
+                };
+                println!("  project image: {} -> {image} ({verdict})", project.name);
             }
-            Err(err) => println!("seccomp        : cannot be checked ({err})"),
-        },
-        Some(profile) => println!(
-            "seccomp        : {} (the runtime image is not present, so the applied profile could not be compared with it)",
-            profile.display()
-        ),
-        None => println!(
+        }
+        (_, None) => println!(
             "seccomp        : none (hardening is off, or runtime/seccomp-hardened.json is missing)"
         ),
+        (Err(err), _) => println!("seccomp        : cannot be checked ({err})"),
     }
 
     println!();
@@ -457,6 +469,14 @@ fn emit(text: &str) {
 /// Assemble a plan for a project, writing the generated configuration first so
 /// the mounts the plan names actually exist.
 fn build_plan(store: &Store, project: &Project, resume: bool, offline: bool) -> Result<policy::RunPlan> {
+    // The image this project runs, computed the one way it is computed anywhere: the base
+    // tag in settings is a stem, and the tools and the runtime revision are appended to it.
+    // The probe, the profile check and the plan all have to name the same tag, or `plan`
+    // reports on an image nothing runs.
+    let project_settings =
+        container_settings::settings_for_project(store.settings(), project.tools.as_deref());
+    let project_image = project_settings.image.clone();
+
     let (docker_status, docker) = if offline {
         (
             DockerStatus {
@@ -472,7 +492,7 @@ fn build_plan(store: &Store, project: &Project, resume: bool, offline: bool) -> 
         )
     } else {
         let docker = Docker::locate()?;
-        (docker.probe(&store.settings().image), Some(docker))
+        (docker.probe(&project_image), Some(docker))
     };
 
     store.ensure_project_dirs(&project.id)?;
@@ -513,7 +533,7 @@ fn build_plan(store: &Store, project: &Project, resume: bool, offline: bool) -> 
     // cannot be attributed to the image it runs is a sandbox nobody can audit (R3-A).
     if let (Some(profile), Some(docker)) = (seccomp.as_deref(), docker.as_ref()) {
         if docker_status.image_present {
-            verify_profile_against_image(docker, store.settings().image.as_str(), profile)?;
+            verify_profile_against_image(docker, project_image.as_str(), profile)?;
         }
     }
     // The model endpoint is not optional in any mode, so it is passed separately
@@ -525,7 +545,7 @@ fn build_plan(store: &Store, project: &Project, resume: bool, offline: bool) -> 
     policy::plan_run(&PlanInput {
         project,
         grants: &grants,
-        app: store.settings(),
+        app: &project_settings,
         docker_status: &docker_status,
         data_dir: store.data_dir(),
         guards: store.guards(),

@@ -485,6 +485,12 @@ fn prepare_plan(
         )
     };
 
+    // Before anything reads the image: the probe below, the profile check, the snapshot the
+    // sandbox reads and the plan itself all have to agree on which image this is. The tag in
+    // settings is only the stem the project's tag is derived from, and `image_present` has to
+    // mean "this project's image is there", not "some image with that stem is".
+    let app_settings = container_settings::settings_for_project(&app_settings, project.tools.as_deref());
+
     let daemon = match state.app_state().docker() {
         Ok(docker) => docker.probe(&app_settings.image),
         Err(err) => DockerStatus {
@@ -498,6 +504,7 @@ fn prepare_plan(
     broker.ensure().map_err(fail)?;
 
     let host = credentials::read_host_config();
+
     let resolved = credentials::resolve(&project, &app_settings, &host);
 
     let mut sandbox = container_settings::build_sandbox_snapshot(
@@ -512,10 +519,7 @@ fn prepare_plan(
     // have changed since the image was built -- and an older image may predate the label
     // entirely -- so the label is authoritative and its absence is reported rather than
     // papered over with the configured list.
-    let image = with_runtime_revision(deepsand_core::tools::image_for(
-        &app_settings.image,
-        project.tools.as_deref(),
-    ));
+    let image = app_settings.image.clone();
     sandbox.image = image.clone();
     let label = state
         .app_state()
@@ -811,13 +815,10 @@ struct Launch {
 fn gather_launch(state: &impl AsAppState, project_id: &str) -> CmdResult<Launch> {
     let store = store(state);
     let project = store.project(project_id).cloned().map_err(fail)?;
-    let app_settings = store.settings().clone();
-    // Per-project image, because the tools are baked in and two projects may want
-    // different ones.
-let image = with_runtime_revision(deepsand_core::tools::image_for(
-        &app_settings.image,
-        project.tools.as_deref(),
-    ));
+    // Per-project image, because the tools are baked in and two projects may want different
+    // ones. Shared with the plan so the image this builds is the image the plan names.
+    let app_settings = container_settings::settings_for_project(store.settings(), project.tools.as_deref());
+    let image = app_settings.image.clone();
     // The launch record feeds the proxy, so its allowlist has to be the merged one.
     let project = with_effective_allowlist(&project, &app_settings);
     Ok(Launch {
@@ -2310,10 +2311,13 @@ fn tool_view(tool: &deepsand_core::tools::Tool, selected: &[String]) -> ToolView
 
 /// The catalogue as it applies to one project, with the current selection.
 pub fn list_tools_impl(state: &AppState, project_id: &str) -> CmdResult<ToolCatalogView> {
-    let (selection, base_image) = {
+    let (selection, project_image) = {
         let store = store(state);
         let project = store.project(project_id).map_err(fail)?;
-        (project.tools.clone(), store.settings().image.clone())
+        (
+            project.tools.clone(),
+            container_settings::settings_for_project(store.settings(), project.tools.as_deref()).image,
+        )
     };
 
     // The resolved set, so an entry that is selected but unavailable shows as not
@@ -2339,7 +2343,7 @@ pub fn list_tools_impl(state: &AppState, project_id: &str) -> CmdResult<ToolCata
         project_id: project_id.to_string(),
         tools,
         effective_hosts: deepsand_core::tools::hosts_for(selection.as_deref()),
-        image: with_runtime_revision(deepsand_core::tools::image_for(&base_image, selection.as_deref())),
+        image: project_image,
         running_image,
     })
 }
@@ -2800,8 +2804,7 @@ pub fn build_runtime_image_impl(
         // No project named: build the defaults, which is what a first-run build is.
         None => None,
     };
-    let base = store(&state).settings().image.clone();
-    let image = with_runtime_revision(deepsand_core::tools::image_for(&base, selection.as_deref()));
+    let image = container_settings::settings_for_project(store(&state).settings(), selection.as_deref()).image;
 
     let plan = deepsand_core::tools::install_plan(selection.as_deref());
 
@@ -2886,77 +2889,6 @@ pub fn build_runtime_image_impl(
 /// executable; a `cargo run`/`tauri dev` session finds it in the source tree. The
 /// `_up_` variants cover Tauri's escaping convention for resources sourced from
 /// outside `src-tauri/`.
-/// Append the runtime revision to an image tag.
-///
-/// Kept separate from `tools::image_for` so the pure catalogue stays pure: the revision
-/// needs the filesystem, and the tools module deliberately does not touch it.
-fn with_runtime_revision(tag: String) -> String {
-    match runtime_context_dir().map(|dir| runtime_revision(&dir)) {
-        Some(revision) if !revision.is_empty() => format!("{tag}-{revision}"),
-        _ => tag,
-    }
-}
-
-/// A short hash of the runtime scripts, which the image tag includes.
-///
-/// The tag otherwise depends only on the tool selection, so editing `netfilter.sh` or
-/// the entrypoint changed nothing from the tag's point of view: the app kept using an
-/// image built from the previous scripts. That is not cosmetic. When the app and the
-/// image disagree about how a sandbox should be started, the disagreement surfaces as a
-/// refusal to start -- which is how `none` mode broke, with a proxy the app no longer
-/// started being demanded by an image that had not been rebuilt.
-///
-/// Returns an empty string when the scripts cannot be read, so a missing runtime
-/// directory degrades to the old behaviour rather than to a tag that changes randomly.
-fn runtime_revision(runtime: &std::path::Path) -> String {
-    use std::collections::BTreeMap;
-
-    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    if let Ok(entries) = std::fs::read_dir(runtime.join("bin")) {
-        for entry in entries.flatten() {
-            if let Ok(bytes) = std::fs::read(entry.path()) {
-                files.insert(entry.file_name().to_string_lossy().to_string(), bytes);
-            }
-        }
-    }
-    // Every file the image is built from, not just the scripts. The seccomp profile was
-    // left out of this and that is exactly how it went stale: editing it produced an
-    // identical tag, so the image was never rebuilt and kept serving the old one. A
-    // revision that does not cover an input is a revision that lies.
-    for name in ["Dockerfile", "seccomp-hardened.json", "gitconfig"] {
-        match std::fs::read(runtime.join(name)) {
-            Ok(bytes) => {
-                files.insert(name.to_string(), bytes);
-            }
-            Err(_) if name == "Dockerfile" => return String::new(),
-            Err(_) => {}
-        }
-    }
-    // The skills are installed into the image too.
-    if let Ok(entries) = std::fs::read_dir(runtime.join("skills")) {
-        for entry in entries.flatten() {
-            let skill = entry.path().join("SKILL.md");
-            if let Ok(bytes) = std::fs::read(&skill) {
-                files.insert(format!("skills/{}", entry.file_name().to_string_lossy()), bytes);
-            }
-        }
-    }
-    if files.is_empty() {
-        return String::new();
-    }
-
-    // FNV-1a over the names and contents, in sorted order so the result does not depend
-    // on directory iteration.
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for (name, bytes) in files {
-        for byte in name.bytes().chain(bytes).chain(std::iter::once(0)) {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-    format!("r{hash:08x}")
-}
-
 /// Locate the `runtime/` directory (Dockerfile, entrypoint, MCP bridge, seccomp profile).
 ///
 /// Delegates to the core so this, the profile resolver and the headless CLI cannot
