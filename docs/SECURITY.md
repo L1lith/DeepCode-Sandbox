@@ -381,11 +381,23 @@ The most load-bearing ones:
 | `a_state_file_from_a_newer_build_is_reported_and_left_alone` | a version skew is not corruption, and is not filed as it |
 | `salvage_prefers_the_copy_with_the_most_projects` | among set-aside copies, the richest one wins |
 
-To read the exact command for any project:
+To read the exact command a project would run:
 
 ```bash
 deepsandctl plan <project>          # or the Activity tab's "Show the exact command"
 ```
+
+One caveat, and it is the same in both places. A project in `allowlisted` or `none` mode
+reaches the network only through the egress proxy, and the port that proxy listens on is
+assigned when it starts, so the command genuinely does not exist until a proxy is up. Both
+paths say so rather than showing a port that would not be the real one. In the app, start
+the project once and ask again: the preview then names the proxy that is already running,
+which is the one a further start reuses. `deepsandctl` cannot do that, because the proxy
+belongs to the running app's process rather than to the CLI's.
+
+A plan preview also describes one of two possible starts. Resuming an existing session adds
+`--last` to the command inside the container, and the preview says so when a resumable
+session exists; otherwise the command shown is the fresh-start one.
 
 ## Updates
 

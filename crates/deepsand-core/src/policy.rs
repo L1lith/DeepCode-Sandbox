@@ -414,8 +414,10 @@ pub fn plan_run(input: &PlanInput<'_>) -> Result<RunPlan> {
             }
             _ => {
                 return Err(SandboxError::policy(
-                    "restricted network mode needs the Deepsand egress proxy, but none is running. Start the project \
-                     again, or switch the project to 'internet' or 'none' in Settings.",
+                    "this project's network mode needs the Deepsand egress proxy, and none is \
+                     running. The proxy's port is assigned when it starts, so the exact command \
+                     does not exist until then. Start the project, or switch the mode to \
+                     'internet' or 'none' in the Permissions tab.",
                 ));
             }
         }
@@ -1254,7 +1256,7 @@ mod tests {
     }
 
     #[test]
-    fn restricted_mode_requires_the_proxy_and_wires_up_the_environment() {
+    fn allowlisted_mode_requires_the_proxy_and_wires_up_the_environment() {
         let fixture = Fixture::new("allowlisted");
         let mut app = fixture.app();
         app.egress_allowlist = vec!["api.deepseek.com".into()];

@@ -694,20 +694,69 @@ pub fn preview_plan_impl(state: &AppState, project_id: String) -> CmdResult<Plan
         let app = store.settings().clone();
         model_hosts(&project, &app)
     };
-    let (plan, resolved, warnings) =
-        prepare_plan(&state, &project_id, false, true, None, None, &required_hosts).map_err(|err| {
-            // The generic message names an internal component. A preview is built
-            // without a proxy, so say what the operator can act on.
-            if err.contains("egress proxy") {
-                "This project uses the allowlisted network mode, so its plan cannot be previewed                  without running it. Start the project to bring up the egress proxy."
-                    .to_string()
-            } else {
-                err
-            }
-        })?;
+
+    // A running project already has its proxy, and the run path *reuses* that instance
+    // rather than starting another, so a preview built with it is the command that will
+    // actually run -- same address, same port.
+    //
+    // Before it is running the address does not exist yet: the port is whatever the kernel
+    // hands back when the proxy binds, which is why a plan for a proxied mode is refused
+    // rather than shown with an invented port. The refusal used to be a dead end, because
+    // this lookup did not happen even after the project was started.
+    let live_endpoint = state
+        .proxies
+        .lock()
+        .unwrap()
+        .get(&project_id)
+        .map(|proxy| proxy.endpoint(PROXY_HOSTNAME));
+    let live_gateway = live_endpoint.as_ref().map(|_| PROXY_HOSTNAME.to_string());
+
+    let (plan, resolved, warnings) = prepare_plan(
+        &state,
+        &project_id,
+        false,
+        true,
+        live_endpoint.as_ref(),
+        live_gateway,
+        &required_hosts,
+    )
+    .map_err(|err| {
+        // The generic message names an internal component and tells the operator to
+        // start the project, which is only useful once they can. Say what is true and
+        // what to do about it.
+        if err.contains("egress proxy") {
+            "This project is in allowlisted network mode and its egress proxy is not running, \
+             so the command does not exist yet: the proxy's port is assigned when it starts, \
+             and the command has to name it. Start the project once, then ask again -- the \
+             proxy it is using will be the one the plan names."
+                .to_string()
+        } else {
+            err
+        }
+    })?;
+    // The command carries `--last` only when the operator starts a *resumable* session, and
+    // that is their choice at the button rather than a property of the project, so a preview
+    // can only be exact for one of the two. Say which one this is when the other is
+    // possible, rather than letting a warning-free preview imply there is only one command.
+    let can_resume = state
+        .docker()
+        .ok()
+        .and_then(|docker| gather_launch(&state, &project_id).ok().map(|launch| (docker, launch)))
+        .is_some_and(|(docker, launch)| docker.volume_has_session_index(&launch.volume, &launch.image));
+
+    let mut warnings: Vec<String> = warnings.into_iter().chain(plan.warnings.clone()).collect();
+    if can_resume {
+        warnings.insert(
+            0,
+            "This project has a session that can be resumed, and Resuming adds `--last` to the \
+             command below. This is the command for a fresh start."
+                .to_string(),
+        );
+    }
+
     Ok(PlanPreview {
         text: plan.describe(),
-        warnings: warnings.into_iter().chain(plan.warnings.clone()).collect(),
+        warnings,
         mount_count: plan.mounts.len(),
         network_mode: plan.network_mode.clone(),
         image: plan.image.clone(),
