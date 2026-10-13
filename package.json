@@ -15,14 +15,15 @@
     "core:test": "cargo test -p deepsand-core",
     "core:check": "cargo check --workspace",
     "test:bridge": "node runtime/scripts/test-mcp-bridge.mjs",
-    "test": "npm run core:test && npm run test:bridge",
+    "test": "npm run core:test && npm run app:test && npm run test:bridge",
     "runtime:build": "node runtime/scripts/build-image.mjs",
     "runtime:icons": "tauri icon assets/icon.png",
     "icon:generate-from-code": "node runtime/scripts/make-icon.mjs && tauri icon assets/icon.png",
     "signer:generate": "tauri signer generate -w ~/.tauri/deepsand.key",
     "app:build:fast": "node scripts/build-app.mjs",
     "app:build:debug": "node scripts/build-app.mjs --debug",
-    "app:build:binary": "tauri build --no-bundle"
+    "app:build:binary": "tauri build --no-bundle",
+    "app:test": "cargo test -p deepsand-app"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.3",

@@ -20,43 +20,145 @@
 //! neither of them contains any policy of its own.
 
 pub mod commands;
+mod instance;
 pub mod remote_server;
 mod state;
 mod update;
 
 use state::AppState;
-use tauri::Manager;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    tracing_subscriber::fmt()
+/// Send log output to `deepsand.log` as well as stdout, and log panics.
+///
+/// A Windows release build has no console, so `tracing` output -- the only account this app
+/// gives of itself -- went nowhere. A launch that failed silently therefore stayed silent:
+/// there was nothing to read, on the machine where it happened. The file is truncated when it
+/// grows past 2 MB, keeping one previous copy, so it cannot fill a disk.
+fn init_logging(data_dir: &std::path::Path) {
+    use std::io::Write as _;
+
+    let path = data_dir.join("deepsand.log");
+    let previous = data_dir.join("deepsand.log.1");
+    if std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0) > 2 * 1024 * 1024 {
+        let _ = std::fs::rename(&path, &previous);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok();
+
+    let writer = file.map(|file| TeeWriter(std::sync::Arc::new(std::sync::Mutex::new(file))));
+    let subscriber = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("deepsand=info,warn")),
         )
-        .with_target(false)
-        .init();
+        .with_target(false);
+    if let Some(writer) = writer {
+        subscriber.with_writer(writer).init();
+    } else {
+        subscriber.init();
+    }
 
+    // A panic in a command or a worker thread used to leave no trace anywhere.
+    let fallback = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!("panic: {info}");
+        fallback(info);
+    }));
+
+    let _ = writeln!(std::io::stdout(), "deepsand logging to {}", path.display());
+}
+
+/// Writes to stdout and to the log file, so the terminal and the file agree.
+#[derive(Clone)]
+struct TeeWriter(std::sync::Arc<std::sync::Mutex<std::fs::File>>);
+
+impl std::io::Write for TeeWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let _ = std::io::stdout().write_all(buf);
+        if let Ok(mut file) = self.0.lock() {
+            let _ = file.write_all(buf);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = std::io::stdout().flush();
+        if let Ok(mut file) = self.0.lock() {
+            let _ = file.flush();
+        }
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TeeWriter {
+    type Writer = TeeWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
     let (store, startup_error) = commands::load_store();
-    let data_dir = store.data_dir().display().to_string();
+    let data_dir_path = store.data_dir().to_path_buf();
+    let data_dir = data_dir_path.display().to_string();
+
+    // Logging goes to a file as well as to stdout, because on Windows a release build has no
+    // stdout: everything this app said about itself went nowhere, which is why a launch that
+    // died silently could not be diagnosed from the machine it died on.
+    init_logging(&data_dir_path);
+    tracing::info!(version = version(), data_dir = %data_dir, pid = std::process::id(), "deepsand starting");
+
+    // Before the builder, because `tauri_plugin_single_instance` hands a launch to whatever
+    // process already exists and exits. Handed to a process with no window and a stuck UI
+    // thread, the launch disappears entirely -- no window, no error. Clearing such a process
+    // here means the plugin finds nothing to hand off to.
+    let claim = instance::claim(&data_dir_path);
+    let single_instance = match &claim {
+        instance::Claim::TakeOverUncleared(pid) => {
+            tracing::error!(pid, "starting without the single-instance guard");
+            false
+        }
+        instance::Claim::Primary(_) | instance::Claim::Cleared(_, _) | instance::Claim::Secondary => true,
+    };
+    // The lock lives as long as this binding: dropping it is how the next launch knows this
+    // one is gone.
+    let _instance_lock = match claim {
+        instance::Claim::Primary(lock) => Some(lock),
+        instance::Claim::Cleared(lock, pid) => {
+            tracing::warn!(pid, "started by clearing an earlier Deepsand that had stopped responding");
+            Some(lock)
+        }
+        _ => None,
+    };
+
     let state = AppState::new(store, startup_error);
 
-    tauri::Builder::default()
-        // Must be registered before anything else: it decides whether this process
-        // becomes the instance at all. Two windows would fight over the same container
-        // names, and each one's startup sweep would kill the other's sandboxes.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+    let mut builder = tauri::Builder::default();
+    if single_instance {
+        // Registered first among the plugins that do anything: it decides whether this process
+        // becomes the instance at all. Two windows would fight over the same container names,
+        // and each one's startup sweep would kill the other's sandboxes. Skipped only when an
+        // earlier instance is stuck and could not be cleared, because an app that refuses to
+        // open at all is worse than two that have to be sorted out by hand.
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             use tauri::Manager as _;
+            tracing::info!("another launch was handed to this instance; showing the window");
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
             }
-        }))
+        }));
+    }
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         // Initialised so our own two commands can reach it. The webview never calls the
@@ -66,6 +168,10 @@ pub fn run() {
         .manage(update::PendingUpdate::default())
         .manage(state)
         .setup(move |app| {
+            // Proves from the UI thread that this instance is running, so a later launch can
+            // tell "already running" from "stuck with nothing on screen".
+            instance::start_heartbeat(app.handle(), data_dir_path.clone());
+
             tracing::info!(version = version(), data_dir = %data_dir, "deepsand starting");
 
             // Bring up any remote server that is configured to survive a restart.
@@ -170,11 +276,35 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Closing the window must not leave a container running with the
-            // operator's project mounted: stop every session first.
+            // Closing the window must not leave a container running with the operator's
+            // project mounted: stop every session first.
             if let tauri::WindowEvent::Destroyed = event {
-                let state = window.state::<AppState>();
-                commands::shutdown_cleanup(&state);
+                // Bounded, and then the process ends either way.
+                //
+                // This runs on the UI thread and `shutdown_cleanup` shells out to Docker. With
+                // Docker Desktop restarting underneath it, that call never returned: the
+                // process sat there with no window and a blocked event loop, and because the
+                // single-instance plugin hands every later launch to whatever process already
+                // exists, the app then looked like it would not start at all. Ten seconds is
+                // enough for a list of containers to be stopped; past it, exiting is the safer
+                // failure -- the containers left behind are removed by the next start's sweep.
+                let app = tauri::Manager::app_handle(window).clone();
+                let (done_tx, done_rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let state = tauri::Manager::state::<AppState>(&app);
+                    commands::shutdown_cleanup(&state);
+                    let _ = done_tx.send(());
+                });
+                if done_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .is_err()
+                {
+                    tracing::warn!(
+                        "shutdown cleanup did not finish within ten seconds; exiting anyway"
+                    );
+                }
+                tracing::info!("deepsand exiting");
+                std::process::exit(0);
             }
         })
         .invoke_handler(tauri::generate_handler![

@@ -25,6 +25,7 @@ npm run app:dev         # app with hot reload
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
 | `npm run core:test` | `cargo test -p deepsand-core` — 326 tests |
+| `npm run app:test` | `cargo test -p deepsand-app` — the app crate's own tests, including the zombie guard. Part of `npm test`: it was not, and tests that never run are decoration |
 | `npm run core:check` | `cargo check --workspace` |
 | `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |
 | `npm test` | the two suites above, in order |
@@ -205,6 +206,26 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   opposite: the first is waited for and retried once (the layer cache survives it), the
   second is read. Reporting the first as the second is how an operator ends up checking
   their Dockerfile for a fault that is Docker Desktop restarting.
+* **The window is the app's lifetime, and the shutdown is bounded.** `shutdown_cleanup`
+  runs when the window is destroyed, on the UI thread, and it shells out to Docker. Nothing
+  on that path may be unbounded: with Docker Desktop restarting under it the call never
+  returned, the process sat there with no window and a blocked event loop, and -- because the
+  single-instance plugin hands every later launch to whatever process already exists -- the
+  app then looked like it would not start at all. It is given ten seconds and the process
+  exits either way.
+* **One instance, and a stuck one must not swallow a launch.** `instance.rs` holds a lock
+  file for the life of the process, writes a record of itself, and proves it is alive with a
+  heartbeat scheduled through `run_on_main_thread` -- so the proof comes from the *UI thread*
+  and a stuck event loop stops beating. `instance::decide` is the whole rule, and it is
+  tested: beating -> hand the launch over; stopped beating with a window -> leave it alone
+  (the operator can see it); stopped beating with no window -> clear it and start. A launch
+  must never be silently swallowed by a process that cannot show anything.
+* **Anything the app says about itself goes in a file.** A Windows release build has no
+  stdout, so `tracing` output went nowhere: a launch that died silently stayed silent, with
+  nothing to read on the machine where it happened. `init_logging` tees to
+  `data_dir/deepsand.log` (rotated at 2 MB, one previous kept) and installs a panic hook. The
+  log carries ids, addresses and errors, never credentials. Anything that can fail early --
+  before there is a window to report in -- has to say so there.
 * **Nothing on the first-paint path may call Docker.** Every `docker` invocation spawns
   the CLI, which costs 180-600 ms on this machine, so a probe is user-visible time. A probe
   was 1549 ms: five sequential calls for two versions, two `info` fields and an image

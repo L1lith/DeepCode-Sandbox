@@ -342,12 +342,21 @@ where Docker's built-in profile would refuse it. That is a real difference in
 strength rather than a detail, and `crates/deepsand-core/tests/seccomp_profile.rs`
 enumerates families and flags so that dropping one fails a test rather than a review.
 
+## The log file
+
+`data_dir/deepsand.log` is written by the app itself (rotated at 2 MB, one previous copy
+kept), because a Windows release build has no stdout and an app that fails before it has a
+window otherwise has nothing to say about why. What it contains is what the app logs: project
+and container names, paths, Docker availability, errors, and the panic that ended it. It
+contains no API keys, tokens or secret values -- the traced messages carry identifiers and
+error text, not credentials -- and it is the file to send when something fails silently.
+
 ## Verifying the claims
 
 Everything above is asserted by tests you can run:
 
 ```bash
-cargo test -p deepsand-core                   # 326 tests, including the seccomp, allowlist and durability claims
+cargo test -p deepsand-core                   # 326 core tests, including the seccomp, allowlist and durability claims
 node runtime/scripts/test-mcp-bridge.mjs      # 55 checks: the permission protocol end to end
 cargo test -p deepsand-core --test runtime_dockerfile   # claims about the image build, no Docker needed
 ```
