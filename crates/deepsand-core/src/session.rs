@@ -75,18 +75,36 @@ impl Session {
             command.env(key, value);
         }
 
-        let mut child = pair
-            .slave
-            .spawn_command(command)
-            .map_err(|err| {
-                SandboxError::DockerUnavailable(format!(
+        // Creating the pseudo-terminal is the last step before a container can exist, and on
+        // Windows the console subsystem can block inside it: no log line, no container, and a
+        // launch button that says "Starting..." until the window's own fifteen-minute watchdog
+        // gives up. That is what a start hung here looks like from the outside, so the spawn runs
+        // on a thread -- it is a blocking call that cannot be interrupted -- and waiting for it is
+        // bounded. A wedged terminal is the operating system's doing, not Docker's, and the
+        // message says so rather than blaming the daemon.
+        let slave = pair.slave;
+        let (spawned_tx, spawned_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = slave.spawn_command(command);
+            // Dropped on this thread: the slave handle has to go or the master never sees EOF.
+            drop(slave);
+            let _ = spawned_tx.send(outcome);
+        });
+        let mut child = match spawned_rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(Ok(child)) => child,
+            Ok(Err(err)) => {
+                return Err(SandboxError::DockerUnavailable(format!(
                     "could not start {}: {err}",
                     options.program.display()
-                ))
-            })?;
-
-        // The slave handle must be dropped or the master never sees EOF.
-        drop(pair.slave);
+                )))
+            }
+            Err(_) => {
+                return Err(SandboxError::DockerUnavailable(format!(
+                    "the terminal for {} was not created within 20 seconds, so the container was                      never started. This is the operating system's terminal machinery rather than                      Docker: starting the project again is the first thing to try, and closing                      programs that hold the console is the second.",
+                    options.program.display()
+                )))
+            }
+        };
 
         let mut reader = pair
             .master
