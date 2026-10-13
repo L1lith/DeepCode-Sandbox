@@ -3570,7 +3570,11 @@ pub fn build_runtime_image_impl(
                 }
             });
             match outcome {
-                Err(err) if attempt == 1 && deepsand_core::docker::is_daemon_interruption(&err.to_string()) => {
+                Err(err)
+                    if attempt == 1
+                        && !deepsand_core::docker::is_our_own_stop(&err.to_string())
+                        && deepsand_core::docker::is_daemon_interruption(&err.to_string()) =>
+                {
                     let line = "the Docker daemon stopped answering during the build. That is not \
                                 the Dockerfile's doing and the layer cache survives it, so this is \
                                 being retried once after the daemon comes back.";
@@ -3613,7 +3617,10 @@ pub fn build_runtime_image_impl(
                 let used = tool_cache
                     .join(deepsand_core::toolcache::FILLED_MARKER)
                     .exists();
-                if used && !deepsand_core::docker::is_daemon_interruption(err) {
+                if used
+                    && !deepsand_core::docker::is_daemon_interruption(err)
+                    && !deepsand_core::docker::is_our_own_stop(err)
+                {
                     empty_tool_cache(&tool_cache);
                     let line = "deepsand: the build failed while using cached tools, so the cache \
                                 was emptied and the next build installs them again";

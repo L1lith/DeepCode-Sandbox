@@ -1026,6 +1026,25 @@ pub fn builds_in_flight() -> Vec<String> {
 ///
 /// Split out from the watchdog that applies it so the rule can be read, and tested, without
 /// running a build at all.
+/// The first words of the message a build returns when it was stopped on purpose: by the
+/// operator's Stop button, or by the silence watchdog.
+///
+/// Both are recognised so that neither is mistaken for a daemon that went away. A cancelled
+/// build's output usually ends with BuildKit's `failed to receive status`, which is one of the
+/// signs `is_daemon_interruption` looks for -- so cancelling a build used to be read as the
+/// daemon going away, and the build was *retried* after a wait of up to three minutes. That is
+/// what an operator saw as the Run button stuck on "Starting…" after asking for it to stop.
+pub const STOPPED_BY_OPERATOR: &str = "the build was stopped.";
+pub const STOPPED_FOR_SILENCE: &str = "the build produced no output for";
+
+/// Whether this failure was a stop somebody asked for, rather than something going wrong.
+///
+/// Deliberately separate from `is_daemon_interruption`: the two look alike in the output and
+/// mean opposite things about what to do next.
+pub fn is_our_own_stop(message: &str) -> bool {
+    message.contains(STOPPED_BY_OPERATOR) || message.contains(STOPPED_FOR_SILENCE)
+}
+
 pub fn build_has_gone_quiet(quiet_for: std::time::Duration) -> bool {
     quiet_for >= BUILD_SILENCE_LIMIT
 }
@@ -1408,6 +1427,27 @@ mod probe_parsing_tests {
 mod build_watchdog_tests {
     use super::*;
     use std::time::Duration;
+
+    /// A stop we asked for is not a daemon that went away, and the difference decides whether a
+    /// build is retried behind the operator's back. The messages are the real ones, and the
+    /// daemon one is from a real failure on this machine.
+    #[test]
+    fn a_build_we_stopped_is_never_mistaken_for_a_daemon_that_went_away() {
+        assert!(is_our_own_stop(
+            "the build was stopped. Nothing is wrong with the image files"
+        ));
+        assert!(is_our_own_stop(
+            "the build produced no output for 10 minutes, so it was stopped"
+        ));
+        assert!(
+            !is_our_own_stop("failed to receive status: rpc error: code = Unavailable"),
+            "a daemon that went away is not a stop we asked for"
+        );
+        assert!(
+            !is_our_own_stop("E: Unable to locate package curl,git,jq"),
+            "and neither is a build that failed on its own"
+        );
+    }
 
     #[test]
     fn a_build_is_only_stopped_after_it_has_been_quiet_for_the_limit() {
