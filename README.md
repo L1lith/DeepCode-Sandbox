@@ -55,9 +55,10 @@ codebase do not have to share one.
 
 | Setting | Where | Notes |
 | --- | --- | --- |
-| Network mode | `deepsandctl network <project> <mode>`, with the app-wide default in **Settings** | `internet` (default), `restricted` with a hostname allowlist, `none`, or `full`. |
+| Network mode | `deepsandctl network <project> <mode>`, with the app-wide default in **Settings** | `allowlisted` (default), with a list of hostnames, addresses and ports; `internet` for anything; `none` for nothing; or `full`. |
 | DeepCode mode | Project settings | `strict` additionally makes DeepCode prompt for network, MCP and out-of-workspace access in the terminal, on top of the container boundary. |
 | Tools | Tools tab | Per-tool switches, plus **Enable all** / **Disable all** for each section and globally. The selection decides how the image is built, so the next Run rebuilds it — with its progress shown. |
+| Model | Header dropdown | **Defer to Config** by default, which runs whatever your configuration resolves to. Otherwise one of the models the configured API reports, or a name you type in yourself. Saved and pushed into a running sandbox, like the thinking intensity. |
 | Thinking intensity | Tools tab | `none` / `low` / `high` / `max`, or deferring to your host `settings.json`. Pushed into a running sandbox as well as saved for the next start. |
 | Secrets | Secrets tab | Per project. Encrypted at rest with the operating system's keystore, injected as environment variables at start. Values travel one way only: the interface shows names and lengths, never the value. |
 | Limits | Project settings | Memory, CPUs, pids. |
@@ -213,7 +214,7 @@ desktop app and the headless CLI cannot behave differently.
 
 ```bash
 npm run app:dev              # app with hot reload
-npm run core:test            # 340 core tests: paths, policy, broker, proxy, credentials, seccomp, durability
+npm run core:test            # 347 core tests: paths, policy, broker, proxy, credentials, seccomp, durability
 npm run app:test             # 9 tests in the app crate: the zombie guard, and the log file
 npm run test:bridge          # 55 checks: the permission protocol end to end
 npm test                     # both suites

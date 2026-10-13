@@ -43,7 +43,7 @@ import {
 /* Shared chrome                                                              */
 /* ------------------------------------------------------------------------- */
 
-function Modal(props: {
+export function Modal(props: {
   title: string;
   subtitle?: string;
   wide?: boolean;

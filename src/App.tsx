@@ -23,7 +23,7 @@ import {
   wireEvents,
 } from "./store";
 import { ActivityPanel } from "./components/ActivityPanel";
-import { EffortSwitch, ToolsPanel } from "./components/ToolsPanel";
+import { EffortSwitch, ModelSelect, ToolsPanel } from "./components/ToolsPanel";
 import { SecretsPanel } from "./components/SecretsPanel";
 import { BuildProgress } from "./components/BuildProgress";
 import { PermissionsPanel } from "./components/PermissionsPanel";
@@ -243,6 +243,9 @@ export default function App() {
                       </span>
                     </Show>
                     <div class="header-actions">
+                      {/* The model comes before the thinking intensity: it decides what is
+                          doing the thinking. */}
+                      <ModelSelect />
                       <EffortSwitch />
                       <Show
                         when={current().running}

@@ -22,6 +22,7 @@ pub mod credentials;
 pub mod docker;
 pub mod error;
 pub mod model;
+pub mod models;
 pub mod paths;
 pub mod remote;
 pub mod policy;

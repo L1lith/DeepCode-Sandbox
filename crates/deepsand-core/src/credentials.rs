@@ -366,6 +366,29 @@ mod tests {
         }
     }
 
+    /// The two promises the model dropdown makes. "Defer to Config" is the default every
+    /// project starts with, and it has to mean the configured model runs -- including after a
+    /// project's own choice is cleared, which must not leave the last choice behind.
+    #[test]
+    fn a_projects_own_model_wins_and_having_none_defers_to_configuration() {
+        let app = AppSettings {
+            default_model: "configured-model".into(),
+            ..AppSettings::default()
+        };
+        let host = HostConfig::default();
+
+        let deferring = project();
+        assert_eq!(resolve(&deferring, &app, &host).model, "configured-model");
+
+        let mut chosen = project();
+        chosen.credentials.model = Some("chosen-model".into());
+        assert_eq!(resolve(&chosen, &app, &host).model, "chosen-model");
+
+        let mut cleared = project();
+        cleared.credentials.model = None;
+        assert_eq!(resolve(&cleared, &app, &host).model, "configured-model");
+    }
+
     #[test]
     fn credential_shaped_names_are_recognised_whatever_their_case() {
         for name in [

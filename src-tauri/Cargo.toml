@@ -24,6 +24,11 @@ auto-launch = "0.5"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rcgen = "0.13"
 deepsand-core = { workspace = true }
+# The model list is fetched with the project's own credentials, and a key that must not reach
+# the window, so the request is made here rather than in the frontend. rustls rather than
+# native-tls: the Linux release builds would otherwise need openssl to compile, and this tree
+# already has rustls for the remote server's TLS.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"

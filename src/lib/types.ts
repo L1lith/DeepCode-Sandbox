@@ -158,6 +158,30 @@ export interface EffortOption {
   description: string;
 }
 
+/** One model the configured API offers. */
+export interface ModelChoice {
+  /** What goes into `MODEL`, and therefore what the sandbox runs. */
+  id: string;
+  /** What to show in the dropdown. Falls back to the id when the API has no name. */
+  name: string;
+}
+
+/** A project's model setting, as the header's dropdown needs it. */
+export interface ModelView {
+  projectId: string;
+  /** The project's own model, or null when it defers to configuration. */
+  value: string | null;
+  deferring: boolean;
+  /** What configuration resolves to right now, shown beside "Defer to Config". */
+  configured: string;
+  /** What the API offers; empty until asked, or when it cannot be reached. */
+  options: ModelChoice[];
+  /** Why the list could not be read, when it could not be. */
+  problem: string | null;
+  appliedLive: boolean;
+  restartNeeded: boolean;
+}
+
 export interface EffortView {
   projectId: string;
   /** "none" | "low" | "high" | "max" | "default" */

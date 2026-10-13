@@ -844,6 +844,34 @@ pre.output {
 /* A real range input, so it drags and takes arrow keys. Only the visuals are
    overridden: the filled part of the track is a gradient whose stop is `--fill`,
    which is the one thing a native range cannot be told to do. */
+/* The model dropdown. Sized like the controls it sits beside, and narrow enough that a long
+   model name cannot push the header's buttons off the edge. */
+.model-select {
+  max-width: 15rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.model-select:disabled {
+  opacity: 0.6;
+}
+
+/* Only shows when the API's list could not be read; the reason is in its title. */
+.model-warning {
+  margin-left: -0.35rem;
+  padding: 0 0.25rem;
+  border-radius: 4px;
+  background: var(--warn-bg, #4a3a12);
+  color: var(--warn, #e8c46a);
+  font-size: 0.75rem;
+  cursor: help;
+}
+
 .effort {
   display: flex;
   align-items: center;

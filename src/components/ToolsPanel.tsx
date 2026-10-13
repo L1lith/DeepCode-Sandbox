@@ -8,8 +8,232 @@
 
 import { createMemo, createSignal, For, onMount, Show } from "solid-js";
 import * as api from "../lib/api";
-import type { EffortView, ToolCatalogView, ToolView } from "../lib/types";
+import type { EffortView, ModelChoice, ModelView, ToolCatalogView, ToolView } from "../lib/types";
 import { describeError, selectedProject, toast } from "../store";
+import { Modal } from "./Dialogs";
+
+/* ------------------------------------------------------------------------- */
+/* Model                                                                     */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * The model the sandbox runs, chosen from the ones the configured API offers.
+ *
+ * It sits beside Run because it decides what the agent *is*, not what it can reach: the list
+ * comes from the project's own API, and the request for it is made by the app rather than from
+ * here, because it is signed with a key that must not reach the window.
+ *
+ * "Defer to Config" is the default and means exactly that -- the project keeps no model of its
+ * own, and whatever configuration resolves to is what runs, which is what the label names so it
+ * can be read without opening anything. "Custom" is there because an API's list is never the
+ * whole story: a private build, a proxy alias, or a name that has not been published yet can
+ * still be typed in, and is used as it is.
+ */
+export function ModelSelect() {
+  const [view, setView] = createSignal<ModelView | null>(null);
+  const [busy, setBusy] = createSignal(false);
+  /** The name being typed into the Custom dialog, or null when it is closed. */
+  const [custom, setCustom] = createSignal<string | null>(null);
+
+  const project = () => selectedProject();
+  const CUSTOM = "__custom__";
+
+  onMount(() => {
+    const current = project();
+    if (current) void load(current.id);
+  });
+
+  // Reload when the project changes, so one project's model is never shown under another
+  // project's name.
+  createMemo(() => {
+    const current = project();
+    if (current) void load(current.id);
+  });
+
+  async function load(projectId: string) {
+    try {
+      // What the project is set to first: that answer is local, so the control works at once.
+      setView(await api.getModel(projectId));
+    } catch {
+      // A project whose setting cannot be read shows no dropdown rather than a wrong one.
+      setView(null);
+      return;
+    }
+    try {
+      // Then the list, which is a request to the project's API and may be slow or refused.
+      const listed = await api.listModels(projectId);
+      if (project()?.id === projectId) setView(listed);
+    } catch {
+      /* The saved value is already on screen; the list is a convenience, not the setting. */
+    }
+  }
+
+  /** The listed models, plus whatever this project runs if the list does not mention it. */
+  function options(): ModelChoice[] {
+    const current = view();
+    if (!current) return [];
+    const chosen = current.value;
+    if (chosen && !current.options.some((model) => model.id === chosen)) {
+      return [{ id: chosen, name: chosen }, ...current.options];
+    }
+    return current.options;
+  }
+
+  function labelFor(id: string): string {
+    return options().find((model) => model.id === id)?.name ?? id;
+  }
+
+  function sayWhatHappened(saved: ModelView, what: string) {
+    toast(
+      "ok",
+      saved.deferring ? "Model: following configuration" : `Model: ${what}`,
+      saved.deferring
+        ? `Using ${saved.configured} from your configuration.`
+        : saved.appliedLive
+          ? "Written into the running sandbox's settings."
+          : "Saved. It applies when this project next runs.",
+    );
+  }
+
+  async function choose(value: string) {
+    const current = project();
+    if (!current || busy()) return;
+
+    if (value === CUSTOM) {
+      setCustom(view()?.value ?? view()?.configured ?? "");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const saved = await api.setModel(current.id, value === "" ? null : value);
+      setView(saved);
+      // The name if the list has one, so the toast reads like the dropdown.
+      sayWhatHappened(saved, labelFor(value));
+    } catch (error) {
+      toast("error", "Could not change the model", describeError(error));
+      // Put the control back to what is saved, rather than leaving it showing a choice that
+      // was refused.
+      setView(await api.getModel(current.id).catch(() => view()));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveCustom(name: string) {
+    const current = project();
+    if (!current || busy()) return;
+    setBusy(true);
+    try {
+      const saved = await api.setModel(current.id, name);
+      setView(saved);
+      setCustom(null);
+      sayWhatHappened(saved, name);
+    } catch (error) {
+      toast("error", "Could not set that model", describeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Show when={view()}>
+      {(current) => (
+        <>
+          <select
+            class="model-select"
+            disabled={busy()}
+            title={
+              current().problem ??
+              `The model this project runs. Defer to Config follows the configured model${
+                current().configured ? ` (${current().configured})` : ""
+              }.`
+            }
+            value={current().value ?? ""}
+            onChange={(event) => void choose(event.currentTarget.value)}
+          >
+            <option value="">
+              Defer to Config{current().configured ? ` (${current().configured})` : ""}
+            </option>
+            <For each={options()}>
+              {(model) => (
+                <option value={model.id} title={model.id}>
+                  {model.name}
+                </option>
+              )}
+            </For>
+            <option value={CUSTOM}>Custom…</option>
+          </select>
+          {/* The list is a network call; when it fails the dropdown is still usable, and this
+              is what says why it is short. */}
+          <Show when={current().problem}>
+            <span class="model-warning" title={current().problem ?? ""}>
+              !
+            </span>
+          </Show>
+          <Show when={custom() !== null}>
+            <CustomModelDialog
+              initial={custom() ?? ""}
+              busy={busy()}
+              onClose={() => setCustom(null)}
+              onSave={(name) => void saveCustom(name)}
+            />
+          </Show>
+        </>
+      )}
+    </Show>
+  );
+}
+
+/** Type a model name that the API's list does not have. */
+function CustomModelDialog(props: {
+  initial: string;
+  busy: boolean;
+  onClose: () => void;
+  onSave: (name: string) => void;
+}) {
+  const [name, setName] = createSignal(props.initial);
+  const ready = () => name().trim().length > 0 && !props.busy;
+
+  function save() {
+    if (ready()) props.onSave(name().trim());
+  }
+
+  return (
+    <Modal
+      title="Custom model"
+      subtitle="Used exactly as written: nothing checks it against the API's list."
+      onClose={props.onClose}
+      footer={
+        <>
+          <button class="btn btn-danger left" disabled={props.busy} onClick={props.onClose}>
+            Cancel
+          </button>
+          <button class="btn btn-primary" disabled={!ready()} onClick={save}>
+            Use this model
+          </button>
+        </>
+      }
+    >
+      <label class="field">
+        <span>Model name</span>
+        <input
+          autofocus
+          value={name()}
+          placeholder="e.g. deepseek-v4-pro"
+          onInput={(event) => setName(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") save();
+          }}
+        />
+      </label>
+      <p class="small">
+        Goes into the sandbox's <span class="mono">MODEL</span> setting as typed. Leave the
+        dropdown on Defer to Config to go back to the configured model.
+      </p>
+    </Modal>
+  );
+}
 
 /* ------------------------------------------------------------------------- */
 /* Thinking intensity                                                        */

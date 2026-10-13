@@ -8,6 +8,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  AllowlistView,
   AppInfo,
   AppSettings,
   BlockedEgressView,
@@ -15,21 +16,21 @@ import type {
   DecisionPayload,
   DeepCodeMode,
   DockerStatus,
+  EffortView,
   GrantView,
+  ModelView,
   NetworkPolicy,
   PathCheck,
   PermissionRequestView,
   PlanPreview,
   ProjectView,
   RejectedRequestView,
-  ResourceLimits,
-  SessionStatus,
-  AllowlistView,
-  RemoteAccessView,
   RemoteAccessSettings,
-  ToolCatalogView,
-  EffortView,
+  RemoteAccessView,
+  ResourceLimits,
   SecretListView,
+  SessionStatus,
+  ToolCatalogView,
   UpdateCheck,
   UpdateProgress,
 } from "./types";
@@ -210,6 +211,14 @@ export function onUpdateProgress(handler: (payload: UpdateProgress) => void): Pr
 export const previewPlan = (projectId: string) => call<PlanPreview>("preview_plan", { projectId });
 export const sessionStatus = (projectId: string) =>
   call<SessionStatus>("session_status", { projectId });
+/* --- the model ------------------------------------------------------------ */
+
+export const getModel = (projectId: string) => call<ModelView>("get_model", { projectId });
+export const setModel = (projectId: string, model: string | null) =>
+  call<ModelView>("set_model", { projectId, model });
+/** Asks the project's API, which is why it can be slow and can fail. */
+export const listModels = (projectId: string) => call<ModelView>("list_models", { projectId });
+
 export const startSession = (projectId: string, resume = true) =>
   call<SessionStatus>("start_session", { projectId, resume });
 export const stopSession = (projectId: string) => call<void>("stop_session", { projectId });

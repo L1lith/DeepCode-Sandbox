@@ -351,6 +351,11 @@ and container names, paths, Docker availability, errors, and the panic that ende
 contains no API keys, tokens or secret values -- the traced messages carry identifiers and
 error text, not credentials -- and it is the file to send when something fails silently.
 
+Listings the app makes on your behalf -- asking the configured API which models it offers, and
+the update check -- are made by the app process with your credentials, never by the window,
+which receives ids and names and no key at all. The model list is cached in memory keyed by a
+digest of the key, so the cache is not a second copy of a secret.
+
 The state file is not the only thing that survives a crash. A dated copy of it is kept once a
 day (the newest five, and only once there is a project worth keeping), so that losing both the
 live file and its rolling backup -- one crash can catch a file and its rotation together -- is
@@ -367,7 +372,7 @@ survives being clicked, closed, or the window going away.
 Everything above is asserted by tests you can run:
 
 ```bash
-cargo test -p deepsand-core                   # 340 core tests, including the seccomp, allowlist and durability claims
+cargo test -p deepsand-core                   # 347 core tests, including the seccomp, allowlist and durability claims
 node runtime/scripts/test-mcp-bridge.mjs      # 55 checks: the permission protocol end to end
 cargo test -p deepsand-core --test runtime_dockerfile   # claims about the image build, no Docker needed
 ```
@@ -410,6 +415,9 @@ The most load-bearing ones:
 | `a_valid_state_misjudged_as_corrupt_comes_back_by_itself` | the state that was wrongly set aside is rescued, not lost |
 | `an_empty_rolling_backup_does_not_hide_a_set_aside_copy` | an empty fallback cannot stand in for a copy that has projects |
 | `a_substitute_store_never_overwrites_the_rolling_backup` | an unreadable configuration cannot cost you the last good copy |
+| `a_projects_own_model_wins_and_having_none_defers_to_configuration` | choosing a model is per project, and clearing it goes back to the configured one |
+| `the_endpoint_is_joined_the_way_the_configured_base_needs` | the model list is asked for at a URL the configured base actually serves |
+| `a_real_reply_yields_the_names_and_the_ids` | the API's own reply is read as names and ids, rather than guessed at |
 | `a_state_lost_with_its_backup_comes_back_from_a_dated_copy` | the live file and its rotation both gone, and the projects still return |
 | `a_healthy_load_keeps_a_dated_copy_and_does_not_add_another_while_it_is_fresh` | one a day, not one a start |
 | `the_dated_copies_are_pruned_to_the_newest_few` | five kept, and the oldest removed |

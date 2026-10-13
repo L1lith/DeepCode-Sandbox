@@ -2398,7 +2398,7 @@ pub async fn set_project_tools(
 
 /// Write the current thinking settings into the project's `settings.json`, and into
 /// a running sandbox if there is one. Returns whether a running sandbox was updated.
-fn push_effort(state: &AppState, project_id: &str) -> CmdResult<bool> {
+fn push_live_settings(state: &AppState, project_id: &str) -> CmdResult<bool> {
     let (config_dir, container, resolved) = {
         let store = store(state);
         let project = store.project(project_id).map_err(fail)?.clone();
@@ -2419,7 +2419,8 @@ fn push_effort(state: &AppState, project_id: &str) -> CmdResult<bool> {
         (config_dir, container, resolved)
     };
 
-    // Read-modify-write rather than regenerate. The file already holds the model, the
+    // Read-modify-write rather than regenerate, so a live change cannot drop a setting it
+    // did not come here to change. The file already holds the model, the
     // token and the permissions, and reproducing that here would be a second
     // implementation of `build_deepcode_settings`, free to drift from the first.
     let path = config_dir.join("settings.json");
@@ -2438,6 +2439,18 @@ fn push_effort(state: &AppState, project_id: &str) -> CmdResult<bool> {
             "reasoningEffort".into(),
             serde_json::Value::String(resolved.reasoning_effort.clone()),
         );
+        // The model lives in the settings' `env` block, which is where the CLI reads it from.
+        // Written from the resolved credentials, so clearing a project's override puts the
+        // configured model back rather than leaving the last choice behind.
+        let env = map
+            .entry("env")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let Some(env) = env.as_object_mut() {
+            env.insert(
+                "MODEL".into(),
+                serde_json::Value::String(resolved.model.clone()),
+            );
+        }
     }
 
     let bytes = serde_json::to_vec_pretty(&root)
@@ -2529,7 +2542,7 @@ pub fn set_effort_impl(
 
     // Applied now, not at the next start: the CLI reads its settings file per run,
     // so rewriting the file the sandbox reads is enough.
-    let applied_live = push_effort(state, project_id)?;
+    let applied_live = push_live_settings(state, project_id)?;
 
     let mut view = get_effort_impl(state, project_id)?;
     view.applied_live = applied_live;
@@ -2544,6 +2557,206 @@ pub fn set_effort(
     value: String,
 ) -> CmdResult<EffortView> {
     set_effort_impl(&state, &project_id, &value)
+}
+
+/* ------------------------------------------------------------------------- */
+/* Model                                                                     */
+/* ------------------------------------------------------------------------- */
+
+/// The dropdown's view of a project: what it runs, what configuration says, and what its API
+/// offers.
+fn model_view(state: &AppState, project_id: &str) -> CmdResult<ModelView> {
+    let (chosen, configured, running) = {
+        let store = store(state);
+        let project = store.project(project_id).map_err(fail)?.clone();
+        let app = store.settings().clone();
+        let host = credentials::read_host_config();
+        let resolved = credentials::resolve(&project, &app, &host);
+        let running = state
+            .sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains_key(project_id);
+        (
+            project
+                .credentials
+                .model
+                .clone()
+                .filter(|model| !model.trim().is_empty()),
+            resolved.model,
+            running,
+        )
+    };
+
+    let options = state
+        .models
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .map(|(_, choices)| choices.clone())
+        .unwrap_or_default();
+
+    Ok(ModelView {
+        project_id: project_id.to_string(),
+        deferring: chosen.is_none(),
+        value: chosen,
+        configured,
+        options,
+        problem: None,
+        // A plain read pushed nothing; the setter overrides this.
+        applied_live: false,
+        restart_needed: running,
+    })
+}
+
+pub fn get_model_impl(state: &AppState, project_id: &str) -> CmdResult<ModelView> {
+    model_view(state, project_id)
+}
+
+#[tauri::command]
+pub fn get_model(state: State<'_, AppState>, project_id: String) -> CmdResult<ModelView> {
+    get_model_impl(&state, &project_id)
+}
+
+/// Choose the model, or go back to deferring.
+///
+/// Saved and pushed in one step, like the thinking switch, so what the operator sees is what is
+/// on disk. DeepCode reads its configuration when it starts, so a conversation already in
+/// progress keeps the model it began with until the sandbox is restarted.
+pub fn set_model_impl(
+    state: &AppState,
+    project_id: &str,
+    model: Option<String>,
+) -> CmdResult<ModelView> {
+    let value = model
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty());
+
+    {
+        let mut store = store(state);
+        let project = store.project_mut(project_id).map_err(fail)?;
+        project.credentials.model = value.clone();
+        store.save().map_err(fail)?;
+    }
+
+    let applied_live = push_live_settings(state, project_id)?;
+    let mut view = model_view(state, project_id)?;
+    view.applied_live = applied_live;
+    view.restart_needed = view.restart_needed && !applied_live;
+    Ok(view)
+}
+
+#[tauri::command]
+pub fn set_model(
+    state: State<'_, AppState>,
+    project_id: String,
+    model: Option<String>,
+) -> CmdResult<ModelView> {
+    set_model_impl(&state, &project_id, model)
+}
+
+/// Ask the project's own API which models it offers.
+///
+/// The request is made here rather than in the window because it is signed with the API key,
+/// and that key belongs to the sandbox's configuration rather than to the frontend. A list that
+/// cannot be read is not an error the operator has to act on: the answer comes back with
+/// `problem` set, so the dropdown still offers the two choices that need no list at all.
+pub async fn list_models_impl(state: &AppState, project_id: &str) -> CmdResult<ModelView> {
+    let (base_url, api_key) = {
+        let store = store(state);
+        let project = store.project(project_id).map_err(fail)?.clone();
+        let app = store.settings().clone();
+        let host = credentials::read_host_config();
+        let resolved = credentials::resolve(&project, &app, &host);
+        (resolved.base_url.trim().to_string(), resolved.api_key)
+    };
+
+    let mut view = model_view(state, project_id)?;
+    if base_url.is_empty() {
+        view.problem = Some(
+            "No base URL is configured for this project's API, so its models cannot be listed."
+                .into(),
+        );
+        return Ok(view);
+    }
+    let Some(api_key) = api_key.filter(|key| !key.trim().is_empty()) else {
+        view.problem = Some(
+            "No API key is configured for this project's API, so its models cannot be listed. \
+             Custom still works: type a model name and it is used as it is."
+                .into(),
+        );
+        return Ok(view);
+    };
+
+    // The key is digested, never kept: this cache exists to avoid repeating a request, not to
+    // hold a second copy of a secret.
+    let cache_key = format!(
+        "{base_url}|{}",
+        deepsand_core::seccomp::digest(api_key.as_bytes())
+    );
+    {
+        let cached = state.models.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((key, choices)) = cached.as_ref() {
+            if *key == cache_key && !choices.is_empty() {
+                view.options = choices.clone();
+                return Ok(view);
+            }
+        }
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            view.problem = Some(format!("could not prepare the request: {err}"));
+            return Ok(view);
+        }
+    };
+
+    let mut problem = None;
+    for url in deepsand_core::models::model_endpoints(&base_url) {
+        match client
+            .get(&url)
+            .bearer_auth(&api_key)
+            .header("accept", "application/json")
+            .send()
+            .await
+        {
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                let choices = deepsand_core::models::parse_models(&body);
+                if status.is_success() && !choices.is_empty() {
+                    *state.models.lock().unwrap_or_else(|p| p.into_inner()) =
+                        Some((cache_key.clone(), choices.clone()));
+                    view.options = choices;
+                    return Ok(view);
+                }
+                problem = Some(if status.is_success() {
+                    format!("{url} answered without any models in it")
+                } else {
+                    format!("{url} answered {status}")
+                });
+            }
+            Err(err) => {
+                problem = Some(format!("{url} could not be reached: {err}"));
+            }
+        }
+    }
+
+    tracing::warn!("could not list models for {project_id}: {problem:?}");
+    view.problem = Some(
+        problem.unwrap_or_else(|| "the model list could not be read".to_string())
+            + ". Custom still works: type a model name and it is used as it is.",
+    );
+    Ok(view)
+}
+
+#[tauri::command]
+pub async fn list_models(state: State<'_, AppState>, project_id: String) -> CmdResult<ModelView> {
+    list_models_impl(&state, &project_id).await
 }
 
 /* ------------------------------------------------------------------------- */

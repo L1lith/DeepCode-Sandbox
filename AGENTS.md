@@ -24,7 +24,7 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 340 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 347 tests |
 | `npm run app:test` | `cargo test -p deepsand-app` — the app crate's own tests, including the zombie guard. Part of `npm test`: it was not, and tests that never run are decoration |
 | `npm run core:check` | `cargo check --workspace` |
 | `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |
@@ -229,6 +229,23 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   was kept forever: the probe runs once, after the window is ready, which is routinely while
   Docker Desktop is still starting. It is retried while the answer is no, and re-asked when the
   window takes focus. If you move a field out of a command, grep the frontend for it.
+* **One piece of in-flight state, and it always lets go.** Whether a session operation is
+  running lives in the store (`sessionBusy`), not in each component: the header's Run and the
+  terminal's Run each had their own signal, so one could be left greyed out for the rest of the
+  session while the other was fine. `sessionOperation` also has a ceiling, because `finally`
+  releases the button whenever a promise settles -- which is every outcome except the promise
+  never settling, and a backend that never answers must not be able to lock the operator out. A
+  disabled button says what it is waiting for ("Starting…"): a grey button with no text cannot
+  be told apart from a broken one.
+* **Anything signed with the API key happens in the app, never in the window.** The model list
+  is fetched in `src-tauri` with the project's resolved credentials, and the frontend receives
+  ids and names -- never a key, not even masked. The cache that keeps the list between projects
+  digests the key rather than storing it, and a failure to list comes back as a `problem` string
+  rather than an error, so the dropdown still offers the two choices that need no list at all.
+* **A per-project model is `credentials.model`, and `None` means "defer to configuration".**
+  One field, so the header dropdown and the project's own credentials cannot disagree, and
+  clearing the choice puts the configured model back rather than leaving the last one behind
+  (`a_projects_own_model_wins_and_having_none_defers_to_configuration`).
 * **Contents before name.** Anything that holds state is written to a sibling file, synced
   with `sync_all`, and only then renamed over the real one. A rename is atomic but not durable
   on its own: without the sync, a crash can commit the name and lose the data, which is how

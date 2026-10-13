@@ -293,6 +293,27 @@ pub struct EffortView {
     pub applied_live: bool,
 }
 
+/// A project's model setting, as the header's dropdown needs it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelView {
+    pub project_id: String,
+    /// The project's own model, or `None` when it defers to configuration.
+    pub value: Option<String>,
+    /// True when nothing is overriding the configured model.
+    pub deferring: bool,
+    /// What configuration resolves to right now, shown beside "Defer to Config" so the
+    /// operator can see what deferring to it means today.
+    pub configured: String,
+    /// What the configured API offers. Empty until it has been asked, or when it cannot be
+    /// reached -- in which case `problem` says why, because a dropdown that is simply missing
+    /// its list looks like a bug in the app rather than a problem with the API.
+    pub options: Vec<deepsand_core::models::ModelChoice>,
+    pub problem: Option<String>,
+    pub applied_live: bool,
+    pub restart_needed: bool,
+}
+
 /// One configured remote server, as the UI needs to see it.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -458,6 +479,13 @@ pub struct AppState {
     /// up -- so without this two overlapping starts would both proceed and the second
     /// would fail on the container name.
     pub starting: Mutex<std::collections::HashSet<String>>,
+    /// The last model list read from the configured API, with the base URL and key it was
+    /// read with.
+    ///
+    /// Kept because the header asks on every project switch and the answer changes only when
+    /// the credentials do; the key is digested rather than stored, because the point of the
+    /// cache is to avoid repeating a request, not to keep a second copy of a secret around.
+    pub models: Mutex<Option<(String, Vec<deepsand_core::models::ModelChoice>)>>,
     /// The image id whose seccomp profile has already been checked against the profile
     /// being applied, with the digest that was found.
     ///
@@ -502,6 +530,7 @@ impl AppState {
             starting: Mutex::new(std::collections::HashSet::new()),
             building: Mutex::new(std::collections::HashSet::new()),
             verified_seccomp: Mutex::new(None),
+            models: Mutex::new(None),
             // Sized for a burst of terminal output; a slow subscriber lags and is
             // told so rather than blocking the sandbox's output path.
             remote_events: tokio::sync::broadcast::channel(2048).0,
