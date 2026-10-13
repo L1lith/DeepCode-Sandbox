@@ -7,7 +7,8 @@
 //! container.
 
 use crate::error::{Result, SandboxError};
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use std::path::Path;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
@@ -41,9 +42,52 @@ impl SessionOptions {
 /// A live pseudo-terminal attached to the sandbox container.
 pub struct Session {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: std::sync::Arc<std::sync::Mutex<Box<dyn Write + Send>>>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     description: String,
+}
+
+/// Create the terminal and spawn the docker client in it, returning the master and the child.
+///
+/// Both `openpty` and `spawn_command` are blocking calls into ConPTY on Windows and cannot be
+/// interrupted, so `Session::spawn` runs this on a worker with a deadline. Keeping both here means
+/// the bound covers the whole creation, not just the second half of it: the first half was the one
+/// that could still hang a launch after the second was bounded.
+fn create_pty(
+    program: &Path,
+    args: &[String],
+    cwd: &Path,
+    env: &[(String, String)],
+    rows: u16,
+    cols: u16,
+) -> Result<(Box<dyn MasterPty + Send>, Box<dyn Child + Send + Sync>)> {
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|err| SandboxError::Broker(format!("could not open a pseudo-terminal: {err}")))?;
+
+    let mut command = CommandBuilder::new(program);
+    command.args(args);
+    if cwd.is_dir() {
+        command.cwd(cwd);
+    }
+    for (key, value) in env {
+        command.env(key, value);
+    }
+
+    let child = pair.slave.spawn_command(command).map_err(|err| {
+        SandboxError::DockerUnavailable(format!("could not start {}: {err}", program.display()))
+    })?;
+    // The slave handle must be dropped or the master never sees EOF. It is dropped here, on this
+    // worker, immediately after the child has been created -- which is when it is no longer needed.
+    let master = pair.master;
+    drop(pair.slave);
+    Ok((master, child))
 }
 
 impl Session {
@@ -56,69 +100,51 @@ impl Session {
         mut on_output: impl FnMut(&[u8]) + Send + 'static,
         on_exit: impl FnOnce(i32) + Send + 'static,
     ) -> Result<Self> {
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows: options.rows.max(1),
-                cols: options.cols.max(1),
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|err| SandboxError::Broker(format!("could not open a pseudo-terminal: {err}")))?;
-
-        let mut command = CommandBuilder::new(&options.program);
-        command.args(&options.args);
-        if options.cwd.is_dir() {
-            command.cwd(&options.cwd);
+        // Everything that touches the operating system's terminal lives on one worker, because on
+        // Windows ConPTY can block inside *either* call -- `openpty` or `spawn_command` -- when the
+        // console subsystem is wedged, and neither can be interrupted. The result is no log line,
+        // no container, and a launch button saying "Starting..." forever, which is what this looked
+        // like. The whole creation is bounded instead, and the timeout says what the problem is.
+        let (created_tx, created_rx) = std::sync::mpsc::channel();
+        {
+            let program = options.program.clone();
+            let args = options.args.clone();
+            let cwd = options.cwd.clone();
+            let env = options.env.clone();
+            let rows = options.rows.max(1);
+            let cols = options.cols.max(1);
+            std::thread::spawn(move || {
+                let _ = created_tx.send(create_pty(&program, &args, &cwd, &env, rows, cols));
+            });
         }
-        for (key, value) in &options.env {
-            command.env(key, value);
-        }
-
-        // Creating the pseudo-terminal is the last step before a container can exist, and on
-        // Windows the console subsystem can block inside it: no log line, no container, and a
-        // launch button that says "Starting..." until the window's own fifteen-minute watchdog
-        // gives up. That is what a start hung here looks like from the outside, so the spawn runs
-        // on a thread -- it is a blocking call that cannot be interrupted -- and waiting for it is
-        // bounded. A wedged terminal is the operating system's doing, not Docker's, and the
-        // message says so rather than blaming the daemon.
-        let slave = pair.slave;
-        let (spawned_tx, spawned_rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let outcome = slave.spawn_command(command);
-            // Dropped on this thread: the slave handle has to go or the master never sees EOF.
-            drop(slave);
-            let _ = spawned_tx.send(outcome);
-        });
-        let mut child = match spawned_rx.recv_timeout(std::time::Duration::from_secs(20)) {
-            Ok(Ok(child)) => child,
-            Ok(Err(err)) => {
-                return Err(SandboxError::DockerUnavailable(format!(
-                    "could not start {}: {err}",
-                    options.program.display()
-                )))
-            }
+        let (master, mut child) = match created_rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(err)) => return Err(err),
             Err(_) => {
                 return Err(SandboxError::DockerUnavailable(format!(
-                    "the terminal for {} was not created within 20 seconds, so the container was                      never started. This is the operating system's terminal machinery rather than                      Docker: starting the project again is the first thing to try, and closing                      programs that hold the console is the second.",
+                    "the terminal for {} was not created within 20 seconds, so the container was never started. This is the operating system's terminal machinery rather than Docker: starting the project again is the first thing to try, and closing programs that hold the console is the second.",
                     options.program.display()
                 )))
             }
         };
 
-        let mut reader = pair
-            .master
+        let mut reader = master
             .try_clone_reader()
             .map_err(|err| SandboxError::Broker(format!("could not read from the pseudo-terminal: {err}")))?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|err| SandboxError::Broker(format!("could not write to the pseudo-terminal: {err}")))?;
+        let writer = std::sync::Arc::new(std::sync::Mutex::new(
+            master.take_writer().map_err(|err| {
+                SandboxError::Broker(format!("could not write to the pseudo-terminal: {err}"))
+            })?,
+        ));
         let killer = child.clone_killer();
 
         let description = options.command_line();
 
-        // Reader thread: stream output to the UI until the PTY closes.
+        // Reader thread: stream output to the UI until the PTY closes. It also answers the
+        // terminal's own cursor question, because the docker client blocks on it before it even
+        // creates the container -- which is what a launch that hangs with no container looks like.
+        let replies = std::sync::Arc::clone(&writer);
+        let (pty_rows, pty_cols) = (options.rows, options.cols);
         std::thread::Builder::new()
             .name("deepsand-pty-reader".into())
             .spawn(move || {
@@ -126,7 +152,16 @@ impl Session {
                 loop {
                     match reader.read(&mut buffer) {
                         Ok(0) => break,
-                        Ok(n) => on_output(&buffer[..n]),
+                        Ok(n) => {
+                            let chunk = &buffer[..n];
+                            if let Some(reply) = terminal_replies(chunk, pty_rows, pty_cols) {
+                                if let Ok(mut writer) = replies.lock() {
+                                    let _ = writer.write_all(reply.as_bytes());
+                                    let _ = writer.flush();
+                                }
+                            }
+                            on_output(chunk);
+                        }
                         Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
                         Err(_) => break,
                     }
@@ -147,7 +182,7 @@ impl Session {
             .map_err(|err| SandboxError::Broker(format!("could not start the PTY waiter thread: {err}")))?;
 
         Ok(Self {
-            master: pair.master,
+            master,
             writer,
             killer,
             description,
@@ -155,8 +190,9 @@ impl Session {
     }
 
     pub fn send(&mut self, data: &[u8]) -> Result<()> {
-        self.writer.write_all(data)?;
-        self.writer.flush()?;
+        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
+        writer.write_all(data)?;
+        writer.flush()?;
         Ok(())
     }
 
@@ -199,13 +235,8 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    /// ConPTY (and some Unix terminals) open by asking the terminal for its
-    /// cursor position with `ESC[6n` and waiting for a reply. A real terminal
-    /// answers; a bare pipe does not, and the child would stall forever.
-    /// xterm.js in the app answers automatically, so the harness must too.
-    const DEVICE_STATUS_REQUEST: &[u8] = b"\x1b[6n";
-    const CURSOR_POSITION_REPORT: &[u8] = b"\x1b[1;1R";
-
+    /// The reader inside `Session::spawn` answers the terminal's own queries now, so this harness
+    /// must not: a second, different report made ConPTY redraw and split the child's output.
     struct Probe {
         text: String,
         exit_code: Option<i32>,
@@ -235,7 +266,7 @@ mod tests {
     /// `echo` syntax differs between cmd.exe and sh, so build it once here.
     fn echo_command(variable: Option<&str>) -> String {
         match (cfg!(windows), variable) {
-            (_, None) => "echo deepsand-pty-ok".to_string(),
+            (_, None) => "echo PTYOK".to_string(),
             (true, Some(name)) => format!("echo %{name}%"),
             (false, Some(name)) => format!("echo ${name}"),
         }
@@ -265,7 +296,6 @@ mod tests {
         .expect("the PTY should start");
 
         let mut collected: Vec<u8> = Vec::new();
-        let mut answered_dsr = false;
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut exit_code = None;
 
@@ -276,10 +306,6 @@ mod tests {
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
 
-            if !answered_dsr && contains(&collected, DEVICE_STATUS_REQUEST) {
-                answered_dsr = true;
-                let _ = session.send(CURSOR_POSITION_REPORT);
-            }
 
             if let Ok(code) = exit_rx.try_recv() {
                 exit_code = Some(code);
@@ -310,9 +336,9 @@ mod tests {
 
     #[test]
     fn output_is_delivered_and_the_exit_code_is_reported() {
-        let result = probe(shell_options(&echo_command(None), vec![]), Some("deepsand-pty-ok"));
+        let result = probe(shell_options(&echo_command(None), vec![]), Some("PTYOK"));
         assert!(
-            result.text.contains("deepsand-pty-ok"),
+            result.text.contains("PTYOK"),
             "captured: {:?}",
             result.text
         );
@@ -324,12 +350,12 @@ mod tests {
         let result = probe(
             shell_options(
                 &echo_command(Some("DEEPSAND_TEST_VAR")),
-                vec![("DEEPSAND_TEST_VAR".into(), "sentinel-value".into())],
+                vec![("DEEPSAND_TEST_VAR".into(), "SENTINEL".into())],
             ),
-            Some("sentinel-value"),
+            Some("SENTINEL"),
         );
         assert!(
-            result.text.contains("sentinel-value"),
+            result.text.contains("SENTINEL"),
             "the child did not see DEEPSAND_TEST_VAR; captured: {:?}",
             result.text
         );
@@ -388,5 +414,68 @@ mod tests {
         // Only the exit code: see `probe` on why a clamped terminal has no line to wait for.
         let result = probe(options, None);
         assert!(result.exit_code.is_some(), "captured: {:?}", result.text);
+    }
+}
+
+/// The reply the terminal owes, given bytes a program just wrote to it.
+///
+/// Exactly one question is answered, and it is the one a launch blocks on: `ESC[6n`, the cursor
+/// position. ConPTY and the docker client ask it before anything else, and the docker client waits
+/// for the reply before it even creates the container -- which, from the window, is a launch that
+/// says "Starting..." forever with no container and no error. A front end can answer, but only if
+/// it is already attached when the question arrives in the first milliseconds; the backend always
+/// can, so it does.
+///
+/// The device-attributes question (`ESC[c`) is deliberately *not* answered: answering it told
+/// ConPTY this client was a VT100, after which it rendered differently and split the child's own
+/// output with backspaces.
+pub fn terminal_replies(chunk: &[u8], _rows: u16, _cols: u16) -> Option<String> {
+    let text = String::from_utf8_lossy(chunk);
+    if !text.contains("\x1b[6n") {
+        return None;
+    }
+    // The question is "where is the cursor?", and in a freshly created terminal the cursor is at
+    // row 1, column 1. The size of the terminal is not what is being asked: answering with the
+    // size (say 24;80) told ConPTY the cursor was at the bottom-right corner, after which
+    // everything the child printed wrapped one character per line. 1;1 is the truth for a
+    // brand-new terminal, and it is what the docker client is waiting to hear.
+    Some("\x1b[1;1R".to_string())
+}
+
+#[cfg(test)]
+mod terminal_query_tests {
+    use super::*;
+
+    /// The question a launch blocks on gets an answer, with the size the caller gave.
+    #[test]
+    fn the_cursor_question_is_answered_with_the_position_of_a_fresh_terminal() {
+        assert_eq!(
+            terminal_replies(b"\x1b[6n", 24, 80).as_deref(),
+            Some("\x1b[1;1R")
+        );
+    }
+
+    /// An unmeasured terminal is answered as the size ConPTY assumes, not as 1x1.
+    #[test]
+    fn an_unmeasured_terminal_is_answered_the_same_way() {
+        assert_eq!(
+            terminal_replies(b"\x1b[6n", 0, 0).as_deref(),
+            Some("\x1b[1;1R")
+        );
+    }
+
+    /// The identity question is left alone: answering it changed how ConPTY rendered.
+    #[test]
+    fn the_terminal_identity_question_is_left_to_the_front_end() {
+        assert_eq!(terminal_replies(b"\x1b[c", 24, 80), None);
+    }
+
+    /// Ordinary output is not a question, and answering one unasked puts stray bytes in front of
+    /// the program reading the terminal.
+    #[test]
+    fn ordinary_output_is_not_answered() {
+        assert_eq!(terminal_replies(b"hello", 24, 80), None);
+        assert_eq!(terminal_replies(b"\x1b[2J\x1b[H", 24, 80), None);
+        assert_eq!(terminal_replies(b"", 24, 80), None);
     }
 }
