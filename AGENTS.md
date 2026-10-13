@@ -24,9 +24,9 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 290 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 296 tests |
 | `npm run core:check` | `cargo check --workspace` |
-| `npm run test:bridge` | 48 checks of the MCP bridge against a simulated spool |
+| `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |
 | `npm test` | the two suites above, in order |
 | `npm run build` | `tsc --noEmit` + `vite build` (frontend typecheck) |
 | `npm run runtime:build` | build and tag the sandbox image |
@@ -107,7 +107,10 @@ These are load-bearing. Breaking one is how this project gets a CVE.
     already on the allowlist, an installed tool) and says where it already is. That
     is a `deny`, because an automatic `allow` is consent the operator never gave.
     Anything ambiguous — a wildcard pattern, a write request against a read-only
-    grant, `locate_resource` — must reach the operator.
+    grant, `locate_resource` — must reach the operator. The same path answers a
+    project whose `requests_enabled` is false, and **that check must live on the
+    host, not only in the bridge**: the bridge is the agent's own child process, so
+    its copy of the flag saves a wasted tool call and decides nothing.
 12. **LF line endings for everything Linux reads or executes.** `.gitattributes`
     enforces this. A shell script with a CRLF shebang fails inside the container
     with `bash\r: No such file or directory` and the sandbox never starts.

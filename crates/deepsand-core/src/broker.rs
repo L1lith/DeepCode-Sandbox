@@ -240,6 +240,35 @@ impl Broker {
         Ok(())
     }
 
+    /// Tell a running sandbox whether it may ask for permissions.
+    ///
+    /// This patches the snapshot the bridge reads rather than rebuilding it, because the
+    /// rest of that file describes the image that is actually running and the tools baked
+    /// into it -- none of which the caller of this knows. Overwriting it with a
+    /// freshly-built snapshot would replace those with guesses, so `deepsand_sandbox_info`
+    /// would start lying about what is installed.
+    ///
+    /// Returns whether there was a snapshot to patch. A project that has never been
+    /// planned has none, which is not an error: the flag is stored on the project and the
+    /// next plan writes it.
+    pub fn set_requests_enabled(&self, enabled: bool, message: &str) -> Result<bool> {
+        let path = self.dirs.state.join("sandbox.json");
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return Ok(false);
+        };
+        let Ok(mut snapshot) = serde_json::from_str::<SandboxSnapshot>(&raw) else {
+            return Ok(false);
+        };
+        snapshot.requests_enabled = enabled;
+        snapshot.requests_disabled_message = if enabled {
+            String::new()
+        } else {
+            message.to_string()
+        };
+        write_json(&path, &snapshot)?;
+        Ok(true)
+    }
+
     /// Last `keep` audit lines for the diagnostics panel.
     pub fn tail_responses(&self, keep: usize) -> Vec<String> {
         let Ok(entries) = std::fs::read_dir(&self.dirs.responses) else {
@@ -746,6 +775,7 @@ mod tests {
             credentials: Default::default(),
             deepcode_mode: Default::default(),
             allowed_roots: vec![],
+            requests_enabled: true,
             notes: String::new(),
             reasoning_effort: Default::default(),
             tools: None,
@@ -766,6 +796,73 @@ mod tests {
         assert_eq!(parsed.workspace_mount, "/workspace");
         assert_eq!(parsed.open_requests, vec!["req_open_1".to_string()]);
         assert!(fixture.broker.dirs().state.join("grants.json").exists());
+    }
+
+    /// Turning requests off has to reach a sandbox that is already running, and it has to
+    /// do it without rewriting the parts of the snapshot that describe the running image:
+    /// a rebuilt snapshot would replace the real tool list with this process's guess.
+    #[test]
+    fn turning_requests_off_patches_the_running_sandbox_and_leaves_the_rest_alone() {
+        let fixture = Fixture::new();
+        let project = Project {
+            id: "p1".into(),
+            name: "my-website".into(),
+            slug: "my-website".into(),
+            root_dir: "/tmp/ws".into(),
+            created_at_ms: 0,
+            network: NetworkPolicy::Internet,
+            limits: Default::default(),
+            credentials: Default::default(),
+            deepcode_mode: Default::default(),
+            allowed_roots: vec![],
+            requests_enabled: true,
+            notes: String::new(),
+            reasoning_effort: Default::default(),
+            tools: None,
+        };
+        let mut sandbox = crate::settings::build_sandbox_snapshot(
+            &project,
+            &[],
+            &project.network,
+            vec!["req_open_1".into()],
+            vec!["note".into()],
+        );
+        // Something only the running image knows, which a rebuilt snapshot would lose.
+        sandbox.image = "deepsand/runtime:0.1.0-tabc-rev".into();
+        sandbox.tools = vec!["node".into(), "python".into()];
+        let grants = crate::settings::build_grants_snapshot(&project, &[]);
+        fixture.broker.write_snapshots(&sandbox, &grants).unwrap();
+
+        let patched = fixture
+            .broker
+            .set_requests_enabled(false, "requests are off now")
+            .unwrap();
+        assert!(patched, "there was a snapshot to patch");
+
+        let text = std::fs::read_to_string(fixture.broker.dirs().state.join("sandbox.json")).unwrap();
+        let parsed: SandboxSnapshot = serde_json::from_str(&text).unwrap();
+        assert!(!parsed.requests_enabled);
+        assert_eq!(parsed.requests_disabled_message, "requests are off now");
+        // Everything else survived.
+        assert_eq!(parsed.image, "deepsand/runtime:0.1.0-tabc-rev");
+        assert_eq!(parsed.tools, vec!["node".to_string(), "python".to_string()]);
+        assert_eq!(parsed.open_requests, vec!["req_open_1".to_string()]);
+        assert_eq!(parsed.notes, vec!["note".to_string()]);
+
+        // ...and turning it back on clears the message rather than leaving a stale one.
+        assert!(fixture.broker.set_requests_enabled(true, "ignored").unwrap());
+        let text = std::fs::read_to_string(fixture.broker.dirs().state.join("sandbox.json")).unwrap();
+        let parsed: SandboxSnapshot = serde_json::from_str(&text).unwrap();
+        assert!(parsed.requests_enabled);
+        assert!(parsed.requests_disabled_message.is_empty());
+    }
+
+    /// A project that has never been planned has no snapshot, and asking to patch one must
+    /// not be an error: the flag lives on the project and the next plan writes it out.
+    #[test]
+    fn patching_a_snapshot_that_is_not_there_is_not_an_error() {
+        let fixture = Fixture::new();
+        assert!(!fixture.broker.set_requests_enabled(false, "off").unwrap());
     }
 
     #[test]

@@ -782,6 +782,7 @@ mod tests {
                 credentials: Credentials::default(),
                 deepcode_mode: DeepCodeMode::AllowAll,
                 allowed_roots: vec![],
+                requests_enabled: true,
                 notes: String::new(),
                 reasoning_effort: Default::default(),
                 tools: None,

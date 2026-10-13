@@ -361,6 +361,7 @@ mod tests {
             allowed_roots: vec![],
             reasoning_effort: Default::default(),
             tools: None,
+            requests_enabled: true,
             notes: String::new(),
         }
     }

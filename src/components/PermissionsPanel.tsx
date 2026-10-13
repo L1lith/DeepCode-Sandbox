@@ -50,6 +50,7 @@ export function PermissionsPanel() {
   const [allowlistBusy, setAllowlistBusy] = createSignal(false);
   const [presets, setPresets] = createSignal<{ name: string; entries: string[] }[]>([]);
   const [modeBusy, setModeBusy] = createSignal(false);
+  const [requestsBusy, setRequestsBusy] = createSignal(false);
 
   onMount(() => {
     void api
@@ -57,6 +58,33 @@ export function PermissionsPanel() {
       .then(setPresets)
       .catch(() => setPresets([]));
   });
+
+  /**
+   * Whether the sandbox may ask for anything at all.
+   *
+   * Turning it off is a real change rather than a mute: the host refuses incoming
+   * requests and answers the ones already waiting, so the sandbox is told the answer is
+   * no instead of being left waiting on a dialog nobody will see.
+   */
+  async function setRequests(enabled: boolean) {
+    const current = project();
+    if (!current) return;
+    setRequestsBusy(true);
+    try {
+      await api.setRequestsEnabled(current.id, enabled);
+      toast(
+        enabled ? "ok" : "info",
+        enabled ? "DeepCode can ask again" : "DeepCode cannot ask any more",
+        enabled
+          ? "Requests from this project will reach you as they come in."
+          : "Anything already waiting was refused, and the sandbox has been told not to ask.",
+      );
+    } catch (error) {
+      toast("error", "Could not change that setting", describeError(error));
+    } finally {
+      setRequestsBusy(false);
+    }
+  }
 
   async function loadAllowlist(projectId: string) {
     try {
@@ -192,6 +220,38 @@ export function PermissionsPanel() {
       <Show when={project()} fallback={<div class="empty">Select a project first.</div>}>
         {(current) => (
           <>
+            <div class="card">
+              <h3>Permission requests</h3>
+              <label class="row-inline small">
+                <input
+                  type="checkbox"
+                  checked={current().requestsEnabled}
+                  disabled={requestsBusy()}
+                  onChange={(event) => void setRequests(event.currentTarget.checked)}
+                />
+                Let {current().name} ask for permissions
+              </label>
+              <span class="hint">
+                <Show
+                  when={current().requestsEnabled}
+                  fallback={
+                    <>
+                      <strong>Off.</strong> Nothing this project asks for will reach you, and the
+                      sandbox is told not to ask rather than being left waiting. Anything it needs
+                      beyond the workspace, the shared directories and the network allowlist will
+                      simply fail. Turn this back on to be asked again.
+                    </>
+                  }
+                >
+                  The sandbox can ask for a directory, a network destination or a tool that is not
+                  installed, and you decide each one. Each request is written by the sandbox and is
+                  not authenticated, so read what it asks for before granting it. Turn this off if
+                  the requests have become noise — the setting is per project, and the dialog for a
+                  request can also turn it off.
+                </Show>
+              </span>
+            </div>
+
             <div class="card">
               <h3>Network access</h3>
               <div class="row-inline" style={{ "flex-wrap": "wrap" }}>

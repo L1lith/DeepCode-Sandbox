@@ -66,6 +66,9 @@ pub struct ProjectView {
     pub deepcode_mode: DeepCodeMode,
     pub allowed_roots: Vec<String>,
     pub notes: String,
+    /// Whether the sandbox may ask for permissions at all. Surfaced so the Permissions
+    /// tab can show and change it, and so a request dialog can offer to turn it off.
+    pub requests_enabled: bool,
     /// Derived, for the sidebar and header.
     pub container_name: String,
     pub running: bool,
@@ -88,6 +91,7 @@ impl ProjectView {
             deepcode_mode: project.deepcode_mode,
             allowed_roots: project.allowed_roots.clone(),
             notes: project.notes.clone(),
+            requests_enabled: project.requests_enabled,
             container_name: project.container_name(),
             running,
             workspace_exists: std::path::Path::new(&project.root_dir).is_dir(),

@@ -203,6 +203,13 @@ What follows from that, and what was changed:
   verifying it would add a check that cannot fail in the case that matters.
 * The flood caps stay: at most 25 requests are surfaced at once, and the request
   filename, id and size are validated before a dialog exists.
+* The operator can **turn asking off** for a project, and that is enforced here on the
+  host rather than only in the bridge: an incoming request is answered with a refusal and
+  the sandbox is told why, so nothing appears on screen. The bridge checks the same flag
+  first and declines to submit, which is a courtesy to the model — it saves it waiting out
+  its tool budget — and it is explicitly *not* the control, for the reason above: anything
+  in that sandbox can write a request file itself. Turned off, every request already
+  waiting is refused too, so the setting is "stop asking" rather than "stop showing me".
 
 ## What this does *not* protect against
 
@@ -331,8 +338,8 @@ enumerates families and flags so that dropping one fails a test rather than a re
 Everything above is asserted by tests you can run:
 
 ```bash
-cargo test -p deepsand-core                   # 290 tests, including the seccomp and allowlist claims
-node runtime/scripts/test-mcp-bridge.mjs      # 48 checks: the permission protocol end to end
+cargo test -p deepsand-core                   # 296 tests, including the seccomp and allowlist claims
+node runtime/scripts/test-mcp-bridge.mjs      # 55 checks: the permission protocol end to end
 ```
 
 The most load-bearing ones:

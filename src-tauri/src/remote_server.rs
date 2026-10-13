@@ -670,6 +670,12 @@ async fn dispatch(
             optional(args, "notes")?,
             optional(args, "credentials")?,
         )?),
+        "set_requests_enabled" => to_value(commands::set_requests_enabled_impl(
+            &app,
+            state,
+            arg(args, "projectId")?,
+            arg(args, "enabled")?,
+        )?),
         "set_settings" => to_value(commands::set_settings_impl(state, arg(args, "settings")?)?),
         "set_egress_allowlist" => {
             to_value(commands::set_egress_allowlist_impl(state, arg(args, "hosts")?).await?)

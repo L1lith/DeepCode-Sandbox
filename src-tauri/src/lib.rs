@@ -166,6 +166,7 @@ pub fn run() {
             commands::get_project,
             commands::create_project,
             commands::update_project_settings,
+            commands::set_requests_enabled,
             commands::delete_project,
             commands::path_check,
             commands::list_grants,

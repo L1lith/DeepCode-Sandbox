@@ -520,6 +520,60 @@ async function main() {
   });
 
   /* --------------------------------------------------------------------- */
+  section("the operator can stop being asked");
+
+  await broker.writeState("sandbox.json", {
+    network_mode: "allowlisted",
+    open_requests: [],
+    notes: [],
+    requests_enabled: false,
+    requests_disabled_message: "REQUESTS-OFF-SENTINEL: do not ask again.",
+  });
+
+  const offInfo = await bridge.callTool("deepsand_sandbox_info", {});
+  check("sandbox_info says requests are off, before the model composes one", () =>
+    assert.match(textOf(offInfo), /requests\s*:\s*OFF/));
+
+  // This branch matters as much as the flag: reading the allowlisted mode as
+  // "unrestricted" would tell the model it can reach the open internet when it cannot.
+  check("and an allowlisted sandbox is described as filtered, not as unrestricted", () => {
+    assert.match(textOf(offInfo), /allowlisted hosts/);
+    assert.doesNotMatch(textOf(offInfo), /unrestricted egress/);
+  });
+
+  const requestsBefore = (await broker.published()).length;
+  const refused = await bridge.callTool("deepsand_request_directory_access", {
+    host_path: "/home/me/anything",
+    purpose: "testing the switch",
+  });
+  const requestsAfter = (await broker.published()).length;
+
+  check("a request while requests are off returns the host's own words", () =>
+    assert.match(textOf(refused), /REQUESTS-OFF-SENTINEL/));
+  check("and is not an error, so the turn continues instead of retrying", () =>
+    assert.notEqual(refused.isError, true));
+  check("and nothing reaches the spool, so no dialog can appear", () =>
+    assert.equal(requestsAfter, requestsBefore));
+
+  // The flag is read per request, not cached at startup: turning it back on has to work
+  // in a bridge that is already running.
+  await broker.writeState("sandbox.json", {
+    network_mode: "allowlisted",
+    open_requests: [],
+    notes: [],
+    requests_enabled: true,
+  });
+  const afterSwitchOn = await bridge.callTool("deepsand_request_directory_access", {
+    host_path: "/home/me/anything",
+    purpose: "testing the switch",
+  });
+  const publishedAfterSwitchOn = await broker.published();
+  check("turning it back on lets a request through again", () =>
+    assert.match(textOf(afterSwitchOn), /PENDING/));
+  check("and this time it did reach the spool", () =>
+    assert.equal(publishedAfterSwitchOn.length, requestsBefore + 1));
+
+  /* --------------------------------------------------------------------- */
   section("resilience");
 
   const orphan = new Bridge(path.join(spool, "nonexistent"));

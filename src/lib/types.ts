@@ -229,6 +229,8 @@ export interface ProjectView {
   deepcodeMode: DeepCodeMode;
   allowedRoots: string[];
   notes: string;
+  /** Whether the sandbox may ask for permissions at all. On unless turned off. */
+  requestsEnabled: boolean;
   containerName: string;
   running: boolean;
   workspaceExists: boolean;

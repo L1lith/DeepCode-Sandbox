@@ -202,6 +202,84 @@ pub fn update_project_settings_impl(state: &AppState, project_id: String, networ
 }
 
 #[tauri::command]
+pub fn set_requests_enabled(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    project_id: String,
+    enabled: bool,
+) -> CmdResult<ProjectView> {
+    set_requests_enabled_impl(&app, &state, project_id, enabled)
+}
+
+/// Turn permission requests on or off for one project.
+///
+/// Turning it off also answers every request that is already waiting, with the
+/// explanation the model needs, because "stop asking me" that leaves a dialog on screen
+/// has not done the thing the operator asked for. Turning it back on does not resurrect
+/// them: the sandbox has already been told no, and asking again is the model's business.
+///
+/// The bridge checks the same flag before submitting, but that check is a courtesy — the
+/// bridge is a child of the agent's own process. This is the control, and it refuses a
+/// request the sandbox hand-wrote into the spool exactly like any other.
+pub fn set_requests_enabled_impl(
+    app: &AppHandle,
+    state: &AppState,
+    project_id: String,
+    enabled: bool,
+) -> CmdResult<ProjectView> {
+    let message = deepsand_core::model::REQUESTS_DISABLED_MESSAGE;
+
+    let (project, pending) = {
+        let mut guard = state.store.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .project_mut(&project_id)
+            .map_err(fail)?
+            .requests_enabled = enabled;
+        guard.save().map_err(fail)?;
+        let project = guard.project(&project_id).cloned().map_err(fail)?;
+        let pending: Vec<PermissionRequest> = state
+            .pending_requests()
+            .into_iter()
+            .filter(|request| request.project == project_id)
+            .collect();
+        (project, pending)
+    };
+
+    // A running sandbox is told immediately, so an honest bridge stops submitting rather
+    // than writing requests that would be refused the moment they arrived.
+    let broker = state.broker(&project_id);
+    let _ = broker.set_requests_enabled(enabled, message);
+
+    if !enabled {
+        for request in &pending {
+            let _ = broker.answer(&PermissionResponse::deny(&request.id, message));
+            broker.clear_request(&request.id);
+            if let Ok(store) = state.store.lock() {
+                store.append_audit(
+                    &project_id,
+                    &format!("DENY  {} (requests turned off)", request.description()),
+                );
+            }
+            let _ = app.emit(
+                events::BROKER_RESOLVED,
+                serde_json::json!({
+                    "requestId": request.id,
+                    "decision": "deny",
+                    "auto": true,
+                    "reason": message,
+                }),
+            );
+        }
+    }
+
+    let _ = app.emit(
+        events::STATE_CHANGED,
+        serde_json::json!({ "reason": "requests-enabled-changed" }),
+    );
+    Ok(project_view(state, &project))
+}
+
+#[tauri::command]
 pub fn delete_project(state: State<'_, AppState>, project_id: String) -> CmdResult<()> {
     delete_project_impl(&state, project_id)
 }
@@ -1157,23 +1235,37 @@ pub fn resize_session_impl(state: &AppState, project_id: String, rows: u16, cols
 /* Permission broker                                                         */
 /* ------------------------------------------------------------------------- */
 
-/// A request the sandbox did not need to make, judged against the snapshot the sandbox
-/// itself reads.
+/// Why this request never needs the operator, or `None` if it does.
 ///
-/// `None` means the operator still decides: either the request is real, or it is one of
-/// the shapes `covered` deliberately declines to judge. Judging against the *snapshot*
-/// rather than against the store's own idea of the mounts matters — the question is
-/// what the sandbox can already see, and the snapshot is what it was told.
-fn already_covered_request(
+/// Two things are answered here rather than shown:
+///
+/// * The project has had asking turned off. This is the real control for that setting —
+///   the bridge checks it too, but the bridge is a child of the agent's own process, so a
+///   request written straight into the spool has to be refused here as well.
+/// * The sandbox already has what it is asking for, judged against the snapshot it was
+///   itself given. Judging against the *snapshot* rather than against the store's idea of
+///   the mounts is the point: the question is what the sandbox can see.
+///
+/// The `&'static str` is the audit tag, so the two cases are distinguishable in a log
+/// without parsing the message.
+fn auto_refusal(
     app: &AppHandle,
     project_id: &str,
     request: &PermissionRequest,
-) -> Option<deepsand_core::covered::AlreadyCovered> {
+) -> Option<(String, &'static str)> {
     let (project, grants) = {
         let state = app.state::<AppState>();
         let store = state.store.lock().ok()?;
         (store.project(project_id).ok()?.clone(), store.grants(project_id))
     };
+
+    if !project.requests_enabled {
+        return Some((
+            deepsand_core::model::REQUESTS_DISABLED_MESSAGE.to_string(),
+            "requests are turned off",
+        ));
+    }
+
     let snapshot = container_settings::build_sandbox_snapshot(
         &project,
         &grants,
@@ -1182,6 +1274,7 @@ fn already_covered_request(
         Vec::new(),
     );
     deepsand_core::covered::already_covered(request, Path::new(&project.root_dir), &snapshot)
+        .map(|covered| (covered.message, "already covered"))
 }
 
 fn request_view(state: &impl AsAppState, request: &PermissionRequest) -> PermissionRequestView {
@@ -1656,21 +1749,23 @@ fn start_broker(app: &AppHandle, state: &AppState, project_id: &str) {
                         }
                         announced.insert(request.id.clone(), ());
 
-                        // Asking for something the sandbox already has is answered here
+                        // Asking for something the sandbox already has -- or asking at all,
+                        // when the operator has turned requests off -- is answered here
                         // rather than shown: a prompt with nothing to decide trains the
                         // operator to approve without reading. The bar is "certain", so
-                        // anything ambiguous still reaches them -- see `covered`.
-                        if let Some(covered) = already_covered_request(&app, &project_id, &request)
+                        // anything ambiguous still reaches them.
+                        if let Some((message, reason)) = auto_refusal(&app, &project_id, &request)
                         {
-                            let _ = broker.answer(&PermissionResponse::deny(
-                                &request.id,
-                                &covered.message,
-                            ));
+                            let _ = broker.answer(&PermissionResponse::deny(&request.id, &message));
                             broker.clear_request(&request.id);
                             if let Ok(store) = app.state::<AppState>().store.lock() {
                                 store.append_audit(
                                     &project_id,
-                                    &format!("DENY  {} (already covered: {})", request.kind.as_str(), request.id),
+                                    &format!(
+                                        "DENY  {} ({reason}: {})",
+                                        request.kind.as_str(),
+                                        request.id
+                                    ),
                                 );
                             }
                             let _ = app.emit(
@@ -1679,7 +1774,7 @@ fn start_broker(app: &AppHandle, state: &AppState, project_id: &str) {
                                     "requestId": request.id,
                                     "decision": "deny",
                                     "auto": true,
-                                    "reason": covered.message,
+                                    "reason": message,
                                 }),
                             );
                             continue;

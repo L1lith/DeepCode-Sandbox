@@ -204,6 +204,8 @@ mod tests {
                 label: "brand".into(),
             }],
             open_requests: Vec::new(),
+            requests_enabled: true,
+            requests_disabled_message: String::new(),
             notes: Vec::new(),
         }
     }

@@ -34,15 +34,20 @@ Do not guess at host paths. A guessed path wastes the operator's attention and c
 
 ## Before you ask
 
-Call **`deepsand_sandbox_info`** first. It lists the workspace, every granted directory, and the network policy in plain language. Its output is the current truth. Asking for something you already have, or for a directory that is already mounted under a different name, is the most common way to annoy the operator.
+Call **`deepsand_sandbox_info`** first. It lists the workspace, every granted directory, the network policy and whether requests are on, in plain language. Its output is the current truth. Asking for something you already have, or for a directory that is already mounted under a different name, is the most common way to annoy the operator — and asking at all, when requests are off, only wastes a turn.
 
 ## Asking, and what comes back
 
-A request returns one of three things:
+A request returns one of four things:
 
 - **`APPROVED`** — the directory is now mounted and the reply tells you the path
   it appears at, under `/grants/<name>`. **Use the path from the reply, not one you predicted.** The name is chosen by the operator's Deepsand instance, so it may not match what you asked for.
 - **`DENIED`** — the decision is final. Do not retry it, do not rephrase it, do not look for another route to the same place. Report the limitation and continue with what you have, or ask the operator what they would prefer.
+- **`REQUESTS ARE OFF`** — the operator has turned permission requests off for this project,
+  so nothing you ask will reach them. This is not a refusal of *this* request and it is not
+  something to work around: adjust to what you already have and say plainly what you could
+  not do. Asking again, or a different tool, gets the same answer. You can check this
+  before asking — `deepsand_sandbox_info` reports `requests: OFF` when it applies.
 - **`PENDING`** — nobody has answered yet. The reply includes a `request_id`.
 
 ## The `PENDING` case

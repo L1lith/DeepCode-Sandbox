@@ -159,6 +159,15 @@ export const auditLog = (projectId: string, limit = 200) =>
   call<string[]>("audit_log", { projectId, limit });
 export const pathCheck = (path: string) => call<PathCheck>("path_check", { path });
 
+/**
+ * Turn permission requests on or off for one project.
+ *
+ * Off means the sandbox stops being able to ask, and every request that is already
+ * waiting is answered with a no, so it is not just a filter on the dialog.
+ */
+export const setRequestsEnabled = (projectId: string, enabled: boolean) =>
+  call<ProjectView>("set_requests_enabled", { projectId, enabled });
+
 /* --- sessions ------------------------------------------------------------ */
 
 export const previewPlan = (projectId: string) => call<PlanPreview>("preview_plan", { projectId });

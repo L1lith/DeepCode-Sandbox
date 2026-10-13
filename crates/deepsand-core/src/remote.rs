@@ -382,6 +382,10 @@ pub fn requirement(command: &str) -> Option<(Capability, Option<&'static str>)> 
 
         // --- security posture ----------------------------------------------
         "update_project_settings" => (ChangeSecurity, Some("projectId")),
+        // Turning asking off is a change to the security posture: it is what stops the
+        // sandbox widening its own access, so a remote client needs the same capability
+        // as changing the network mode or the allowlist.
+        "set_requests_enabled" => (ChangeSecurity, Some("projectId")),
         "set_settings" => (ChangeSecurity, None),
         "set_egress_allowlist" => (ChangeSecurity, None),
         "build_runtime_image" => (ChangeSecurity, None),

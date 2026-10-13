@@ -156,6 +156,29 @@ export function PermissionDialog(props: { request: PermissionRequestView; queued
   }
 
   /**
+   * Turn permission requests off for this project, from the dialog itself.
+   *
+   * The host answers this request and every other one already waiting, so the dialog
+   * closes because the request was *answered* rather than because the UI hid it — and the
+   * sandbox is told why instead of being left waiting for a decision that is not coming.
+   */
+  async function stopAsking() {
+    setBusy(true);
+    try {
+      await api.setRequestsEnabled(request().projectId, false);
+      toast(
+        "info",
+        "DeepCode will not ask again",
+        `${request().projectName} cannot request permissions until you turn it back on, in Permissions.`,
+      );
+    } catch (error) {
+      toast("error", "Could not turn requests off", describeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
    * The two request kinds that are about a path on the operator's machine.
    *
    * Network and tool requests reuse the same dialog but have no path to choose, so
@@ -176,6 +199,20 @@ export function PermissionDialog(props: { request: PermissionRequestView; queued
             <Show when={props.queued > 1}>
               {props.queued - 1} more request{props.queued - 1 === 1 ? "" : "s"} waiting.
             </Show>
+            {/* Deliberately quiet, and in the footer's spare space: it is the right answer
+                to a flood and the wrong answer to the one request you are about to grant. */}
+            <button
+              class="btn btn-ghost btn-sm"
+              style={{ "margin-left": props.queued > 1 ? "0.6rem" : "0" }}
+              disabled={busy()}
+              title={
+                `Stop ${request().projectName} from asking for permissions at all. ` +
+                "Anything already waiting is refused, and this request is refused too."
+              }
+              onClick={() => void stopAsking()}
+            >
+              Stop asking
+            </button>
           </span>
           <button class="btn btn-danger" disabled={busy()} onClick={() => void decide("deny")}>
             Deny

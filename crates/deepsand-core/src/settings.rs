@@ -202,7 +202,9 @@ pub fn build_agents_md(
                  cloud metadata addresses (169.254.169.254) are refused by an address filter."
                     .to_string(),
             NetworkPolicy::Allowlisted { allow } => format!(
-                "All your traffic goes through an allowlisting proxy. You can only reach: {}.",
+                "Your egress is allowlisted: a hostname you are allowed goes through a filtering \
+                 proxy, and an address the operator named (such as `192.168.1.50:5432`) is reached \
+                 directly. You can only reach: {}.",
                 if allow.is_empty() { "nothing yet".to_string() } else { allow.join(", ") }
             ),
             NetworkPolicy::Full =>
@@ -211,6 +213,18 @@ pub fn build_agents_md(
                     .to_string(),
         }
     ));
+
+    // Said before the list of request tools rather than after it: a sandbox that cannot ask
+    // should not be told how to, or it spends the turn composing a request that is refused
+    // on arrival.
+    if !project.requests_enabled {
+        out.push_str(
+            "\n## Permission requests are off\n\n\
+             The operator has turned permission requests off for this project. None of the\n\
+             `deepsand_request_*` tools will reach them, and nothing you try will change that.\n\
+             Work with what you already have, and say plainly what you could not do.\n",
+        );
+    }
 
     out.push_str(
         "\n## When you need something you cannot reach\n\n\
@@ -262,6 +276,15 @@ pub fn build_sandbox_snapshot(
         workspace_mount: Project::workspace_mount().to_string(),
         network_mode: network_mode.mode_str().to_string(),
         egress_allowlist: network_mode.allowlist().to_vec(),
+        requests_enabled: project.requests_enabled,
+        // Only meaningful when the flag is off, and empty when it is on: the bridge
+        // keys off the flag and relays this text, so an empty string here is the
+        // "nothing to say" case rather than a second, weaker signal.
+        requests_disabled_message: if project.requests_enabled {
+            String::new()
+        } else {
+            crate::model::REQUESTS_DISABLED_MESSAGE.to_string()
+        },
         tools: crate::tools::resolve(project.tools.as_deref())
             .iter()
             .map(|tool| tool.id.to_string())

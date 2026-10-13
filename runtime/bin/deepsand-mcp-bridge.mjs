@@ -310,13 +310,32 @@ const issuedRequestIds = new Set();
 
 /**
  * Submit a request and wait up to WAIT_MS for a human answer.
- * Returns { status: "answered", response } or { status: "pending", id }.
+ * Returns { status: "answered", response }, { status: "pending", id }, or
+ * { status: "refused", message } when the operator has turned asking off.
  *
  * The file is not authenticated and cannot be: `pid` is a hint for the operator's benefit,
  * not a credential, and the host treats the whole file as hostile input. The control is
  * that a human reads the request before anything is granted.
  */
 async function submitAndWait(kind, args) {
+  // The operator can turn asking off entirely. The snapshot is re-read for every request
+  // rather than cached, because the setting can change while this process is alive and
+  // the point of checking here is that the model learns immediately: without this, every
+  // request would sit out its whole budget waiting for a decision that is not coming.
+  //
+  // The host refuses the same requests on the way in, which is the control. This is the
+  // courtesy -- and note that it is only a courtesy, because anything in this sandbox can
+  // write a request file directly.
+  const state = await readState();
+  if (state.sandbox && state.sandbox.requests_enabled === false) {
+    return {
+      status: "refused",
+      message:
+        state.sandbox.requests_disabled_message ||
+        "The operator has turned off permission requests for this project.",
+    };
+  }
+
   const id = newRequestId();
   issuedRequestIds.add(id);
   const request = {
@@ -368,8 +387,18 @@ async function sandboxInfoText() {
     lines.push(
       `tools       : ${tools.length > 0 ? tools.join(", ") : "none (the image was built without any)"}`,
     );
+    // Said here as well as at submit time, because this is what the model reads first:
+    // learning it before composing a request is better than learning it afterwards.
+    if (s.requests_enabled === false) {
+      lines.push(`requests    : OFF. The operator has turned off permission requests for this`);
+      lines.push(`              project, so none will reach them. Do not ask; continue with what`);
+      lines.push(`              you have, and say what you could not do.`);
+    }
     lines.push(`network     : ${s.network_mode ?? "unknown"}`);
-    if (s.network_mode === "restricted") {
+    // `restricted` is the old name for the same mode; the host writes `allowlisted` now
+    // but an older snapshot may still say the former, and getting this branch wrong
+    // tells the model it has unrestricted egress when it does not.
+    if (s.network_mode === "allowlisted" || s.network_mode === "restricted") {
       lines.push(`              the model API and the hosts below are reachable over IP; everything else is`);
       lines.push(`              refused, including the local network. The filter is an address filter:`);
       lines.push(`              it governs IPv4 and IPv6 destinations, and nothing more.`);
@@ -474,6 +503,27 @@ function normaliseStrings(value) {
   return list.map((item) => String(item ?? "").trim()).filter(Boolean);
 }
 
+/**
+ * The two outcomes that are not an answer, rendered: a refusal because the operator has
+ * turned asking off, and a request that is still waiting on one.
+ *
+ * Returns a tool result for either, or `null` when there is a real decision to render, so
+ * each handler reads as "check this, then render the answer".
+ *
+ * A refusal is *not* marked as an error, for the same reason a denial is not: the tool
+ * worked, the answer is just no. Marking it as an error would invite a retry, and the
+ * whole point is that the operator has asked for no more questions.
+ */
+function earlyOutcome(outcome, kind, verb) {
+  if (outcome.status === "refused") {
+    return textResult(outcome.message);
+  }
+  if (outcome.status === "pending") {
+    return renderPending(kind, outcome.id, verb);
+  }
+  return null;
+}
+
 function renderPending(kind, id, verb) {
   return textResult(
     [
@@ -510,7 +560,8 @@ async function callTool(name, args) {
       }
       const access = args?.access === "write" ? "write" : "read";
       const outcome = await submitAndWait("directory_access", { host_path: hostPath, access, purpose });
-      if (outcome.status === "pending") return renderPending("directory access", outcome.id, "the decision");
+      const early = earlyOutcome(outcome, "directory access", "the decision");
+      if (early) return early;
       return renderDecision("directory", outcome.response);
     }
 
@@ -522,7 +573,8 @@ async function callTool(name, args) {
       const kindArg = args?.kind === "file" ? "file" : "directory";
       const access = args?.access === "write" ? "write" : "read";
       const outcome = await submitAndWait("locate_resource", { description, kind: kindArg, access, purpose });
-      if (outcome.status === "pending") return renderPending("resource", outcome.id, "the result");
+      const early = earlyOutcome(outcome, "resource", "the result");
+      if (early) return early;
       return renderDecision("resource", outcome.response);
     }
 
@@ -544,7 +596,8 @@ async function callTool(name, args) {
       }
       const command = String(args?.command ?? "").trim();
       const outcome = await submitAndWait("network_access", { patterns, command, purpose });
-      if (outcome.status === "pending") return renderPending("network access", outcome.id, "the decision");
+      const early = earlyOutcome(outcome, "network access", "the decision");
+      if (early) return early;
       return renderDecision("network", outcome.response);
     }
 
@@ -554,7 +607,8 @@ async function callTool(name, args) {
       const tools = normaliseStrings(args?.tools);
       if (tools.length === 0) return textResult("tools must name at least one tool id.", true);
       const outcome = await submitAndWait("tool_install", { tools, purpose });
-      if (outcome.status === "pending") return renderPending("tool", outcome.id, "the decision");
+      const early = earlyOutcome(outcome, "tool", "the decision");
+      if (early) return early;
       return renderDecision("tool", outcome.response);
     }
 

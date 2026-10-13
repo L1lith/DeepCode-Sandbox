@@ -146,6 +146,11 @@ depth.
   with a note saying where it already is. It is a refusal rather than an automatic
   approval, because an approval is yours to give; anything ambiguous still reaches
   you.
+* **Turning the questions off.** One checkbox in the Permissions tab stops a project
+  being asked anything, and the request dialog has a quiet "Stop asking" button that
+  sets it. Off means off: every request already waiting is refused with the reason,
+  the sandbox is told not to ask, and a request written straight into its spool is
+  refused on arrival rather than shown to you. On is the default.
 * **Kernel hardening.** A hardened seccomp profile is **on by default** and
   attached with `--security-opt=seccomp=`. Its 16 rules deny 69 syscalls, among them
   `mount`, `unshare`, `setns`, `pivot_root`, `chroot`, `bpf`, `ptrace`, `keyctl`,
@@ -193,8 +198,8 @@ desktop app and the headless CLI cannot behave differently.
 
 ```bash
 npm run app:dev              # app with hot reload
-npm run core:test            # 290 Rust tests: paths, policy, broker, proxy, credentials, seccomp
-npm run test:bridge          # 48 checks: the permission protocol end to end
+npm run core:test            # 296 Rust tests: paths, policy, broker, proxy, credentials, seccomp
+npm run test:bridge          # 55 checks: the permission protocol end to end
 npm test                     # both suites
 npm run core:check           # cargo check --workspace
 npm run build                # typecheck + bundle the frontend

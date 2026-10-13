@@ -373,6 +373,19 @@ pub struct Project {
     /// than being indistinguishable from never having chosen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
+    /// Whether the sandbox may ask for anything at all.
+    ///
+    /// On by default, and that default is the point: a sandbox that cannot ask is a
+    /// sandbox that stops at the first thing it does not have, so turning this off is
+    /// a deliberate choice the operator makes — most often from a request dialog that
+    /// has become noise, which is why the dialog can set it too.
+    ///
+    /// This is enforced on the host as well as advertised to the bridge: the spool is
+    /// writable by the sandbox, so a bridge that honours the flag is a courtesy to the
+    /// model, not the control. See `docs/SECURITY.md`, "The request spool is not
+    /// authenticated".
+    #[serde(default = "yes")]
+    pub requests_enabled: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
 }
@@ -645,6 +658,20 @@ pub struct SandboxSnapshot {
     pub workspace_mount: String,
     pub network_mode: String,
     pub egress_allowlist: Vec<String>,
+    /// Whether this sandbox may ask for permissions at all.
+    ///
+    /// The bridge reads this and refuses to submit when it is false, so the model finds
+    /// out immediately instead of waiting out its whole budget for an answer that will
+    /// never come. The host enforces the same flag on the way in, because the spool is
+    /// writable by the sandbox and a bridge-side check is therefore a courtesy rather
+    /// than a control.
+    #[serde(default = "yes")]
+    pub requests_enabled: bool,
+    /// Exactly what to tell the model when `requests_enabled` is false. Carried here so
+    /// the bridge relays the host's words rather than keeping a second copy that can
+    /// drift from the ones used when the host refuses an incoming request.
+    #[serde(default)]
+    pub requests_disabled_message: String,
     /// Tools this sandbox's image was built with, so the agent can check what it has
     /// instead of guessing or trying to install something itself.
     #[serde(default)]
@@ -861,6 +888,18 @@ pub struct GrantSpec {
     pub access: Access,
 }
 
+/// What the model is told when the operator has turned requests off.
+///
+/// One string with two readers: the host uses it when it refuses an incoming request,
+/// and it travels in the snapshot so the bridge can relay the same words when it
+/// declines to submit one. A model given two explanations for one setting will go and
+/// try the second one.
+pub const REQUESTS_DISABLED_MESSAGE: &str =
+    "The operator has turned off permission requests for this project, so this request \
+     cannot be made and will not reach them. Do not ask again and do not look for \
+     another way in: continue with what you have, and say plainly what you could not \
+     do. Requests can be turned back on in the project's Permissions tab.";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionResponse {
     pub v: u32,
@@ -1066,5 +1105,143 @@ mod network_policy_tests {
             assert!(!mode.honours_allowlist(), "{mode:?} must not claim to honour a list");
             assert!(mode.allowlist().is_empty());
         }
+    }
+}
+
+/// The switch that lets the operator stop being asked.
+#[cfg(test)]
+mod request_gate_tests {
+    use super::*;
+
+    /// The default is *on*, and that has to survive the field not existing: a project
+    /// stored before this switch was added must not silently become one that cannot ask,
+    /// or the sandbox stops at the first missing thing with no way to say why.
+    #[test]
+    fn a_project_that_predates_the_switch_can_still_ask() {
+        let raw = r#"{"id":"p1","name":"n","slug":"s","root_dir":"/w","created_at_ms":0}"#;
+        let project: Project = serde_json::from_str(raw).unwrap();
+        assert!(project.requests_enabled);
+        // And a snapshot that predates it is likewise permissive, because the bridge
+        // reads this field to decide whether to submit at all.
+        let snapshot: SandboxSnapshot = serde_json::from_str(
+            r#"{"project_id":"p1","project_name":"n","container_name":"c","image":"i",
+                "workspace_mount":"/workspace","network_mode":"allowlisted",
+                "egress_allowlist":[],"started_at_ms":0,"grants":[]}"#,
+        )
+        .unwrap();
+        assert!(snapshot.requests_enabled);
+        assert!(snapshot.requests_disabled_message.is_empty());
+    }
+
+    /// Off is off, and the explanation travels with the flag: the bridge relays this text
+    /// rather than keeping its own copy, so there is one sentence for the model to hear
+    /// whichever way it finds out.
+    #[test]
+    fn the_message_travels_with_the_flag() {
+        let mut project: Project = serde_json::from_str(
+            r#"{"id":"p1","name":"n","slug":"s","root_dir":"/w","created_at_ms":0,
+                "requests_enabled":false}"#,
+        )
+        .unwrap();
+        let snapshot = crate::settings::build_sandbox_snapshot(
+            &project,
+            &[],
+            &project.network,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(!snapshot.requests_enabled);
+        assert_eq!(snapshot.requests_disabled_message, REQUESTS_DISABLED_MESSAGE);
+        // The message has to say the two things that stop the model trying again.
+        assert!(snapshot.requests_disabled_message.contains("Do not ask again"));
+        assert!(snapshot.requests_disabled_message.contains("Permissions tab"));
+
+        project.requests_enabled = true;
+        let snapshot = crate::settings::build_sandbox_snapshot(
+            &project,
+            &[],
+            &project.network,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(snapshot.requests_enabled);
+        assert!(
+            snapshot.requests_disabled_message.is_empty(),
+            "an enabled sandbox has nothing to be told about a disabled one"
+        );
+    }
+}
+
+/// What the sandbox is *told* about the switch, in the file it reads first. The bridge
+/// and the host enforce it; this is the part that stops the model wasting a turn.
+#[cfg(test)]
+mod agents_md_gate_tests {
+    use super::*;
+    use crate::credentials::ResolvedCredentials;
+    use std::collections::BTreeMap;
+
+    fn creds() -> ResolvedCredentials {
+        ResolvedCredentials {
+            model: "test-model".into(),
+            base_url: "https://api.example.com".into(),
+            api_key: Some("k".into()),
+            thinking_enabled: true,
+            reasoning_effort: "high".into(),
+            extra_env: BTreeMap::new(),
+            provenance: "test".into(),
+            warnings: Vec::new(),
+        }
+    }
+
+    fn project(requests_enabled: bool) -> Project {
+        serde_json::from_str(&format!(
+            r#"{{"id":"p1","name":"n","slug":"s","root_dir":"/w","created_at_ms":0,
+                 "requests_enabled":{requests_enabled}}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_sandbox_is_told_when_it_cannot_ask() {
+        let off = crate::settings::build_agents_md(
+            &project(false),
+            &[],
+            &NetworkPolicy::Allowlisted { allow: vec![] },
+            &creds(),
+        );
+        assert!(
+            off.contains("Permission requests are off"),
+            "the sandbox must be told before it composes a request: {off}"
+        );
+
+        let on = crate::settings::build_agents_md(
+            &project(true),
+            &[],
+            &NetworkPolicy::Allowlisted { allow: vec![] },
+            &creds(),
+        );
+        assert!(
+            !on.contains("Permission requests are off"),
+            "a sandbox that can ask must not be told otherwise: {on}"
+        );
+        assert!(on.contains("deepsand_request_directory_access"));
+    }
+
+    /// The allowlist has two enforcement paths, and the description the sandbox reads has
+    /// to say so: claiming every byte goes through the proxy is untrue now that an address
+    /// entry is reached directly.
+    #[test]
+    fn the_allowlisted_description_names_both_paths() {
+        let md = crate::settings::build_agents_md(
+            &project(true),
+            &[],
+            &NetworkPolicy::Allowlisted { allow: vec!["registry.npmjs.org".into()] },
+            &creds(),
+        );
+        assert!(md.contains("proxy"), "{md}");
+        assert!(
+            md.contains("reached directly"),
+            "an address entry is not proxied, and the sandbox must not be told it is: {md}"
+        );
     }
 }
