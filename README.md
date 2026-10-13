@@ -213,7 +213,7 @@ desktop app and the headless CLI cannot behave differently.
 
 ```bash
 npm run app:dev              # app with hot reload
-npm run core:test            # 333 Rust tests: paths, policy, broker, proxy, credentials, seccomp, durability
+npm run core:test            # 334 Rust tests: paths, policy, broker, proxy, credentials, seccomp, durability
 npm run test:bridge          # 55 checks: the permission protocol end to end
 npm test                     # both suites
 npm run core:check           # cargo check --workspace
@@ -252,6 +252,15 @@ about updater artifacts (see [Install](#install)).
 The interesting tests are the ones that assert containment rather than behaviour — `a_plan_never_mounts_a_container_runtime_socket`, `the_reply_channel_can_never_be_written_by_the_sandbox`, `symlinks_are_resolved_before_guards_run`. They are listed in [docs/SECURITY.md](docs/SECURITY.md).
 
 Contributors and coding agents should read [AGENTS.md](AGENTS.md) first: it lists the invariants that are load-bearing, the platform quirks that will otherwise cost you an afternoon, and what counts as done.
+
+## When something goes wrong
+
+Everything the app says about itself is written to `deepsand.log` in its data directory
+(`%LOCALAPPDATA%\Deepsand\data` on Windows; the Activity tab shows the path and copies it on
+request). That includes every error the window showed in a corner box, every command that
+failed, and any panic. A Windows release build has no console, so this file is the only place
+those are readable after the fact — and the boxes themselves can be copied with the button in
+the corner, or selected directly.
 
 ## Releases and updates
 

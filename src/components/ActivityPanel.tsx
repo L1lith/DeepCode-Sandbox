@@ -24,6 +24,10 @@ export function ActivityPanel() {
   const [plan, setPlan] = createSignal<string | null>(null);
   const [planWarnings, setPlanWarnings] = createSignal<string[]>([]);
   const [busy, setBusy] = createSignal(false);
+  // Where the app writes what it says about itself, including every error the window showed.
+  // Asked for rather than assembled here, so the window does not have its own idea of where
+  // that file is.
+  const [logPath, setLogPath] = createSignal<string | null>(null);
 
   async function showPlan() {
     const current = project();
@@ -214,6 +218,26 @@ export function ActivityPanel() {
               <td class="path">{store.info?.dataDir ?? "?"}</td>
             </tr>
             <tr>
+              <th>Error log</th>
+              <td class="path">
+                {logPath() ?? "…"}
+                <Show when={logPath()}>
+                  <button
+                    class="btn btn-ghost btn-sm"
+                    style={{ "margin-left": "0.4rem" }}
+                    title="Copy the log's path"
+                    onClick={() => void copyLogPath()}
+                  >
+                    Copy path
+                  </button>
+                </Show>
+                <div class="small" style={{ "margin-top": "0.2rem" }}>
+                  Every error the window shows is written here as well, so it can be read and
+                  copied after the box is gone.
+                </div>
+              </td>
+            </tr>
+            <tr>
               <th>Docker</th>
               <td>
                 <Show
@@ -294,6 +318,28 @@ export function ActivityPanel() {
       toast("error", "Could not update the allowlist", describeError(error));
     }
   }
+
+  async function loadLogPath() {
+    try {
+      setLogPath(await api.logFilePath());
+    } catch {
+      /* the row says so, rather than showing a path that may not be right */
+    }
+  }
+
+  async function copyLogPath() {
+    const path = logPath();
+    if (!path) return;
+    try {
+      await navigator.clipboard.writeText(path);
+      toast("ok", "Copied", "The log's path is on the clipboard.");
+    } catch {
+      toast("warn", "Could not copy", path);
+    }
+  }
+
+  // Asked for once, when the panel is created: the answer cannot change while it is open.
+  void loadLogPath();
 
   async function reveal() {
     try {

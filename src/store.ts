@@ -83,6 +83,11 @@ let toastSeq = 0;
 export function toast(kind: Toast["kind"], title: string, body?: string) {
   const id = ++toastSeq;
   setStore("toasts", (list) => [...list, { id, kind, title, body }]);
+  if (kind === "error" || kind === "warn") {
+    // Written down as well as shown. The box can be dismissed by a stray click and dies with
+    // the window, which is how a message worth keeping went missing.
+    void api.logUiEvent(kind, body ? `${title}\n${body}` : title);
+  }
   if (kind !== "error") {
     window.setTimeout(() => dismissToast(id), 6000);
   }
@@ -121,14 +126,20 @@ export async function bootstrap() {
     // slowest one.
     const [info, notice] = await Promise.all([api.appInfo(), api.startupError()]);
     setStore({ info, settings: info.settings });
-    if (notice) setStore("startupNotice", notice);
+    if (notice) {
+      setStore("startupNotice", notice);
+      void api.logUiEvent("warn", `startup notice: ${notice}`);
+    }
     await Promise.all([refreshProjects(), refreshRequests()]);
     setStore("ready", true);
     // Then Docker. Not awaited: the app is usable now, and a probe is three CLI calls, so
     // the status strip fills in when it answers instead of holding up the window.
     void refreshDockerStatus();
   } catch (error) {
-    setStore({ fatal: describeError(error), ready: true });
+    const text = describeError(error);
+    setStore({ fatal: text, ready: true });
+    // The window could not start. There is nowhere else for this to be read.
+    void api.logUiEvent("error", `the window could not start: ${text}`);
   }
 }
 

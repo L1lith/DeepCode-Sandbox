@@ -3142,6 +3142,43 @@ pub fn reveal_data_dir_impl(state: &AppState) -> CmdResult<String> {
 }
 
 #[tauri::command]
+pub fn log_ui_event(level: String, message: String) -> CmdResult<()> {
+    log_ui_event_impl(&level, &message)
+}
+
+/// Write something the window showed the operator into the app's log.
+///
+/// Error boxes are the app's own account of what went wrong, and they existed only as a toast
+/// in the webview: dismissed by a click, gone when the window closed, and impossible to paste
+/// into a bug report. This is the one place they become durable, and it takes the text the
+/// operator actually saw rather than a re-derivation of it.
+///
+/// The message is filtered the same way build output is: a log whose purpose is to be read
+/// should not be filled by a read that did not happen.
+pub fn log_ui_event_impl(level: &str, message: &str) -> CmdResult<()> {
+    let message = deepsand_core::docker::sanitize_output_line(message).unwrap_or_default();
+    if message.trim().is_empty() {
+        return Ok(());
+    }
+    match level {
+        "error" => tracing::error!("[window] {message}"),
+        "warn" => tracing::warn!("[window] {message}"),
+        _ => tracing::info!("[window] {message}"),
+    }
+    Ok(())
+}
+
+/// Where the app writes what it says about itself, so the window can offer it.
+#[tauri::command]
+pub fn log_file_path(state: State<'_, AppState>) -> CmdResult<String> {
+    log_file_path_impl(&state)
+}
+
+pub fn log_file_path_impl(state: &AppState) -> CmdResult<String> {
+    Ok(store(&state).data_dir().join("deepsand.log").display().to_string())
+}
+
+#[tauri::command]
 pub fn startup_error(state: State<'_, AppState>) -> CmdResult<Option<String>> {
     startup_error_impl(&state)
 }

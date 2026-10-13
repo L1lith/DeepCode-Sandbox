@@ -220,6 +220,17 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   tested: beating -> hand the launch over; stopped beating with a window -> leave it alone
   (the operator can see it); stopped beating with no window -> clear it and start. A launch
   must never be silently swallowed by a process that cannot show anything.
+* **An error the operator can see is written down.** Every box the window raises with
+  `toast("error" | "warn", ...)` goes to the log, every failed command is logged with its own
+  name by `api.ts`, and so are the startup notice and the screen for a window that could not
+  start. Three separate paths on purpose: the box carries the text the operator read, the
+  command line says which call failed (including the ones the window swallows), and the fatal
+  path has no box to carry anything. If you add a surface that shows an error, put it through
+  `toast` or log it yourself -- the log is the only place a message survives the window.
+* **An error box is not dismissed by a click.** A click is how a person starts selecting the
+  text, and being gone by then is why messages could not be copied. Errors therefore stay
+  until they are closed, show their body whole, and have a Copy button; the others still
+  disappear on a click, which is what keeps them unobtrusive.
 * **Anything the app says about itself goes in a file.** A Windows release build has no
   stdout, so `tracing` output went nowhere: a launch that died silently stayed silent, with
   nothing to read on the machine where it happened. `init_logging` tees to

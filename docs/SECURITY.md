@@ -351,6 +351,11 @@ and container names, paths, Docker availability, errors, and the panic that ende
 contains no API keys, tokens or secret values -- the traced messages carry identifiers and
 error text, not credentials -- and it is the file to send when something fails silently.
 
+Every error the window shows is written there as well, along with every command that failed
+(the command's name and the error it returned, which includes the failures the window
+swallows rather than shows). The box carries the text the operator read; the log is where it
+survives being clicked, closed, or the window going away.
+
 ## Verifying the claims
 
 Everything above is asserted by tests you can run:

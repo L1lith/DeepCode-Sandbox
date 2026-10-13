@@ -58,10 +58,12 @@ fn init_logging(data_dir: &std::path::Path) {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("deepsand=info,warn")),
         )
         .with_target(false);
+    // `try_init`, not `init`: a second call must not panic. Startup is the wrong place to
+    // find out that something already installed a subscriber.
     if let Some(writer) = writer {
-        subscriber.with_writer(writer).init();
+        let _ = subscriber.with_writer(writer).try_init();
     } else {
-        subscriber.init();
+        let _ = subscriber.try_init();
     }
 
     // A panic in a command or a worker thread used to leave no trace anywhere.
@@ -101,6 +103,44 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TeeWriter {
 
     fn make_writer(&'a self) -> Self::Writer {
         self.clone()
+    }
+}
+
+#[cfg(test)]
+mod logging_tests {
+    use super::*;
+
+    /// The claim this exists for: an error the operator saw in the window is in the log file
+    /// afterwards, so it can be read and copied when the box is long gone.
+    ///
+    /// One test rather than two because it installs a subscriber, and a process has one: the
+    /// second test to run would have written into the first test's file and failed for a
+    /// reason that has nothing to do with what it is testing.
+    #[test]
+    fn what_the_window_showed_is_written_to_the_log_file() {
+        let dir = std::env::temp_dir().join(format!("deepsand-log-{}", deepsand_core::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        init_logging(&dir);
+        commands::log_ui_event_impl("error", "Could not build the plan\nthe daemon said no")
+            .expect("logging a message is not an error itself");
+        commands::log_ui_event_impl("warn", "the allowlist entry was ignored").unwrap();
+        // A message that is not text is not written at all, which is the rule the build log
+        // taught the hard way: NULs are not content.
+        commands::log_ui_event_impl("error", &"\0".repeat(4096)).unwrap();
+
+        let written = std::fs::read_to_string(dir.join("deepsand.log")).unwrap_or_default();
+        assert!(
+            written.contains("[window] Could not build the plan"),
+            "the box's text has to be in the log, got: {written}"
+        );
+        assert!(
+            written.contains("the daemon said no"),
+            "and all of it, not just the first line"
+        );
+        assert!(written.contains("[window] the allowlist entry was ignored"));
+        assert!(!written.contains('\0'), "NULs are not content");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -310,6 +350,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
             commands::docker_status,
+            commands::log_ui_event,
+            commands::log_file_path,
             commands::list_projects,
             commands::get_project,
             commands::create_project,

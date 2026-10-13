@@ -55,6 +55,23 @@ export const appInfo = () => call<AppInfo>("app_info");
 export const dockerStatus = () => call<DockerStatus>("docker_status");
 export const startupError = () => call<string | null>("startup_error");
 export const revealDataDir = () => call<string>("reveal_data_dir");
+
+/**
+ * Record something the window showed the operator.
+ *
+ * Deliberately never throws: this is called while reporting a failure, and a failure to
+ * report must not replace it.
+ */
+export async function logUiEvent(level: "error" | "warn" | "info", message: string) {
+  try {
+    await call<void>("log_ui_event", { level, message });
+  } catch {
+    /* the message is still on screen; the log is the fallback, not the other way round */
+  }
+}
+
+/** Where the app writes what it says about itself. */
+export const logFilePath = () => call<string>("log_file_path");
 export const cleanupOrphans = () => call<string[]>("cleanup_orphans");
 
 export const getSettings = () => call<AppSettings>("get_settings");
@@ -335,10 +352,37 @@ export function clearRemoteToken(): void {
   window.localStorage.removeItem(TOKEN_KEY);
 }
 
+/**
+ * Write a command failure into the app's log.
+ *
+ * Every error the window shows comes from one of these, and until now none of them left a
+ * trace anywhere: the box is dismissed by a click, the webview's memory goes with the window,
+ * and a command whose failure the window swallows (a status refresh, a poll) said nothing at
+ * all. One line each, in the same file as everything else Deepsand says about itself.
+ *
+ * `log_ui_event` is excluded, because a logging call that failed would log its own failure.
+ * A failure to log is never allowed to become a failure of the thing being logged.
+ */
+function reportCommandFailure(command: string, error: unknown) {
+  if (REMOTE || command === "log_ui_event") return;
+  const detail = error instanceof Error ? error.message : String(error);
+  void invoke("log_ui_event", {
+    level: "error",
+    message: `command ${command} failed: ${detail}`,
+  }).catch(() => {
+    /* nothing to do: the only place to say so is the place that just failed */
+  });
+}
+
 /** Invoke a command over whichever transport is available. */
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!REMOTE) {
-    return invoke<T>(command, args);
+    try {
+      return await invoke<T>(command, args);
+    } catch (error) {
+      reportCommandFailure(command, error);
+      throw error;
+    }
   }
 
   const token = remoteToken();
@@ -361,7 +405,9 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
     throw new Error(text || `HTTP ${response.status}`);
   }
   if (!response.ok || payload.ok === false) {
-    throw new Error(payload.error ?? `HTTP ${response.status}`);
+    const error = new Error(payload.error ?? `HTTP ${response.status}`);
+    if (!REMOTE) reportCommandFailure(command, error);
+    throw error;
   }
   return payload.value as T;
 }

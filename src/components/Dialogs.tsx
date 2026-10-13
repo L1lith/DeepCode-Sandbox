@@ -1543,6 +1543,25 @@ export function SettingsDialog(props: { settings: AppSettings; onClose: () => vo
 /* Toasts                                                                     */
 /* ------------------------------------------------------------------------- */
 
+/**
+ * Copy a box's text, in full.
+ *
+ * The clipboard is the point: the operator's next move after reading an error is to paste it
+ * somewhere, and the box used to be gone the instant it was clicked -- which is the first
+ * thing anyone does when they mean to select the text.
+ */
+async function copyToast(entry: { title: string; body?: string }) {
+  const text = entry.body ? `${entry.title}\n\n${entry.body}` : entry.title;
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("ok", "Copied", "The message is on the clipboard.");
+  } catch {
+    // No clipboard permission is not a reason to lose the message: it is still selectable,
+    // and it is in the log.
+    toast("warn", "Could not copy", "Select the text instead; it is in the log too.");
+  }
+}
+
 export function Toasts() {
   return (
     <div
@@ -1567,13 +1586,66 @@ export function Toasts() {
                   ? "callout-warn"
                   : "callout-info"
             }`}
-            style={{ "box-shadow": "0 10px 30px #00000090", background: "var(--bg-raised)" }}
-            onClick={() => dismissToast(entry.id)}
+            style={{
+              "box-shadow": "0 10px 30px #00000090",
+              background: "var(--bg-raised)",
+              // An error is not dismissed by a click: a click is how you start selecting the
+              // text, and losing the message that way is the complaint this answers. The
+              // others still go away when clicked, which is what makes them unobtrusive.
+              cursor: entry.kind === "error" ? "text" : "pointer",
+            }}
+            onClick={
+              entry.kind === "error" ? undefined : () => dismissToast(entry.id)
+            }
           >
-            <strong>{entry.title}</strong>
+            <div
+              class="row-inline"
+              style={{
+                "justify-content": "space-between",
+                "align-items": "flex-start",
+                gap: "0.5rem",
+              }}
+            >
+              <strong>{entry.title}</strong>
+              <span class="row-inline" style={{ gap: "0.25rem", "flex-shrink": "0" }}>
+                <button
+                  class="btn btn-ghost btn-sm"
+                  title="Copy this message"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void copyToast(entry);
+                  }}
+                >
+                  Copy
+                </button>
+                <Show when={entry.kind === "error"}>
+                  <button
+                    class="btn btn-ghost btn-sm"
+                    title="Dismiss"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      dismissToast(entry.id);
+                    }}
+                  >
+                    Close
+                  </button>
+                </Show>
+              </span>
+            </div>
             <Show when={entry.body}>
-              <div class="small" style={{ "margin-top": "0.2rem" }}>
-                {shortPath(entry.body ?? "", 220)}
+              <div
+                class="small"
+                style={{
+                  "margin-top": "0.25rem",
+                  // Shown whole, and selectable: an error truncated to fit a corner is an
+                  // error that cannot be pasted into a bug report.
+                  "white-space": "pre-wrap",
+                  "user-select": "text",
+                  "max-height": "12rem",
+                  overflow: "auto",
+                }}
+              >
+                {entry.kind === "error" ? entry.body : shortPath(entry.body ?? "", 220)}
               </div>
             </Show>
           </div>
