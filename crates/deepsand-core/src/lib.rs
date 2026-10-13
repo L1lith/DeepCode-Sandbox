@@ -33,6 +33,7 @@ pub mod session;
 pub mod secrets;
 pub mod settings;
 pub mod store;
+pub mod toolcache;
 pub mod tools;
 
 pub use error::{Result, SandboxError};

@@ -240,6 +240,19 @@ impl Docker {
     /// selection reaches the image: the catalogue turns a selection into package
     /// lists and the Dockerfile installs them, so the two cannot disagree about what
     /// a project asked for.
+    /// Whether the daemon's platform is `linux/amd64` or the like.
+    ///
+    /// The tool cache is keyed by it: a binary built for one will not run on the other.
+    pub fn server_platform(&self) -> Option<String> {
+        let out = self.try_run(&self.fmt(&["version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"]))?;
+        let out = out.trim().to_string();
+        if out.is_empty() || out.starts_with('/') {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
     pub fn build(
         &self,
         context: &Path,
