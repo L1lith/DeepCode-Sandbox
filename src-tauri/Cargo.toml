@@ -31,6 +31,12 @@ tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-opener = "2"
 
+# Self-updates. Desktop only, and gated by target rather than by feature, because a
+# build that cannot update itself is not a configuration anybody wants to select --
+# it would just be a build that silently never updates.
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-updater = "2"
+
 serde.workspace = true
 serde_json.workspace = true
 base64 = "0.22"

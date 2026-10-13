@@ -238,6 +238,32 @@ export interface ProjectView {
   pendingRequests: number;
 }
 
+/** A newer version than the one this build reports. */
+export interface UpdateInfo {
+  version: string;
+  notes: string;
+  /** RFC 3339, when the release announced a date. */
+  date: string | null;
+}
+
+/**
+ * The answer to "is there a newer Deepsand?".
+ *
+ * Three-valued on purpose: `update: null` with `error: null` means up to date, and a set
+ * `error` means the question could not be asked. Reporting a dead network as "up to
+ * date" would be a claim the operator has no way to check.
+ */
+export interface UpdateCheck {
+  currentVersion: string;
+  update: UpdateInfo | null;
+  error: string | null;
+}
+
+/** Download progress, as the Rust side reports it. */
+export type UpdateProgress =
+  | { phase: "downloading"; downloaded: number; total: number | null }
+  | { phase: "installing" };
+
 export interface DockerStatus {
   available: boolean;
   client_version: string;

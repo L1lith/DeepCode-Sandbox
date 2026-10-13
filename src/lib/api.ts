@@ -30,6 +30,8 @@ import type {
   ToolCatalogView,
   EffortView,
   SecretListView,
+  UpdateCheck,
+  UpdateProgress,
 } from "./types";
 
 export const EVENTS = {
@@ -44,6 +46,7 @@ export const EVENTS = {
   buildProgress: "build://progress",
   stateChanged: "state://changed",
   egressBlocked: "egress://blocked",
+  updateProgress: "update://progress",
 } as const;
 
 /* --- application --------------------------------------------------------- */
@@ -167,6 +170,23 @@ export const pathCheck = (path: string) => call<PathCheck>("path_check", { path 
  */
 export const setRequestsEnabled = (projectId: string, enabled: boolean) =>
   call<ProjectView>("set_requests_enabled", { projectId, enabled });
+
+/* --- updates ------------------------------------------------------------- */
+
+/**
+ * Ask whether a newer Deepsand exists.
+ *
+ * The check happens in Rust rather than here: the updater plugin is deliberately not
+ * exposed to the webview, because installing an update replaces the binary.
+ */
+export const checkForUpdates = () => call<UpdateCheck>("check_for_updates");
+
+/** Download and install the update that `checkForUpdates` found, then restart. */
+export const installUpdate = () => call<void>("install_update");
+
+export function onUpdateProgress(handler: (payload: UpdateProgress) => void): Promise<UnlistenFn> {
+  return subscribe<UpdateProgress>(EVENTS.updateProgress, (event) => handler(event.payload));
+}
 
 /* --- sessions ------------------------------------------------------------ */
 

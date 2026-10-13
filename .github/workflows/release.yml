@@ -1,0 +1,123 @@
+# Cross-platform release builds, and the update manifest the app polls.
+#
+# Adapted from the Tauri guide at https://tauri.app/distribute/pipelines/github/ .
+# Two things in here are Deepsand-specific and easy to get wrong:
+#
+#   * The Rust cache directory is `./target`, not `src-tauri/target`, because this
+#     repository is a Cargo workspace rooted at the repository root. The guide's default
+#     is for a project that is *not* a workspace.
+#   * The build fails without the updater signing key. That is deliberate: an unsigned
+#     release would be downloaded by clients that cannot verify it, and the updater
+#     refuses unsigned artifacts outright, so a release without the key is a release
+#     nobody can install an update from. The guard step below says so in one line
+#     instead of leaving a stack of bundler output to read.
+#
+# Publishing is a two-step act: this workflow uploads a *draft* release, and the update
+# manifest only goes live when the draft is published. Until then, `latest.json` is not
+# served and installed copies see no update -- which is the behaviour you want while
+# checking the artifact list over.
+
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - release
+
+jobs:
+  publish-tauri:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ARM macs (M1 and above).
+          - platform: macos-latest
+            args: "--target aarch64-apple-darwin"
+          # Intel macs.
+          - platform: macos-latest
+            args: "--target x86_64-apple-darwin"
+          - platform: ubuntu-22.04
+            args: ""
+          # Only available for public repositories.
+          - platform: ubuntu-22.04-arm
+            args: ""
+          - platform: windows-latest
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: install dependencies (ubuntu only)
+        if: matrix.platform == 'ubuntu-22.04' || matrix.platform == 'ubuntu-22.04-arm'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: setup node
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: "npm"
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Only used on the macOS runners, so it is conditional to keep the other
+          # three builds from downloading targets they will not use.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          # A Cargo workspace rooted here, so the target directory is `./target`.
+          workspaces: "./ -> target"
+
+      - name: install frontend dependencies
+        run: npm ci
+
+      # The tag, the release name and the update manifest all come from the version
+      # fields, and there are three of them. They disagreeing means shipping a release
+      # that tells installed copies they are already up to date, which is a silent
+      # failure -- nobody gets an error, they just never get the update.
+      - name: check the version fields agree
+        shell: bash
+        run: |
+          set -euo pipefail
+          tauri_version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          package_version=$(node -p "require('./package.json').version")
+          cargo_version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          echo "tauri.conf.json=$tauri_version package.json=$package_version Cargo.toml=$cargo_version"
+          if [ "$tauri_version" != "$package_version" ] || [ "$tauri_version" != "$cargo_version" ]; then
+            echo "::error::version fields disagree. Bump all three to the same value and push again."
+            exit 1
+          fi
+
+      - name: check the updater signing key is present
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "${KEY:-}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set for this repository. Add it under Settings, Secrets and variables, Actions. The private key is at ~/.tauri/deepsand.key on the machine that generated it, and it must not be committed."
+            exit 1
+          fi
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the updater bundles. Without this the action fails, by design.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Ad-hoc signing on macOS. There is no Apple certificate here, and an unsigned
+          # Apple Silicon build downloaded from a release is reported as damaged rather
+          # than merely unidentified. Ignored on other platforms.
+          APPLE_SIGNING_IDENTITY: "-"
+        with:
+          tagName: app-v__VERSION__
+          releaseName: "Deepsand v__VERSION__"
+          releaseBody: "Downloads for Windows, Linux and macOS. The app updates itself from this release; see Settings, Updates."
+          releaseDraft: true
+          prerelease: false

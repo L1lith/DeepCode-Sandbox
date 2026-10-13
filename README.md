@@ -66,11 +66,12 @@ codebase do not have to share one.
 ## Install
 
 Requires **Docker Desktop** (or Docker Engine on Linux) and, to build from
-source, **Node.js ≥ 22** and **Rust ≥ 1.82**.
+source, **Node.js ≥ 22** and **Rust ≥ 1.90** — the self-updater plugin is what sets
+that floor.
 
 ```bash
-git clone https://github.com/L1lith/DeepCode-Sandbox
-cd DeepCode-Sandbox
+git clone https://github.com/L1lith/Deepsand
+cd Deepsand
 npm install
 
 npm run runtime:build     # build the sandbox image (once, ~3 min)
@@ -78,6 +79,20 @@ npm run app:build         # produce the installer for your platform
 ```
 
 For development, `npm run app:dev` starts the app with hot reload.
+
+A local release build signs its update bundles, so it needs the key in the environment or
+it stops with an error about updater artifacts. `TAURI_SIGNING_PRIVATE_KEY` may be the key
+itself or a path to it:
+
+```powershell
+$env:TAURI_SIGNING_PRIVATE_KEY = "C:\Users\you\.tauri\deepsand.key"
+npm run app:build
+```
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY=~/.tauri/deepsand.key
+npm run app:build
+```
 
 > `npm run runtime:build` uses `runtime/Dockerfile`, which installs
 > `@vegamo/deepcode-cli` from npm. Set `DEEPSAND_BUILD_TOOLS=1` in
@@ -174,7 +189,7 @@ which also lists what this does **not** protect against.
 ## Repository layout
 
 ```
-DeepCode-Sandbox/
+Deepsand/
 ├─ AGENTS.md                 how to work on this repository
 ├─ crates/deepsand-core/     Rust: path guards, policy, store, broker, proxy, secrets
 │  └─ src/bin/deepsandctl.rs headless driver
@@ -209,6 +224,19 @@ npm run runtime:icons        # regenerate src-tauri/icons from code
 The interesting tests are the ones that assert containment rather than behaviour — `a_plan_never_mounts_a_container_runtime_socket`, `the_reply_channel_can_never_be_written_by_the_sandbox`, `symlinks_are_resolved_before_guards_run`. They are listed in [docs/SECURITY.md](docs/SECURITY.md).
 
 Contributors and coding agents should read [AGENTS.md](AGENTS.md) first: it lists the invariants that are load-bearing, the platform quirks that will otherwise cost you an afternoon, and what counts as done.
+
+## Releases and updates
+
+Pushing to the `release` branch, or running the **release** workflow from the Actions tab, builds installers for Windows, Linux (x86_64 and ARM64) and macOS (Apple Silicon and Intel), signs them, and opens a **draft** GitHub release. Review the artifacts and the notes, then publish the draft — the update manifest (`latest.json`) is only served from a published release, so nothing is offered to installed copies until you do.
+
+The app updates itself. It checks a few seconds after startup and says so if something newer exists; **Settings → Updates** has the current version, a *Check for updates* button, and the install button. Installing restarts Deepsand, which stops any running sandbox, so the dialog says that before you click rather than after.
+
+Two things are worth knowing before the first release:
+
+* **The signing key is a secret, and losing it is permanent.** `npm run tauri signer generate -- -w ~/.tauri/deepsand.key` creates it; the public half goes in `src-tauri/tauri.conf.json` and the private half goes in the repository's `TAURI_SIGNING_PRIVATE_KEY` secret (and, only if you set one, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`). The workflow refuses to build without it. Whoever holds that key can sign an update that every installed copy will accept, and if it is lost, no already-installed copy can ever be updated again.
+* **Bump all three version fields together** — `src-tauri/tauri.conf.json`, `package.json` and the workspace `Cargo.toml`. The tag, the release name and the update manifest all come from them, and the workflow fails early if they disagree, because a mismatch produces a release that tells installed copies they are already up to date.
+
+macOS builds are ad-hoc signed, not notarised: there is no Apple Developer certificate here, so macOS will warn about the first launch of a downloaded copy. Windows builds are unsigned, so SmartScreen will warn too. Neither warning is about the update signature, which is separate and always enforced.
 
 ## Credits and licensing
 

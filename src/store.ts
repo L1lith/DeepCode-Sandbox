@@ -262,6 +262,28 @@ export async function wireEvents(): Promise<() => void> {
     }),
   ]);
 
+  // One quiet check for a newer Deepsand, a few seconds in so it does not compete with
+  // the startup sweep and the Docker probe.
+  //
+  // Only a positive answer is worth interrupting for. A laptop that is offline, or a
+  // GitHub that is rate-limiting, is not news -- and a toast saying "could not check for
+  // updates" every launch is exactly the kind of noise that trains people to ignore
+  // toasts. The Settings dialog shows that state when it is asked.
+  window.setTimeout(() => {
+    void api
+      .checkForUpdates()
+      .then((result) => {
+        if (result.update) {
+          toast(
+            "info",
+            `Deepsand ${result.update.version} is available`,
+            "Open Settings to install it.",
+          );
+        }
+      })
+      .catch(() => undefined);
+  }, 5000);
+
   return () => {
     for (const unlisten of unlisteners) {
       try {

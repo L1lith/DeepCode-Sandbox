@@ -33,7 +33,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": "all",
+    "createUpdaterArtifacts": true,
     "category": "DeveloperTool",
     "shortDescription": "Run DeepCode inside a container it cannot escape",
     "longDescription": "Deepsand runs the DeepCode coding agent inside a Docker container that can only see the project directory and whatever you explicitly share with it. DeepCode can ask for more access through a permission dialog; you decide, and the sandbox is recreated to apply it.",
@@ -59,5 +60,12 @@
       }
     }
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM0QTUyNDI4Qjk1NDJFMjkKUldRcExsUzVLQ1NseERKTGg3ckVmZjNSYkNQODcyTWRlYVdHVXhjVytkelJvZ3cveGoyRnB3eDQK",
+      "endpoints": [
+        "https://github.com/L1lith/Deepsand/releases/latest/download/latest.json"
+      ]
+    }
+  }
 }

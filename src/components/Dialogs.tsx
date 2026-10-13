@@ -12,7 +12,7 @@
  *    appears inside itself.
  */
 
-import { createEffect, createMemo, createSignal, For, onMount, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { open } from "@tauri-apps/plugin-dialog";
 import * as api from "../lib/api";
 import { baseName, shortPath } from "../lib/format";
@@ -25,6 +25,8 @@ import {
   type RemoteAccessSettings,
   type RemoteAccessView,
   type RemoteServerConfig,
+  type UpdateCheck,
+  type UpdateProgress,
   networkLabel,
 } from "../lib/types";
 import {
@@ -1169,6 +1171,70 @@ export function SettingsDialog(props: { settings: AppSettings; onClose: () => vo
   const [draft, setDraft] = createSignal<AppSettings>({ ...props.settings });
   const [allowlist, setAllowlist] = createSignal(props.settings.egress_allowlist.join("\n"));
   const [busy, setBusy] = createSignal(false);
+  const [updateCheck, setUpdateCheck] = createSignal<UpdateCheck | null>(null);
+  const [updateBusy, setUpdateBusy] = createSignal(false);
+  const [installing, setInstalling] = createSignal(false);
+  const [progress, setProgress] = createSignal<UpdateProgress | null>(null);
+
+  /**
+   * Ask what version is out there.
+   *
+   * Run when the dialog opens rather than only from the button, because the answer is
+   * what this section is for. A failed check is shown as itself rather than as "up to
+   * date": a laptop on a train is not the same thing as a current install.
+   */
+  async function checkUpdates() {
+    setUpdateBusy(true);
+    try {
+      setUpdateCheck(await api.checkForUpdates());
+    } catch (error) {
+      setUpdateCheck({
+        currentVersion: store.info?.version ?? "unknown",
+        update: null,
+        error: describeError(error),
+      });
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
+  /**
+   * Download and install, after which Rust restarts the app.
+   *
+   * This does not come back on success -- the process is replaced -- so the busy state is
+   * deliberately not reset in a `finally`: it would only flicker on the way out.
+   */
+  async function install() {
+    if (installing()) return;
+    setInstalling(true);
+    setProgress(null);
+    try {
+      await api.installUpdate();
+    } catch (error) {
+      toast("error", "Could not install the update", describeError(error));
+      setInstalling(false);
+      setProgress(null);
+    }
+  }
+
+  onMount(() => {
+    void checkUpdates();
+    const unlisten = api.onUpdateProgress(setProgress);
+    onCleanup(() => void unlisten.then((off) => off()).catch(() => undefined));
+  });
+
+  /** Sandboxes an installer would take down with the app. */
+  const runningCount = () => store.projects.filter((project) => project.running).length;
+
+  const downloadLine = () => {
+    const current = progress();
+    if (!current) return "";
+    if (current.phase === "installing") return "Downloaded. Installing…";
+    const mb = (bytes: number) => (bytes / (1024 * 1024)).toFixed(1);
+    return current.total
+      ? `Downloading… ${mb(current.downloaded)} of ${mb(current.total)} MB`
+      : `Downloading… ${mb(current.downloaded)} MB`;
+  };
 
   async function save() {
     setBusy(true);
@@ -1394,6 +1460,71 @@ export function SettingsDialog(props: { settings: AppSettings; onClose: () => vo
           <span class="hint">
             Docker Desktop runs the daemon inside a VM, so the hardened profile and AppArmor cannot be applied
             there. Deepsand says so in the plan preview rather than pretending otherwise.
+          </span>
+        </div>
+
+        <div class="field">
+          <label>Updates</label>
+          <div class="row-inline">
+            <span class="grow">
+              This build is <span class="mono">{store.info?.version ?? "unknown"}</span>.{" "}
+              <Show when={updateCheck()} fallback={<span class="hint">Checking…</span>}>
+                {(result) => (
+                  <Show
+                    when={result().update}
+                    fallback={
+                      <Show
+                        when={result().error}
+                        fallback={<span class="badge badge-ok">up to date</span>}
+                      >
+                        {(reason) => <span class="badge badge-warn">{reason()}</span>}
+                      </Show>
+                    }
+                  >
+                    {(available) => (
+                      <span class="badge badge-warn">{available().version} is available</span>
+                    )}
+                  </Show>
+                )}
+              </Show>
+            </span>
+            <button class="btn" disabled={updateBusy() || installing()} onClick={() => void checkUpdates()}>
+              {updateBusy() ? "Checking…" : "Check for updates"}
+            </button>
+          </div>
+
+          <Show when={updateCheck()?.update}>
+            {(available) => (
+              <>
+                <Show when={available().notes}>
+                  <span class="hint" style={{ display: "block", "white-space": "pre-wrap" }}>
+                    {available().notes}
+                  </span>
+                </Show>
+                {/* An install replaces this binary and restarts the app, which takes the
+                    sandbox down with it. Said before the click, not after. */}
+                <Show when={runningCount() > 0}>
+                  <div class="callout callout-warn" style={{ "margin-top": "0.5rem" }}>
+                    Installing restarts Deepsand, which stops{" "}
+                    {runningCount() === 1 ? "the running sandbox" : `all ${runningCount()} running sandboxes`}.
+                    Anything the agent has not written to disk is lost, and the session has to be started again.
+                  </div>
+                </Show>
+                <div class="row-inline" style={{ "margin-top": "0.5rem" }}>
+                  <button class="btn btn-primary" disabled={installing()} onClick={() => void install()}>
+                    {installing() ? "Installing…" : `Install ${available().version} and restart`}
+                  </button>
+                  <Show when={downloadLine()}>
+                    <span class="hint">{downloadLine()}</span>
+                  </Show>
+                </div>
+              </>
+            )}
+          </Show>
+
+          <span class="hint">
+            Updates are signed, and the signature is what Deepsand checks before installing — not the
+            download. A release that is not signed with this project's key will be refused.
           </span>
         </div>
       </div>

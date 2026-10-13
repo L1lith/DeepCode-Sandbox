@@ -18,7 +18,8 @@
     "test": "npm run core:test && npm run test:bridge",
     "runtime:build": "node runtime/scripts/build-image.mjs",
     "runtime:icons": "tauri icon assets/icon.png",
-    "icon:generate-from-code": "node runtime/scripts/make-icon.mjs && tauri icon assets/icon.png"
+    "icon:generate-from-code": "node runtime/scripts/make-icon.mjs && tauri icon assets/icon.png",
+    "signer:generate": "tauri signer generate -w ~/.tauri/deepsand.key"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.3",
@@ -35,5 +36,9 @@
     "typescript": "^5.9.3",
     "vite": "^8.3.4",
     "vite-plugin-solid": "^2.11.14"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/L1lith/Deepsand.git"
   }
 }

@@ -53,6 +53,14 @@ desktop.ini
 !.vscode/extensions.json
 
 # ---------------------------------------------------------------------------
+# Update signing keys. They belong in ~/.tauri (see the README), never here: a
+# private key in the repository can sign updates for every installed copy.
+# ---------------------------------------------------------------------------
+*.key
+*.key.pub
+.tauri/
+
+# ---------------------------------------------------------------------------
 # Local environment
 # ---------------------------------------------------------------------------
 .env

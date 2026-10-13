@@ -49,6 +49,8 @@ npm run app:dev         # app with hot reload
 | `crates/deepsand-core/src/bin/deepsandctl.rs` | Headless driver: `doctor`, `project`, `grants`, `plan`, `run`, `watch`, `requests`, `network`. |
 | `src-tauri/src/commands.rs` | The ~30 desktop commands, and `runtime_revision`. |
 | `src-tauri/src/remote_server.rs` | HTTP translation of the command surface. Binds loopback, bearer token. |
+| `src-tauri/src/update.rs` | Self-updates: the check, the download, the restart. Our own commands, not the plugin's JS bindings. |
+| `.github/workflows/release.yml` | Cross-platform release builds and the update manifest. Publishes a **draft**. |
 | `src/` | SolidJS UI. Views only: no policy decisions. |
 | `runtime/` | Everything that runs **inside** the container. |
 
@@ -116,6 +118,23 @@ These are load-bearing. Breaking one is how this project gets a CVE.
     with `bash\r: No such file or directory` and the sandbox never starts.
 13. **`reference/` is never committed, vendored or bundled.** Upstream DeepCode CLI
     source is downloaded there read-only, and gitignored.
+14. **The update signing key never enters the repository, and its loss is
+    permanent.** The private half lives in `~/.tauri/deepsand.key` and in the
+    `TAURI_SIGNING_PRIVATE_KEY` secret; the public half is pinned in
+    `src-tauri/tauri.conf.json`, which is what every installed copy verifies
+    against. Whoever holds the private key can sign an update that all of them
+    will install, and losing it means no installed copy can ever be updated.
+    `.gitignore` covers `*.key` as a backstop, not as permission to be careless.
+15. **The three version fields move together** — `src-tauri/tauri.conf.json`,
+    `package.json`, and `version` in the workspace `Cargo.toml`. The release
+    workflow fails early when they disagree, because a release whose manifest
+    version is wrong tells every installed copy it is already up to date: a
+    silent failure where nobody gets an error and nobody gets the update.
+16. **The updater is reachable only through our own two commands.** The plugin is
+    initialised in Rust and the webview is not given `updater:*` — installing an
+    update replaces the binary, which is the most powerful thing a frontend could
+    ask for. The commands are absent from the remote command table on purpose: a
+    remote client must not be able to replace the binary on the host it reached.
 
 ## Conventions
 
@@ -159,6 +178,13 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   shell, set `MSYS2_ARG_CONV_EXCL='*'` or msys rewrites them.
 * **Release profile is `panic = "abort"`**, so no unwinding: a panic takes the
   process down. Prefer returning `Result` at the edges.
+* **Moving or renaming the checkout needs `cargo clean`.** Two things bake the
+  absolute path of the working directory into build output: `env!("CARGO_MANIFEST_DIR")`
+  in the test that reads `runtime/seccomp-hardened.json`, and Tauri's generated
+  permission files under `target/debug/build/tauri-*/out/`. After a rename the stale
+  binary or build script looks in the old directory and fails with `os error 3` and a
+  path you no longer have. `cargo clean -p tauri -p tauri-build` covers the second;
+  touching the file covers the first.
 
 ## Definition of done
 

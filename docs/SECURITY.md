@@ -376,6 +376,37 @@ To read the exact command for any project:
 deepsandctl plan <project>          # or the Activity tab's "Show the exact command"
 ```
 
+## Updates
+
+The app updates itself, which is a capability worth being explicit about, because an
+update is arbitrary code on the host — the one thing all of the rest of this document is
+arranged to prevent the *sandbox* from doing.
+
+Three properties hold it in place:
+
+* **The signature is the control, not the transport.** The updater verifies a minisign
+  signature against the public key pinned in `src-tauri/tauri.conf.json` before it
+  installs anything. HTTPS is how the bytes arrive; the signature is what decides whether
+  they are installed. A hijacked repository, a compromised GitHub account, or a rewritten
+  release cannot produce an update that installs, because none of those have the private
+  key. This is also why the private key is treated in `AGENTS.md` as a code-signing
+  certificate rather than a build artifact.
+* **The sandbox cannot ask for an update, and cannot reach the updater.** The updater
+  plugin is initialised in Rust and the webview is given no `updater:*` permission; the
+  only paths are two commands of ours, and both refuse to do anything in a development
+  build. The command surface a remote client may use is a separate, explicit table in
+  `crates/deepsand-core/src/remote.rs`, and neither command appears in it — a stolen
+  remote token must not be able to replace the binary on the host it reached.
+* **Installing is an operator action, and is described before it happens.** The app
+  checks, says what it found, and waits. Nothing downloads or installs without a click,
+  and the dialog names the sandboxes that restarting will stop, because that is the real
+  cost of pressing the button.
+
+The residual, stated plainly: a build that is *older* than a release will happily install
+that release, including one that changed behaviour you relied on. There is no pinning and
+no update channel selection. If you need a build that does not move, build from source at
+the commit you want rather than installing a release.
+
 ## Secrets
 
 Secrets are encrypted at rest and injected as environment variables. What that does

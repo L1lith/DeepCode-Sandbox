@@ -22,6 +22,7 @@
 pub mod commands;
 pub mod remote_server;
 mod state;
+mod update;
 
 use state::AppState;
 use tauri::Manager;
@@ -58,6 +59,11 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // Initialised so our own two commands can reach it. The webview never calls the
+        // plugin directly: see `update` for why replacing the binary is not something to
+        // hand the frontend a permission for.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(update::PendingUpdate::default())
         .manage(state)
         .setup(move |app| {
             tracing::info!(version = version(), data_dir = %data_dir, "deepsand starting");
@@ -205,6 +211,11 @@ pub fn run() {
             commands::cleanup_orphans,
             commands::reveal_data_dir,
             commands::startup_error,
+            // Self-updates. Desktop-only with the plugin, and absent from the remote
+            // command table on purpose: a remote client must not be able to replace the
+            // binary on the host it reached.
+            update::check_for_updates,
+            update::install_update,
         ])
         .build(tauri::generate_context!())
         .expect("deepsand failed to start")
