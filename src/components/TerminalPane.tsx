@@ -168,6 +168,47 @@ export function TerminalPane() {
   }
 
   // Re-attach when the selected project changes, clearing the old buffer.
+  /**
+   * How many of the build's lines have been written to the terminal.
+   *
+   * The build log used to live only in the Activity tab's panel, which is the wrong place to be
+   * looking when you have just pressed Run and a terminal is what you are watching. These are
+   * the same lines, written before the PTY exists; when it does, its output carries on below
+   * them, so the whole thing reads as one session: the tools, then DeepCode.
+   */
+  let mirrored = 0;
+  let mirroring = false;
+
+  createEffect(() => {
+    const lines = store.buildLog;
+    const building = store.building;
+
+    if (!building) {
+      // The next build starts its log over; so does the count of what has been shown.
+      if (lines.length === 0) {
+        mirrored = 0;
+        mirroring = false;
+      }
+      return;
+    }
+    if (!term) return;
+    if (lines.length < mirrored) mirrored = 0;
+
+    if (!mirroring) {
+      // A previous run's scrollback is not what this is about, and the tools being installed are
+      // the only thing worth reading until they are done.
+      term.reset();
+      term.writeln("\x1b[2m── installing tools for this project ──\x1b[0m");
+      mirrored = 0;
+      mirroring = true;
+    }
+    for (let index = mirrored; index < lines.length; index += 1) {
+      // Dim: this is the install talking, not the agent.
+      term.writeln(`\x1b[2m${lines[index] ?? ""}\x1b[0m`);
+    }
+    mirrored = lines.length;
+  });
+
   createEffect(() => {
     const current = project();
     if (!term) return;
@@ -352,12 +393,22 @@ export function TerminalPane() {
                       : ""}
                     .
                   </p>
-                  <button class="btn btn-primary" disabled={busy()} onClick={() => void run()}>
-                    {/* A disabled button that says nothing is indistinguishable from a broken
-                        one, which is what this looked like while it waited for an answer that
-                        never came. */}
-                    {busy() ? "Starting…" : "Run project"}
-                  </button>
+                  <Show
+                    when={!store.building}
+                    fallback={
+                      <p class="hint">
+                        Installing the tools this project asked for. The install is running above,
+                        in this terminal, and the project starts by itself as soon as it finishes.
+                      </p>
+                    }
+                  >
+                    <button class="btn btn-primary" disabled={busy()} onClick={() => void run()}>
+                      {/* A disabled button that says nothing is indistinguishable from a broken
+                          one, which is what this looked like while it waited for an answer that
+                          never came. */}
+                      {busy() ? "Starting…" : "Run project"}
+                    </button>
+                  </Show>
                 </>
               )}
             </Show>
