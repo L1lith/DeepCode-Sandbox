@@ -24,7 +24,7 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 371 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 374 tests |
 | `npm run app:test` | `cargo test -p deepsand-app` — the app crate's own tests, including the zombie guard. Part of `npm test`: it was not, and tests that never run are decoration |
 | `npm run core:check` | `cargo check --workspace` |
 | `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |

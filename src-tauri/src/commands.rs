@@ -3449,6 +3449,9 @@ pub fn build_runtime_image_impl(
         let mut attempt = 0;
         // Filled by the loop below and read after it: the tools are copied into this directory
         // once the outcome is known.
+        // Bound outside the retry loop below, which always assigns it before anything reads
+        // it: the initial value exists only because it has to be bound out here.
+        #[allow(unused_assignments)]
         let mut tool_cache = std::path::PathBuf::new();
         let result = loop {
             attempt += 1;
@@ -3469,16 +3472,11 @@ pub fn build_runtime_image_impl(
             .map(|dockerfile| deepsand_core::toolcache::tools_layer_fingerprint(&dockerfile))
             .unwrap_or_default();
         let key = deepsand_core::toolcache::cache_key(&arch, &selection, &fingerprint);
-        let dir = deepsand_core::toolcache::cache_dir(&data_dir, &key);
-        let _ = std::fs::create_dir_all(dir.join("bin"));
-        let _ = std::fs::create_dir_all(dir.join("node_modules"));
-        let now = deepsand_core::now_ms();
-        if dir.join(deepsand_core::toolcache::FILLED_MARKER).exists()
-            && !deepsand_core::toolcache::cache_is_usable(&dir, now)
-        {
-            // Keyed right, but old enough that the tools in it may have moved on. Emptying it
-            // means this build installs them again and then refills it.
-            tracing::info!("the tools cache was older than its limit; rebuilding it");
+        // One call, because the age rule and the emptying are the same rule: the version in the
+        // caller logged it and moved on, and the stale entry was copied in anyway.
+        let dir = deepsand_core::toolcache::prepare_entry(&data_dir, &key, deepsand_core::now_ms());
+        if !dir.join(deepsand_core::toolcache::FILLED_MARKER).exists() {
+            tracing::debug!("no tools cache for this key yet; this build installs and fills one");
         }
         dir
     };
@@ -3633,12 +3631,11 @@ pub fn tool_cache_root(state: &AppState) -> std::path::PathBuf {
 }
 
 /// Empty a cache entry, keeping the directory the build context points at.
+///
+/// The rule itself lives in `toolcache::clear_entry`, next to the age limit that calls it; this
+/// is the name the app's own paths use.
 pub(crate) fn empty_tool_cache(dir: &std::path::Path) {
-    let _ = std::fs::remove_dir_all(dir.join("bin"));
-    let _ = std::fs::remove_dir_all(dir.join("node_modules"));
-    let _ = std::fs::remove_file(dir.join(deepsand_core::toolcache::FILLED_MARKER));
-    let _ = std::fs::create_dir_all(dir.join("bin"));
-    let _ = std::fs::create_dir_all(dir.join("node_modules"));
+    deepsand_core::toolcache::clear_entry(dir);
 }
 
 /// Claim an image for building. False means somebody else has it.

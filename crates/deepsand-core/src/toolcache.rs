@@ -74,6 +74,35 @@ pub fn tools_layer_fingerprint(dockerfile: &str) -> String {
     crate::seccomp::digest(body.as_bytes())[..16].to_string()
 }
 
+/// The directory for one key, made ready for a build.
+///
+/// Three things belong together and are therefore one function: the directory is created (the
+/// build mounts it as a context, so it has to exist), an entry that has aged past its limit is
+/// *emptied* (the age rule), and the path is returned.
+///
+/// The shape is the point. These used to be three steps in the caller, and the caller logged the
+/// second one while leaving the entry in place -- so the two-week rule was documented, reported,
+/// and not actually enforced for two commits. A rule that lives in the code that applies it
+/// cannot be forgotten by the code that uses it.
+pub fn prepare_entry(data_dir: &Path, key: &str, now_ms: i64) -> PathBuf {
+    let dir = cache_dir(data_dir, key);
+    let _ = std::fs::create_dir_all(dir.join("bin"));
+    let _ = std::fs::create_dir_all(dir.join("node_modules"));
+    if dir.join(FILLED_MARKER).exists() && !cache_is_usable(&dir, now_ms) {
+        clear_entry(&dir);
+    }
+    dir
+}
+
+/// Empty an entry, keeping the directory the build context points at.
+pub fn clear_entry(dir: &Path) {
+    let _ = std::fs::remove_dir_all(dir.join("bin"));
+    let _ = std::fs::remove_dir_all(dir.join("node_modules"));
+    let _ = std::fs::remove_file(dir.join(FILLED_MARKER));
+    let _ = std::fs::create_dir_all(dir.join("bin"));
+    let _ = std::fs::create_dir_all(dir.join("node_modules"));
+}
+
 /// How old a cache entry may be before it is treated as absent.
 ///
 /// The tools are installed as `@latest`, so an entry does not stay current by itself, and the
@@ -472,6 +501,60 @@ RUN npm install -g something-else
         assert!(check_is_due(Some(CHECK_INTERVAL)));
         assert!(check_is_due(Some(Duration::from_secs(48 * 60 * 60))));
         assert!(CHECK_INTERVAL >= Duration::from_secs(60 * 60), "not every few minutes");
+    }
+
+    /// The age rule, as the build actually experiences it: a stale entry is empty by the time
+    /// the caller gets the path, which is what was missing when only the caller knew the rule.
+    #[test]
+    fn a_stale_entry_is_emptied_before_the_build_that_would_have_used_it() {
+        let root = fresh_dir("toolcache-prepare");
+        let now = 1_700_000_000_000i64;
+        let dir = prepare_entry(&root, "stale00000000000", now);
+        std::fs::write(dir.join("bin").join("tool"), "built once").unwrap();
+        mark_filled(&dir, now).unwrap();
+        assert!(cache_is_usable(&dir, now));
+
+        // Two weeks and a day later, the same key is prepared for the next build.
+        let later = now + 15 * 24 * 60 * 60 * 1000;
+        let again = prepare_entry(&root, "stale00000000000", later);
+        assert_eq!(again, dir);
+        assert!(
+            !again.join("bin").join("tool").exists(),
+            "the stale tools are gone, so this build installs and refills"
+        );
+        assert!(!again.join(FILLED_MARKER).exists(), "and it is no longer marked filled");
+        assert!(again.join("bin").is_dir(), "the directory the context mounts is still there");
+        assert!(again.join("node_modules").is_dir());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The other half: a fresh entry is left exactly as it was, because recompiling tools that
+    /// are current is the whole cost this cache exists to avoid.
+    #[test]
+    fn a_fresh_entry_is_left_alone() {
+        let root = fresh_dir("toolcache-fresh");
+        let now = 1_700_000_000_000i64;
+        let dir = prepare_entry(&root, "fresh00000000000", now);
+        std::fs::write(dir.join("bin").join("tool"), "built once").unwrap();
+        mark_filled(&dir, now).unwrap();
+
+        let soon = now + 60 * 60 * 1000;
+        let again = prepare_entry(&root, "fresh00000000000", soon);
+        assert!(again.join("bin").join("tool").exists(), "still there");
+        assert!(again.join(FILLED_MARKER).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An entry that was never filled is just a directory waiting to be one, and nothing is
+    /// removed from it: there is nothing to remove.
+    #[test]
+    fn an_unfilled_entry_is_only_made_ready() {
+        let root = fresh_dir("toolcache-ready");
+        let dir = prepare_entry(&root, "empty00000000000", 1_000);
+        assert!(dir.join("bin").is_dir());
+        assert!(dir.join("node_modules").is_dir());
+        assert!(!cache_is_usable(&dir, 1_000), "and it is still not a cache");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A directory of its own under the system temp directory, so tests do not collide.

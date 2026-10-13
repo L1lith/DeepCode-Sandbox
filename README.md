@@ -259,7 +259,7 @@ desktop app and the headless CLI cannot behave differently.
 
 ```bash
 npm run app:dev              # app with hot reload
-npm run core:test            # 371 core tests: paths, policy, broker, proxy, credentials, seccomp, durability
+npm run core:test            # 374 core tests: paths, policy, broker, proxy, credentials, seccomp, durability
 npm run app:test             # 13 tests in the app crate: the zombie guard, and the log file
 npm run test:bridge          # 55 checks: the permission protocol end to end
 npm test                     # both suites
