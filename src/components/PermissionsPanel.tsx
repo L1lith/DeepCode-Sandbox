@@ -267,13 +267,8 @@ export function PermissionsPanel() {
                 >
                   {(candidate) => (
                     <button
-                      class="btn btn-sm"
-                      aria-pressed={current().network.mode === candidate.mode}
-                      style={
-                        current().network.mode === candidate.mode
-                          ? { "border-color": "var(--accent)", background: "var(--accent-soft)" }
-                          : undefined
-                      }
+                      class="mode-segment"
+                      classList={{ "mode-segment-on": current().network.mode === candidate.mode }}
                       disabled={modeBusy()}
                       onClick={() => void chooseMode(candidate.mode)}
                     >

@@ -28,7 +28,6 @@ import {
   type RemoteServerConfig,
   type UpdateCheck,
   type UpdateProgress,
-  networkLabel,
 } from "../lib/types";
 import {
   describeError,
@@ -86,7 +85,7 @@ export function PermissionDialog(props: { request: PermissionRequestView; queued
   // should be a deliberate act, not a keystroke that inherits the larger ask.
   const [access, setAccess] = createSignal<"read" | "write">("read");
   const [note, setNote] = createSignal("");
-  const [busy, setBusy] = createSignal(false);
+    const [busy, setBusy] = createSignal(false);
   const [check, setCheck] = createSignal<{ ok: boolean; text: string } | null>(null);
 
   // A new request may arrive while this one is open; re-seed the form.
@@ -745,6 +744,7 @@ function AutostartSection() {
           </span>
         </span>
         <select
+          class="select-compact"
           value={mode() ?? "off"}
           disabled={busy() || mode() === null}
           onChange={(event) => void choose(event.currentTarget.value as StartupMode)}
@@ -1187,7 +1187,8 @@ function generateTokenPlaceholder(): string {
 export function SettingsDialog(props: { settings: AppSettings; onClose: () => void }) {
   const [draft, setDraft] = createSignal<AppSettings>({ ...props.settings });
   const [allowlist, setAllowlist] = createSignal(props.settings.egress_allowlist.join("\n"));
-  const [busy, setBusy] = createSignal(false);
+  // The app settings dialog has no save to be busy with; the controls still read this.
+  const [busy] = createSignal(false);
   const [updateCheck, setUpdateCheck] = createSignal<UpdateCheck | null>(null);
   const [updateBusy, setUpdateBusy] = createSignal(false);
   const [installing, setInstalling] = createSignal(false);
@@ -1287,22 +1288,66 @@ export function SettingsDialog(props: { settings: AppSettings; onClose: () => vo
       : `Downloading… ${mb(current.downloaded)} MB`;
   };
 
-  async function save() {
-    setBusy(true);
+  /** Which entries were dropped as unparseable, so the hint can say so rather than be silent. */
+  const [ignored, setIgnored] = createSignal(0);
+  const [saving, setSaving] = createSignal(false);
+  const [saved, setSaved] = createSignal(false);
+
+  /**
+   * The entries an operator typed, without the ones that cannot be an address or a name.
+   *
+   * A typo used to reach the backend and come back as a failed save, which is a bad way to learn
+   * about a stray character: the rest of the list was fine and none of it was saved. Dropping what
+   * cannot be an entry keeps the ones that can, which is what somebody editing a list expects.
+   */
+  function validHosts(text: string): { hosts: string[]; dropped: number } {
+    const lines = text
+      .split(/[\n,]/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const hosts = lines.filter((line) =>
+      /^(\*|\*\.)?[a-z0-9._-]+(:\d{1,5})?$/i.test(line) || /^\[[0-9a-f:]+\](:\d{1,5})?$/i.test(line),
+    );
+    return { hosts, dropped: lines.length - hosts.length };
+  }
+
+  let settled = false;
+  let timer: number | undefined;
+
+  /**
+   * Save as the operator types.
+   *
+   * Debounced, because a text area fires on every keystroke and each save rewrites the state file
+   * and pushes the settings into any running sandbox. The first run is skipped: opening the dialog
+   * is not an edit, and a save on open would rewrite a file nobody changed.
+   */
+  createEffect(() => {
+    const settings = draft();
+    const text = allowlist();
+    if (!settled) {
+      settled = true;
+      return;
+    }
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => void autosave(settings, text), 700);
+  });
+
+  onCleanup(() => window.clearTimeout(timer));
+
+  async function autosave(settings: AppSettings, text: string) {
+    setSaving(true);
     try {
-      const hosts = allowlist()
-        .split(/[\n,]/)
-        .map((line) => line.trim())
-        .filter(Boolean);
+      const { hosts, dropped } = validHosts(text);
       const cleaned = await api.setEgressAllowlist(hosts);
-      await api.setSettings({ ...draft(), egress_allowlist: cleaned });
+      await api.setSettings({ ...settings, egress_allowlist: cleaned });
       await refreshSettings();
-      toast("ok", "Settings saved", `Allowlist has ${cleaned.length} entries.`);
-      props.onClose();
+      setIgnored(dropped);
+      setSaved(true);
     } catch (error) {
       toast("error", "Could not save settings", describeError(error));
+      setSaved(false);
     } finally {
-      setBusy(false);
+      setSaving(false);
     }
   }
 
@@ -1327,9 +1372,10 @@ export function SettingsDialog(props: { settings: AppSettings; onClose: () => vo
           <button class="btn btn-ghost" onClick={props.onClose}>
             Cancel
           </button>
-          <button class="btn btn-primary" disabled={busy()} onClick={() => void save()}>
-            Save
-          </button>
+          <span class="hint">
+            {saving() ? "Saving…" : saved() ? "Saved" : ""}
+            {ignored() > 0 ? ` — ${ignored()} entr${ignored() === 1 ? "y" : "ies"} ignored` : ""}
+          </span>
         </>
       }
     >
@@ -1368,27 +1414,19 @@ export function SettingsDialog(props: { settings: AppSettings; onClose: () => vo
 
         <div class="field">
           <label>Network for new projects</label>
-          <div class="mode-choice">
-            <For each={["allowlisted", "internet", "none", "full"] as const}>
-              {(mode) => (
-                <button
-                  class="mode-option"
-                  aria-pressed={draft().default_network.mode === mode}
-                  onClick={() =>
-                    setDraft({
-                      ...draft(),
-                      // `allowlisted` carries a list; a project starts with an empty
-                      // one and inherits the global entries, so the field is not a
-                      // second place to maintain the allowlist.
-                      default_network: mode === "allowlisted" ? { mode, allow: [] } : { mode },
-                    })
-                  }
-                >
-                  {networkLabel(mode === "allowlisted" ? { mode, allow: [] } : { mode })}
-                </button>
-              )}
-            </For>
-          </div>
+          <NetworkSlider
+            value={draft().default_network.mode}
+            disabled={busy()}
+            onChange={(mode) =>
+              setDraft({
+                ...draft(),
+                // `allowlisted` carries a list; a project starts with an empty one and inherits
+                // the global entries, so the field is not a second place to maintain the
+                // allowlist.
+                default_network: mode === "allowlisted" ? { mode, allow: [] } : { mode },
+              })
+            }
+          />
           <span class="hint">
             The mode every project you create from now on starts in. <strong>Allowlisted</strong> is
             the default and means default-deny: the model endpoint, the package registries in the
@@ -1751,3 +1789,5 @@ export function Toasts() {
     </div>
   );
 }
+
+import { NetworkSlider } from "./NetworkSlider";
