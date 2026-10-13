@@ -258,6 +258,7 @@ impl Docker {
         context: &Path,
         tag: &str,
         build_args: &[(&str, String)],
+        tool_cache: &Path,
         mut sink: impl FnMut(&str),
     ) -> Result<()> {
         let mut cmd = self.command();
@@ -272,6 +273,12 @@ impl Docker {
             cmd.arg("--build-arg");
             cmd.arg(format!("{key}={value}"));
         }
+        // A named build context rather than a copy into the build context: a cache can be
+        // hundreds of megabytes, and copying it per build would spend the time this exists to
+        // save. It is passed even when empty -- the tools layer checks what is in it -- so the
+        // instruction's mount always resolves.
+        cmd.arg("--build-context");
+        cmd.arg(format!("toolcache={}", tool_cache.display()));
         if let Some(extra) = std::env::var_os("DEEPSAND_BUILD_ARGS") {
             for part in extra.to_string_lossy().split_whitespace() {
                 cmd.arg(part);

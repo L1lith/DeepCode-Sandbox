@@ -226,6 +226,7 @@ ARG WITH_NIX=0
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     --mount=type=cache,target=/root/.npm,sharing=locked \
+    --mount=type=bind,from=toolcache,target=/toolcache \
     set -eux; \
     # The app passes these three as comma-separated lists, because a build argument is one
     # argv entry and commas need no quoting. They are split here, once, rather than at each
@@ -239,6 +240,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     APT_PACKAGES=$(echo "$APT_PACKAGES" | tr ',' ' '); \
     NPM_GLOBALS=$(echo "$NPM_GLOBALS" | tr ',' ' '); \
     CARGO_INSTALLS=$(echo "$CARGO_INSTALLS" | tr ',' ' '); \
+    # The tools cache, filled from a previous successful build of this key. Copying the built
+    # binaries in is the whole point: `cargo install` compiles for minutes, and this turns
+    # that into a copy. The apt packages below are deliberately not cached -- the cache mounts
+    # already cover their downloads, and moving installed system packages between images is
+    # the fiddliest thing here for the smallest gain. The app passes an empty directory when
+    # there is nothing cached for this key, which is the same as no cache at all.
+    TOOLS_CACHED=0; \
+    if [ -d /toolcache/bin ] || [ -d /toolcache/node_modules ]; then \
+      echo "deepsand: using the cached tools"; \
+      mkdir -p /usr/local/bin /usr/local/lib/node_modules; \
+      cp -a /toolcache/bin/. /usr/local/bin/ 2>/dev/null || true; \
+      cp -a /toolcache/node_modules/. /usr/local/lib/node_modules/ 2>/dev/null || true; \
+      TOOLS_CACHED=1; \
+    fi; \
     if [ -z "$INSTALL_TOOLS" ]; then \
       echo "deepsand: no tools selected for this project"; \
     else \
@@ -258,7 +273,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       apt-get update; \
       apt-get install -y --no-install-recommends golang-go; \
     fi; \
-    if [ -n "$NPM_GLOBALS" ]; then \
+    if [ "$TOOLS_CACHED" = "0" ] && [ -n "$NPM_GLOBALS" ]; then \
       for pkg in $NPM_GLOBALS; do \
         echo "deepsand: npm install -g $pkg"; \
         npm install -g --no-fund --no-audit --fetch-retries=2 --fetch-timeout=60000 --fetch-retry-maxtimeout=30000 "$pkg@latest"; \
@@ -272,7 +287,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
           | sh -s -- -y --no-modify-path --profile minimal; \
       fi; \
     fi; \
-    if [ -n "$CARGO_INSTALLS" ]; then \
+    if [ "$TOOLS_CACHED" = "0" ] && [ -n "$CARGO_INSTALLS" ]; then \
       echo "deepsand: cargo install $CARGO_INSTALLS"; \
       # A minimal C toolchain. `cargo install` links its output and fails with
       # "linker `cc` not found" without one, and the default tool set includes a
@@ -355,7 +370,18 @@ ARG DEEPCODE_REFRESH=0
 RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     set -eux; \
     echo "deepsand: refreshing DeepCode (build $DEEPCODE_REFRESH)"; \
-    npm install -g --no-fund --no-audit --fetch-retries=2 --fetch-timeout=60000 --fetch-retry-maxtimeout=30000 "@vegamo/deepcode-cli@${DEEPCODE_CLI_VERSION}"; \
+    # A refresh that cannot reach the registry must not fail a build that already has a
+    # working copy -- from the tools cache or from this image's own layer. It is still a
+    # failure with no copy at all: an image without the CLI starts and does nothing.
+    # npm's own fetch limits bound the attempt.
+    if ! npm install -g --no-fund --no-audit --fetch-retries=2 --fetch-timeout=60000 --fetch-retry-maxtimeout=30000 "@vegamo/deepcode-cli@${DEEPCODE_CLI_VERSION}"; then \
+      if [ -d /usr/local/lib/node_modules/@vegamo ]; then \
+        echo "deepsand: could not refresh DeepCode; keeping the copy already here"; \
+      else \
+        echo "deepsand: could not install DeepCode and there is no copy to fall back on"; \
+        exit 1; \
+      fi; \
+    fi; \
     deepcode --version
 
 LABEL deepsand.tools="$INSTALL_TOOLS"

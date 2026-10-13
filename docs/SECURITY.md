@@ -377,7 +377,7 @@ survives being clicked, closed, or the window going away.
 Everything above is asserted by tests you can run:
 
 ```bash
-cargo test -p deepsand-core                   # 357 core tests, including the seccomp, allowlist and durability claims
+cargo test -p deepsand-core                   # 361 core tests, including the seccomp, allowlist and durability claims
 node runtime/scripts/test-mcp-bridge.mjs      # 55 checks: the permission protocol end to end
 cargo test -p deepsand-core --test runtime_dockerfile   # claims about the image build, no Docker needed
 ```

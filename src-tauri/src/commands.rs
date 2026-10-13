@@ -3276,6 +3276,8 @@ pub fn build_runtime_image_impl(
     // The log goes to a file as well as to the window. The window's copy dies with the
     // window, which is exactly when somebody wants to read it.
     let log_path = store(&state).data_dir().join("build.log");
+    // Owned, because the build runs on a thread that cannot borrow the state.
+    let data_dir = store(&state).data_dir().to_path_buf();
 
     // One build per image, enforced here because everything that builds goes through this
     // function: the Activity tab's button, and a Run whose image is missing. Two builds of
@@ -3379,9 +3381,43 @@ pub fn build_runtime_image_impl(
         // starting over -- and the alternative is an operator reading an RPC error and
         // clicking the button again, which is what this failure used to cost.
         let mut attempt = 0;
+        // Filled by the loop below and read after it: the tools are copied into this directory
+        // once the outcome is known.
+        let mut tool_cache = std::path::PathBuf::new();
         let result = loop {
             attempt += 1;
-            let outcome = docker.build(&context, &image, &build_args, |line| {
+            // The tools cache for this build. The key covers the platform, the selection and a
+    // fingerprint of the install steps; freshness covers the one thing a key cannot see, which
+    // is time passing. An entry that is stale is emptied rather than deleted: the directory is
+    // the build context, so it has to exist either way.
+    tool_cache = {
+        let arch = docker.server_platform().unwrap_or_default();
+        let selection: Vec<String> = plan
+            .apt
+            .iter()
+            .chain(plan.npm.iter())
+            .chain(plan.cargo.iter())
+            .cloned()
+            .collect();
+        let fingerprint = std::fs::read_to_string(context.join("Dockerfile"))
+            .map(|dockerfile| deepsand_core::toolcache::tools_layer_fingerprint(&dockerfile))
+            .unwrap_or_default();
+        let key = deepsand_core::toolcache::cache_key(&arch, &selection, &fingerprint);
+        let dir = deepsand_core::toolcache::cache_dir(&data_dir, &key);
+        let _ = std::fs::create_dir_all(dir.join("bin"));
+        let _ = std::fs::create_dir_all(dir.join("node_modules"));
+        let now = deepsand_core::now_ms();
+        if dir.join(deepsand_core::toolcache::FILLED_MARKER).exists()
+            && !deepsand_core::toolcache::cache_is_usable(&dir, now)
+        {
+            // Keyed right, but old enough that the tools in it may have moved on. Emptying it
+            // means this build installs them again and then refills it.
+            tracing::info!("the tools cache was older than its limit; rebuilding it");
+        }
+        dir
+    };
+
+    let outcome = docker.build(&context, &image, &build_args, &tool_cache, |line| {
                 write(&line);
                 let _ = app_for_log.emit(events::BUILD_LOG, serde_json::json!({ "line": line }));
                 // Emitted only when the line reports a step, so the bar moves on real
@@ -3421,6 +3457,37 @@ pub fn build_runtime_image_impl(
             }
         };
 
+        // The tools cache, decided by the outcome.
+        //
+        // Filled only from a build that actually produced the tools, and emptied only when a
+        // build *used* it and failed for a reason that is about the build rather than about
+        // Docker -- a daemon that went away is neither the cache's fault nor the build's, and
+        // emptying on one of those would throw away minutes of compiling for nothing.
+        match &result {
+            Ok(()) => {
+                let line = if fill_tool_cache(&docker, &image, &tool_cache) {
+                    "deepsand: the tools cache was filled from this build"
+                } else {
+                    "deepsand: could not fill the tools cache; the next build installs again"
+                };
+                write(line);
+                let _ = app_handle.emit(events::BUILD_LOG, serde_json::json!({ "line": line }));
+            }
+            Err(err) => {
+                let used = tool_cache
+                    .join(deepsand_core::toolcache::FILLED_MARKER)
+                    .exists();
+                if used && !deepsand_core::docker::is_daemon_interruption(err) {
+                    empty_tool_cache(&tool_cache);
+                    let line = "deepsand: the build failed while using cached tools, so the cache \
+                                was emptied and the next build installs them again";
+                    write(line);
+                    let _ =
+                        app_handle.emit(events::BUILD_LOG, serde_json::json!({ "line": line }));
+                }
+            }
+        }
+
         // The image is no longer being built, whatever happened.
         end_build(&tauri::Manager::state::<AppState>(&app_handle), &image);
 
@@ -3446,6 +3513,54 @@ pub fn build_runtime_image_impl(
 
     let _ = build_tools;
     Ok(())
+}
+
+/// Copy the tools an image has just built into the cache for its key.
+///
+/// A container made from the image itself, with the cache directory mounted, so what lands in
+/// the cache is exactly what that image has -- the property that keeps the cache honest. Filling
+/// it from a parallel install would be faster and would eventually disagree with the image.
+///
+/// Returns whether it worked. A failure here costs the next build its speed; it never touches
+/// the build that has just succeeded, which is why the caller only writes a line about it.
+fn fill_tool_cache(
+    docker: &deepsand_core::docker::Docker,
+    image: &str,
+    dir: &std::path::Path,
+) -> bool {
+    let script = "mkdir -p /cache/bin /cache/node_modules \
+                  && cp -a /usr/local/bin/. /cache/bin/ \
+                  && cp -a /usr/local/lib/node_modules/. /cache/node_modules/";
+    let args: Vec<String> = [
+        "run",
+        "--rm",
+        "-v",
+        &format!("{}:/cache", dir.display()),
+        "--entrypoint",
+        "/bin/sh",
+        image,
+        "-c",
+        script,
+    ]
+    .iter()
+    .map(|part| part.to_string())
+    .collect();
+    if let Err(err) = docker.run(&args) {
+        tracing::warn!(%err, "could not fill the tools cache");
+        return false;
+    }
+    // The marker is written by the app, not the container: the rule that reads it runs on the
+    // host's clock, and one clock is enough.
+    deepsand_core::toolcache::mark_filled(dir, deepsand_core::now_ms()).is_ok()
+}
+
+/// Empty a cache entry, keeping the directory the build context points at.
+fn empty_tool_cache(dir: &std::path::Path) {
+    let _ = std::fs::remove_dir_all(dir.join("bin"));
+    let _ = std::fs::remove_dir_all(dir.join("node_modules"));
+    let _ = std::fs::remove_file(dir.join(deepsand_core::toolcache::FILLED_MARKER));
+    let _ = std::fs::create_dir_all(dir.join("bin"));
+    let _ = std::fs::create_dir_all(dir.join("node_modules"));
 }
 
 /// Claim an image for building. False means somebody else has it.

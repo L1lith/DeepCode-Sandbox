@@ -24,7 +24,7 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 357 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 361 tests |
 | `npm run app:test` | `cargo test -p deepsand-app` — the app crate's own tests, including the zombie guard. Part of `npm test`: it was not, and tests that never run are decoration |
 | `npm run core:check` | `cargo check --workspace` |
 | `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |
@@ -259,7 +259,15 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   the image tag already changes on every runtime edit and the tools must not be recompiled for
   a fixed comment. The cache is filled *from an image that built successfully*, never by a
   parallel install, so what is in it is what an image actually has; and a build that fails while
-  using it drops it, so a bad entry heals itself.
+  using it drops it, so a bad entry heals itself. Freshness is the second half -- a key cannot
+  see time passing -- so an entry older than `TOOL_CACHE_MAX_AGE` (two weeks) is emptied before
+  the build, which installs the tools again and refills it. That is "up to date, only when
+  necessary": immediate when the selection or the installer changes, fortnightly otherwise. The
+  DeepCode CLI is exempt and refreshes on every build, bounded by npm's fetch limits and
+  non-fatal when a copy exists, because for that one tool "latest" is the point. The cache is
+  emptied *only* when a build that used it failed for a reason that is about the build -- a
+  daemon that went away is neither the cache's fault nor the build's, and emptying on one of
+  those would throw away minutes of compiling for nothing.
 * **A build that stops talking is stopped.** The readers are blocked on the child's pipe, so
   the only thing that can interrupt a `docker build` which has stopped producing output is
   ending the process: `BUILD_SILENCE_LIMIT` (ten minutes of *silence*, not of elapsed time, and
