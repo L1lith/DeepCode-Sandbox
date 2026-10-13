@@ -440,6 +440,10 @@ pub struct AppState {
     pub store: Mutex<Store>,
     pub docker: Mutex<Option<Docker>>,
     pub sessions: Mutex<HashMap<String, LiveSession>>,
+    /// Images currently being built. Two builds of one image share one build log and one
+    /// tag, and a second writer behind a first writer's file offset is how a log acquires a
+    /// gap of NULs: whatever the second one writes lands where the first one had got to.
+    pub building: Mutex<std::collections::HashSet<String>>,
     /// request id -> the pending request, mirrored for the frontend.
     pub pending: Mutex<HashMap<String, PermissionRequest>>,
     pub pending_order: Mutex<Vec<String>>,
@@ -496,6 +500,7 @@ impl AppState {
             proxies: Mutex::new(HashMap::new()),
             remote_servers: Mutex::new(HashMap::new()),
             starting: Mutex::new(std::collections::HashSet::new()),
+            building: Mutex::new(std::collections::HashSet::new()),
             verified_seccomp: Mutex::new(None),
             // Sized for a burst of terminal output; a slow subscriber lags and is
             // told so rather than blocking the sandbox's output path.

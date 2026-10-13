@@ -347,7 +347,7 @@ enumerates families and flags so that dropping one fails a test rather than a re
 Everything above is asserted by tests you can run:
 
 ```bash
-cargo test -p deepsand-core                   # 320 tests, including the seccomp, allowlist and durability claims
+cargo test -p deepsand-core                   # 326 tests, including the seccomp, allowlist and durability claims
 node runtime/scripts/test-mcp-bridge.mjs      # 55 checks: the permission protocol end to end
 cargo test -p deepsand-core --test runtime_dockerfile   # claims about the image build, no Docker needed
 ```
@@ -371,6 +371,8 @@ The most load-bearing ones:
 | `every_filtered_address_family_is_refused` | the socket-family set, and that `AF_UNIX`/`INET`/`INET6`/`NETLINK` survive |
 | `the_ptrace_family_is_closed_including_pidfd_getfd` | the sibling of `ptrace` that was missing |
 | `a_stale_image_is_refused_and_says_which_side_is_which` | the applied profile *is* the shipped profile (R3-A) |
+| `a_zero_filled_chunk_from_a_dying_daemon_is_not_content` | NULs from a dead pipe are not written into the build log as output |
+| `the_daemon_going_away_is_recognised_as_an_interruption` | a vanished daemon is retried, a wrong Dockerfile is read |
 | `a_daemon_that_is_not_running_is_a_missing_server_not_an_error` | a stopped daemon reads as unreachable, not as unknown |
 | `the_runtime_revision_changes_when_any_input_changes` | the tag covers every image build input, so a rebuild cannot be skipped |
 | `a_project_image_extends_the_base_tag_rather_than_replacing_it` | a plan names the project's image, never the stem |

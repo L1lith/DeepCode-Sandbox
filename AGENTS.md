@@ -24,7 +24,7 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 320 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 326 tests |
 | `npm run core:check` | `cargo check --workspace` |
 | `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |
 | `npm test` | the two suites above, in order |
@@ -187,6 +187,24 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   also refuses `chmod` on a volume mount root, the entrypoint verifies the
   property that matters (uid 1000 can read its credentials and write its volume)
   and stops with an explanation instead of assuming.
+* **One build per image, one writer per log.** Everything that builds goes through
+  `build_runtime_image_impl` -- the Activity tab's button and a Run whose image is missing --
+  and it claims the image in `AppState::building` first. A second caller *waits*; a second
+  *writer* is how the build log came to hold two copies of the same RPC error at different
+  offsets with a gap of NULs between them, which is what a write at somebody else's file
+  offset looks like. If you add another way to build, put it behind that claim.
+* **Build output is read through `docker::sanitize_output_line`.** A read from a dying
+  daemon's pipe can come back zero-filled, and `BufRead::lines` hands that back as one line
+  of 32 KiB of NULs: the log from that failure is 302 bytes of output followed by 32,289
+  NULs. The filter cuts a line at its first NUL, drops control characters, drops a line that
+  is only them, and truncates at 4 KiB. It is applied where lines are handed out, so the
+  tail, the window and the log all see the same text. Anything that reads a pipe needs this
+  reasoning: NULs are not content, they are a read that did not happen.
+* **A build failure is classified before it is reported.** `docker::is_daemon_interruption`
+  separates "the daemon went away" from "the Dockerfile is wrong", because the responses are
+  opposite: the first is waited for and retried once (the layer cache survives it), the
+  second is read. Reporting the first as the second is how an operator ends up checking
+  their Dockerfile for a fault that is Docker Desktop restarting.
 * **Nothing on the first-paint path may call Docker.** Every `docker` invocation spawns
   the CLI, which costs 180-600 ms on this machine, so a probe is user-visible time. A probe
   was 1549 ms: five sequential calls for two versions, two `info` fields and an image

@@ -2838,38 +2838,125 @@ pub fn build_runtime_image_impl(
     // window, which is exactly when somebody wants to read it.
     let log_path = store(&state).data_dir().join("build.log");
 
+    // One build per image, enforced here because everything that builds goes through this
+    // function: the Activity tab's button, and a Run whose image is missing. Two builds of
+    // one image share a tag and one build log file, and the log from a real failure has two
+    // copies of the same RPC error in it at different offsets -- the second copy is the
+    // second writer, with a gap of NULs where it skipped ahead.
+    //
+    // A caller that arrives second *waits* rather than failing: it is usually a Run, and its
+    // image is being built right now by the build the operator started a moment earlier.
+    if !begin_build(state, &image) {
+        let line = format!(
+            "a build of {image} is already running; waiting for it instead of starting another"
+        );
+        let _ = app.emit(events::BUILD_LOG, serde_json::json!({ "line": line }));
+        // Half an hour: a tooled image with a Rust CLI in it takes minutes, and a build that
+        // has stopped making progress is what the timeout is for.
+        if !wait_for_build(state, &image, std::time::Duration::from_secs(1800)) {
+            return Err(format!(
+                "a build of {image} is already running and has not finished; it may be stuck. \
+                 Its output is in the Activity tab."
+            ));
+        }
+        // The build that was running may have failed. Its image either exists now or the
+        // caller is about to need one that does not.
+        if !state.docker().map_err(fail)?.image_present(&image) {
+            return Err(format!(
+                "the build of {image} that was already running finished without producing the \
+                 image. Its output is in the Activity tab."
+            ));
+        }
+        return Ok(());
+    }
+
     let app_handle = AppHandle::clone(app);
     std::thread::spawn(move || {
         let app_for_log = AppHandle::clone(&app_handle);
         let image_for_event = image.clone();
-        // Truncated per build: the previous build's output is not context, it is noise.
-        let mut log = std::fs::File::create(&log_path).ok();
-        let result = docker.build(&context, &image, &build_args, move |line| {
-            if let Some(file) = log.as_mut() {
-                use std::io::Write as _;
-                let _ = writeln!(file, "{line}");
+        // Truncated per build: the previous build's output is not context, it is noise. The
+        // header names the build, so a log that was cut short is still identifiable, and
+        // every line is flushed: the log's whole job is to survive the failure it describes.
+        let log = std::sync::Mutex::new(open_build_log(&log_path, &image, &build_args));
+
+        let write = |line: &str| {
+            if let Ok(mut guard) = log.lock() {
+                if let Some(file) = guard.as_mut() {
+                    use std::io::Write as _;
+                    let _ = writeln!(file, "{line}");
+                    let _ = file.flush();
+                }
             }
-            let _ = app_for_log.emit(events::BUILD_LOG, serde_json::json!({ "line": line }));
-            // Emitted only when the line reports a step, so the bar moves on real
-            // progress and an idle build does not look stalled at 0%.
-            if let Some((step, total)) = deepsand_core::docker::parse_build_step(&line) {
-                let _ = app_for_log.emit(
-                    events::BUILD_PROGRESS,
-                    serde_json::json!({
-                        "image": image_for_event,
-                        "step": step,
-                        "total": total,
-                    }),
-                );
+        };
+        if log.lock().map(|guard| guard.is_none()).unwrap_or(false) {
+            let _ = app_for_log.emit(
+                events::BUILD_LOG,
+                serde_json::json!({
+                    "line": format!(
+                        "the build log could not be written to {}; output follows in this window only",
+                        log_path.display()
+                    )
+                }),
+            );
+        }
+
+        // A build that dies because the daemon went away is retried once, after the daemon
+        // comes back. The layer cache survives it, so the second attempt resumes rather than
+        // starting over -- and the alternative is an operator reading an RPC error and
+        // clicking the button again, which is what this failure used to cost.
+        let mut attempt = 0;
+        let result = loop {
+            attempt += 1;
+            let outcome = docker.build(&context, &image, &build_args, |line| {
+                write(&line);
+                let _ = app_for_log.emit(events::BUILD_LOG, serde_json::json!({ "line": line }));
+                // Emitted only when the line reports a step, so the bar moves on real
+                // progress and an idle build does not look stalled at 0%.
+                if let Some((step, total)) = deepsand_core::docker::parse_build_step(&line) {
+                    let _ = app_for_log.emit(
+                        events::BUILD_PROGRESS,
+                        serde_json::json!({
+                            "image": image_for_event,
+                            "step": step,
+                            "total": total,
+                        }),
+                    );
+                }
+            });
+            match outcome {
+                Err(err) if attempt == 1 && deepsand_core::docker::is_daemon_interruption(&err.to_string()) => {
+                    let line = "the Docker daemon stopped answering during the build. That is not \
+                                the Dockerfile's doing and the layer cache survives it, so this is \
+                                being retried once after the daemon comes back.";
+                    write(line);
+                    let _ = app_for_log.emit(events::BUILD_LOG, serde_json::json!({ "line": line }));
+                    if wait_for_daemon(&docker, std::time::Duration::from_secs(180), &write) {
+                        let line = "the daemon is answering again; retrying the build";
+                        write(line);
+                        let _ =
+                            app_for_log.emit(events::BUILD_LOG, serde_json::json!({ "line": line }));
+                        continue;
+                    }
+                    break Err(format!(
+                        "{err}\n\nThe Docker daemon stopped answering mid-build and did not come \
+                         back within three minutes. Nothing is wrong with the image or the \
+                         project: start Docker again and build once more."
+                    ));
+                }
+                other => break other.map_err(|err| err.to_string()),
             }
-        });
+        };
+
+        // The image is no longer being built, whatever happened.
+        end_build(&tauri::Manager::state::<AppState>(&app_handle), &image);
+
         let _ = app_handle.emit(
             events::BUILD_DONE,
             match result {
                 Ok(()) => serde_json::json!({ "ok": true, "image": image }),
                 Err(err) => serde_json::json!({
                     "ok": false,
-                    "detail": format!("{err}\n\nThe full build log is {}.", log_path.display()),
+                    "detail": format!("{err}{}", log_note(&log_path, &log)),
                 }),
             },
         );
@@ -2877,6 +2964,111 @@ pub fn build_runtime_image_impl(
 
     let _ = build_tools;
     Ok(())
+}
+
+/// Claim an image for building. False means somebody else has it.
+fn begin_build(state: &AppState, image: &str) -> bool {
+    state
+        .building
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(image.to_string())
+}
+
+/// Release an image, whatever the build did.
+fn end_build(state: &AppState, image: &str) {
+    state
+        .building
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(image);
+}
+
+/// Wait for a build that is already running to release its image.
+///
+/// Returns false if it is still running when the budget runs out, which is the only honest
+/// thing to say about a build that has stopped reporting progress.
+fn wait_for_build(state: &AppState, image: &str, budget: std::time::Duration) -> bool {
+    let started = std::time::Instant::now();
+    loop {
+        let busy = state
+            .building
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(image);
+        if !busy {
+            return true;
+        }
+        if started.elapsed() >= budget {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+/// Start a build log, with a header naming the build it belongs to.
+///
+/// The header is not decoration: without it, a log that was truncated by a crash or filled
+/// by a second writer cannot be told from one that simply ends, and this file has been both.
+fn open_build_log(
+    path: &Path,
+    image: &str,
+    build_args: &[(&str, String)],
+) -> Option<std::fs::File> {
+    use std::io::Write as _;
+
+    let mut file = std::fs::File::create(path).ok()?;
+    let _ = writeln!(file, "Deepsand runtime image build");
+    let _ = writeln!(file, "  started (epoch ms): {}", deepsand_core::now_ms());
+    let _ = writeln!(file, "  image             : {image}");
+    for (key, value) in build_args {
+        let _ = writeln!(file, "  {key}={value}");
+    }
+    let _ = writeln!(file, "--- docker build output ---");
+    let _ = file.flush();
+    Some(file)
+}
+
+/// What to append to a failure about the log file: only promise a log that exists.
+fn log_note(path: &Path, log: &std::sync::Mutex<Option<std::fs::File>>) -> String {
+    match log.lock() {
+        Ok(guard) if guard.is_some() => format!("\n\nThe full build log is {}.", path.display()),
+        _ => format!(
+            "\n\n(The build log at {} could not be written; the output is above.)",
+            path.display()
+        ),
+    }
+}
+
+/// Wait for the Docker daemon to answer again, up to `budget`.
+///
+/// One `docker version` per attempt rather than a full probe: this is a liveness question,
+/// and a probe is three CLI invocations.
+fn wait_for_daemon(
+    docker: &deepsand_core::docker::Docker,
+    budget: std::time::Duration,
+    note: &impl Fn(&str),
+) -> bool {
+    let started = std::time::Instant::now();
+    let mut announced = false;
+    loop {
+        let args = vec![
+            "version".to_string(),
+            "--format".to_string(),
+            "{{.Server.Version}}".to_string(),
+        ];
+        if docker.try_run(&args).is_some_and(|out| !out.is_empty()) {
+            return true;
+        }
+        if started.elapsed() >= budget {
+            return false;
+        }
+        if !announced {
+            note("waiting for the Docker daemon to come back…");
+            announced = true;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
 }
 
 /// Locate the `runtime/` directory (Dockerfile, entrypoint, MCP bridge).

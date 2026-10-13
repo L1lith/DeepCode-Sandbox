@@ -213,7 +213,7 @@ desktop app and the headless CLI cannot behave differently.
 
 ```bash
 npm run app:dev              # app with hot reload
-npm run core:test            # 320 Rust tests: paths, policy, broker, proxy, credentials, seccomp, durability
+npm run core:test            # 326 Rust tests: paths, policy, broker, proxy, credentials, seccomp, durability
 npm run test:bridge          # 55 checks: the permission protocol end to end
 npm test                     # both suites
 npm run core:check           # cargo check --workspace

@@ -299,9 +299,15 @@ impl Docker {
             }
             tail.push(line.to_string());
         };
+        // Every line goes through the filter, so none of this reaches the tail, the emit or
+        // the log: the log file is the artifact a human reads after a failure, and it is the
+        // one that was filled with NULs by a daemon that vanished mid-build.
         let mut sink = |line: &str| {
-            keep_tail(line, &mut tail);
-            sink(line);
+            let Some(line) = sanitize_output_line(line) else {
+                return;
+            };
+            keep_tail(&line, &mut tail);
+            sink(&line);
         };
 
         if let Some(reader) = child.stderr.take().map(BufReader::new) {
@@ -641,6 +647,64 @@ impl Docker {
 /// A daemon that is not running still prints a `Client` block, and may omit `Server` or
 /// report it as null, so the server half is optional rather than an error: the caller turns
 /// its absence into "the daemon is not reachable".
+/// One line of build output, or `None` if it is not text at all.
+///
+/// A read from a dying Docker daemon's pipe can come back **zero-filled**: the reader gets
+/// its whole buffer length in NULs and no newline, so `lines()` hands back one "line" of
+/// 32 KiB of nothing. That was written to the build log as content, and the log from the
+/// failure this comes from is 302 bytes of real output followed by 32,289 NULs -- a file
+/// 32,767 bytes long that had five lines to say. Anything after the first NUL is not text,
+/// so it is dropped, and a line that is only that is dropped entirely.
+///
+/// Long lines are truncated rather than trusted: no build step writes a 4 KiB line, and a
+/// log whose whole purpose is to be read should not be filled by something that is not.
+pub fn sanitize_output_line(line: &str) -> Option<String> {
+    const MAX: usize = 4096;
+    let text = match line.find('\0') {
+        Some(index) => &line[..index],
+        None => line,
+    };
+    // Other control characters are not output either, but tab is (make and cargo indent with
+    // it). This keeps the line readable instead of turning it into a row of escapes.
+    let cleaned: String = text
+        .chars()
+        .filter(|c| *c == '\t' || !c.is_control())
+        .collect();
+    let trimmed = cleaned.trim_end();
+    if trimmed.trim().is_empty() {
+        return None;
+    }
+    if trimmed.len() > MAX {
+        let mut cut = String::with_capacity(MAX + 16);
+        cut.push_str(&trimmed[..MAX]);
+        cut.push_str(" …[truncated]");
+        return Some(cut);
+    }
+    Some(trimmed.to_string())
+}
+
+/// Whether a build failure is the daemon going away rather than the build being wrong.
+///
+/// Docker Desktop restarting mid-build, or its VM dying, surfaces as an RPC error from the
+/// client: the build never got as far as reporting anything about the image. That is worth
+/// distinguishing because the two need opposite responses -- one is retried, the other is
+/// read -- and because the cache survives it, so the retry is usually cheap.
+pub fn is_daemon_interruption(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    const SIGNS: [&str; 9] = [
+        "failed to receive status",
+        "rpc error",
+        "error reading from server",
+        "cannot connect to the docker daemon",
+        "error during connect",
+        "is the docker daemon running",
+        "unexpected eof",
+        "connection reset by peer",
+        "connection refused",
+    ];
+    SIGNS.iter().any(|sign| lower.contains(sign))
+}
+
 pub fn parse_versions(json: &str) -> (String, Option<String>) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
         return (String::new(), None);
@@ -809,6 +873,71 @@ fn which(program: &str) -> Option<PathBuf> {
 /// The probe reads JSON that Docker produces, and the two pieces it needs from it. Worth
 /// testing on its own: the shapes below are trimmed copies of real output, including the
 /// daemon-less case, which is the one that has to be distinguished from a parse failure.
+/// The output filter, tested on the case it exists for: the 32 KiB of NULs a dying daemon
+/// leaves in the pipe, which was written into the build log as if it were a line.
+#[cfg(test)]
+mod build_output_tests {
+    use super::*;
+
+    #[test]
+    fn a_normal_line_is_kept() {
+        assert_eq!(
+            sanitize_output_line("#5 [2/3] RUN apt-get update"),
+            Some("#5 [2/3] RUN apt-get update".to_string())
+        );
+        assert_eq!(
+            sanitize_output_line("\tcompiling htmlq v0.1.0"),
+            Some("\tcompiling htmlq v0.1.0".to_string()),
+            "cargo and make indent with tabs"
+        );
+    }
+
+    #[test]
+    fn a_zero_filled_chunk_from_a_dying_daemon_is_not_content() {
+        let junk = "\0".repeat(32_000);
+        assert_eq!(sanitize_output_line(&junk), None);
+        assert_eq!(sanitize_output_line(""), None);
+        assert_eq!(sanitize_output_line("   \r"), None);
+    }
+
+    #[test]
+    fn text_before_the_nulls_is_kept_and_nothing_after_it_is() {
+        let line = format!("ERROR: failed to build{}", "\0".repeat(32_000));
+        assert_eq!(
+            sanitize_output_line(&line),
+            Some("ERROR: failed to build".to_string())
+        );
+    }
+
+    #[test]
+    fn an_absurdly_long_line_is_cut_rather_than_written_whole() {
+        let line = "x".repeat(20_000);
+        let kept = sanitize_output_line(&line).expect("text is text");
+        assert!(kept.len() < 4200, "{}", kept.len());
+        assert!(kept.ends_with("[truncated]"));
+    }
+
+    /// The failure this comes from, verbatim.
+    #[test]
+    fn the_daemon_going_away_is_recognised_as_an_interruption() {
+        assert!(is_daemon_interruption(
+            "failed to build: failed to receive status: rpc error: code = Unavailable desc = error reading from server: EOF"
+        ));
+        assert!(is_daemon_interruption(
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+        ));
+    }
+
+    /// And a build that is genuinely wrong is not, because the two get opposite responses.
+    #[test]
+    fn a_real_build_failure_is_not_an_interruption() {
+        assert!(!is_daemon_interruption(
+            "the command '/bin/sh -c apt-get install -y curl,git' returned a non-zero code: 100"
+        ));
+        assert!(!is_daemon_interruption("E: Unable to locate package curl,git"));
+    }
+}
+
 #[cfg(test)]
 mod probe_parsing_tests {
     use super::*;
