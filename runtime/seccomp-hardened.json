@@ -102,56 +102,56 @@
       "names": ["clone"],
       "action": "SCMP_ACT_ERRNO",
       "errnoRet": 1,
-      "args": [{ "index": 0, "value": 128, "op": "SCMP_CMP_MASKED_EQ" }]
+      "args": [{ "index": 0, "value": 128, "valueTwo": 128, "op": "SCMP_CMP_MASKED_EQ" }]
     },
     {
       "comment": "CLONE_NEWNS (0x00020000)",
       "names": ["clone"],
       "action": "SCMP_ACT_ERRNO",
       "errnoRet": 1,
-      "args": [{ "index": 0, "value": 131072, "op": "SCMP_CMP_MASKED_EQ" }]
+      "args": [{ "index": 0, "value": 131072, "valueTwo": 131072, "op": "SCMP_CMP_MASKED_EQ" }]
     },
     {
       "comment": "CLONE_NEWCGROUP (0x02000000)",
       "names": ["clone"],
       "action": "SCMP_ACT_ERRNO",
       "errnoRet": 1,
-      "args": [{ "index": 0, "value": 33554432, "op": "SCMP_CMP_MASKED_EQ" }]
+      "args": [{ "index": 0, "value": 33554432, "valueTwo": 33554432, "op": "SCMP_CMP_MASKED_EQ" }]
     },
     {
       "comment": "CLONE_NEWUTS (0x04000000)",
       "names": ["clone"],
       "action": "SCMP_ACT_ERRNO",
       "errnoRet": 1,
-      "args": [{ "index": 0, "value": 67108864, "op": "SCMP_CMP_MASKED_EQ" }]
+      "args": [{ "index": 0, "value": 67108864, "valueTwo": 67108864, "op": "SCMP_CMP_MASKED_EQ" }]
     },
     {
       "comment": "CLONE_NEWIPC (0x08000000)",
       "names": ["clone"],
       "action": "SCMP_ACT_ERRNO",
       "errnoRet": 1,
-      "args": [{ "index": 0, "value": 134217728, "op": "SCMP_CMP_MASKED_EQ" }]
+      "args": [{ "index": 0, "value": 134217728, "valueTwo": 134217728, "op": "SCMP_CMP_MASKED_EQ" }]
     },
     {
-      "comment": "CLONE_NEWUSER (0x10000000) - needs no capability, so this is the load-bearing one",
+      "comment": "CLONE_NEWUSER (0x10000000) - the load-bearing one, since it needs no capability. For anyone editing these: with SCMP_CMP_MASKED_EQ the first value is the MASK and valueTwo is what the masked bits must equal. Setting only the first means (flags AND mask) == 0, which matches every call that does NOT set the bit - that inverted all eight of these rules and made them block fork itself, so every sandbox exited on start with: FATAL tini (1)] fork failed: Operation not permitted",
       "names": ["clone"],
       "action": "SCMP_ACT_ERRNO",
       "errnoRet": 1,
-      "args": [{ "index": 0, "value": 268435456, "op": "SCMP_CMP_MASKED_EQ" }]
+      "args": [{ "index": 0, "value": 268435456, "valueTwo": 268435456, "op": "SCMP_CMP_MASKED_EQ" }]
     },
     {
       "comment": "CLONE_NEWPID (0x20000000)",
       "names": ["clone"],
       "action": "SCMP_ACT_ERRNO",
       "errnoRet": 1,
-      "args": [{ "index": 0, "value": 536870912, "op": "SCMP_CMP_MASKED_EQ" }]
+      "args": [{ "index": 0, "value": 536870912, "valueTwo": 536870912, "op": "SCMP_CMP_MASKED_EQ" }]
     },
     {
       "comment": "CLONE_NEWNET (0x40000000)",
       "names": ["clone"],
       "action": "SCMP_ACT_ERRNO",
       "errnoRet": 1,
-      "args": [{ "index": 0, "value": 1073741824, "op": "SCMP_CMP_MASKED_EQ" }]
+      "args": [{ "index": 0, "value": 1073741824, "valueTwo": 1073741824, "op": "SCMP_CMP_MASKED_EQ" }]
     },
     {
       "comment": "AF_PACKET (17): raw frames. Denied because a registered family that is not IP has no business here, and this one gives direct access to the link layer.",

@@ -261,3 +261,42 @@ fn the_other_escape_primitives_from_round_three_stay_refused() {
         assert_refused(&profile, syscall);
     }
 }
+
+/// Every masked comparison has to say what the masked bits must equal.
+///
+/// For `SCMP_CMP_MASKED_EQ` the first value is the *mask* and `valueTwo` is what the masked bits are
+/// compared against. With `valueTwo` absent it defaults to zero, so the rule matches every call where
+/// those bits are *clear* -- the opposite of what each of these rules intends. This is not
+/// hypothetical: it made the eight `clone` rules block `fork` itself, and every sandbox exited on
+/// start with `FATAL tini (1)] fork failed: Operation not permitted`, which from the window looked
+/// like a launch that hung with no container and no error. The earlier test here checked that a
+/// masked comparison *existed*, which it did, while the profile was inverted.
+#[test]
+fn every_masked_comparison_says_what_the_bits_must_equal() {
+    let text = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../runtime/seccomp-hardened.json"),
+    )
+    .expect("the profile ships with the crate");
+    let profile: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+
+    let mut checked = 0;
+    for rule in profile["syscalls"].as_array().expect("syscalls") {
+        let name = rule["names"][0].as_str().unwrap_or("?");
+        for arg in rule["args"].as_array().cloned().unwrap_or_default() {
+            if arg["op"].as_str() != Some("SCMP_CMP_MASKED_EQ") {
+                continue;
+            }
+            let mask = arg["value"].as_u64().expect("a mask");
+            let wanted = arg["valueTwo"].as_u64().unwrap_or_else(|| {
+                panic!("{name}: a masked comparison with no valueTwo means \"bits clear\", not \"bit set\"")
+            });
+            assert_eq!(
+                wanted, mask,
+                "{name}: these rules block a flag by setting it, so the wanted bits are the mask"
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 8, "the eight clone namespace flags");
+}
