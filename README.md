@@ -79,6 +79,20 @@ file *inside* the sandbox, then types the path where the CLI can read it.
 - Nothing is attached unless a sandbox is running, and a file that fails is reported on its own
   rather than losing the files that worked.
 
+## Starting, closing, and the tray
+
+Two settings, both off by default, in Settings:
+
+- **Starting up** — *Off*, *In the background*, or *With the window*. In the background Deepsand
+  starts with your computer and no window at all: the tray icon opens it, and it is running so
+  your sandboxes can be.
+- **Closing** — off, the close button does what it always did: the sandboxes stop and Deepsand
+  quits. On, the window hides and everything keeps running.
+
+The tray icon appears exactly when hiding is possible, and its menu has **Open Deepsand** and
+**Quit and stop the sandboxes** — the honest pair, because those are the two things an operator
+wants from a tray: get back to it, or actually finish.
+
 ## Install
 
 Requires **Docker Desktop** (or Docker Engine on Linux) and, to build from
@@ -229,8 +243,8 @@ desktop app and the headless CLI cannot behave differently.
 
 ```bash
 npm run app:dev              # app with hot reload
-npm run core:test            # 361 core tests: paths, policy, broker, proxy, credentials, seccomp, durability
-npm run app:test             # 12 tests in the app crate: the zombie guard, and the log file
+npm run core:test            # 366 core tests: paths, policy, broker, proxy, credentials, seccomp, durability
+npm run app:test             # 13 tests in the app crate: the zombie guard, and the log file
 npm run test:bridge          # 55 checks: the permission protocol end to end
 npm test                     # both suites
 npm run core:check           # cargo check --workspace

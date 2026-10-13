@@ -9,6 +9,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  StartupMode,
   AllowlistView,
   AppInfo,
   AppSettings,
@@ -118,9 +119,18 @@ export const setProjectAllowlist = (projectId: string, entries: string[]) =>
  * Read from the operating system rather than from the settings file, so a startup
  * entry removed by hand is reflected instead of contradicted.
  */
-export const getStartAtLogin = () => call<boolean>("get_start_at_login", {});
-export const setStartAtLogin = (enabled: boolean) =>
-  call<boolean>("set_start_at_login", { enabled });
+export const getStartupMode = () => call<StartupMode>("get_startup_mode", {});
+export const setStartupMode = (mode: StartupMode) =>
+  call<StartupMode>("set_startup_mode", { mode });
+
+/**
+ * Whether the close button hides the window instead of stopping Deepsand.
+ *
+ * Persisted here rather than through the settings form, because the tray icon has to appear at
+ * the moment the setting changes rather than when the form is saved.
+ */
+export const setCloseToTray = (enabled: boolean) =>
+  call<boolean>("set_close_to_tray", { enabled });
 
 export const listSecrets = (projectId: string) =>
   call<SecretListView>("list_secrets", { projectId });

@@ -30,7 +30,7 @@ deepsand-core = { workspace = true }
 # already has rustls for the remote server's TLS.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 # One Deepsand at a time: two would fight over container names.
 tauri-plugin-single-instance = "2"

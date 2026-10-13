@@ -3149,60 +3149,117 @@ pub fn delete_secret(
 /* Starting with the computer                                                */
 /* ------------------------------------------------------------------------- */
 
-/// The binary to register, which is this executable.
-fn autostart_entry() -> Result<auto_launch::AutoLaunch, String> {
-    let exe = std::env::current_exe().map_err(|err| format!("could not locate the Deepsand binary: {err}"))?;
-    auto_launch::AutoLaunchBuilder::new()
+/// The argument that tells a background launch apart from a normal one.
+///
+/// The operating system starts the same binary either way: "in the background" is this one word
+/// rather than a second program.
+pub const BACKGROUND_ARG: &str = "--minimized";
+
+/// Whether this process was started by the operating system in the background.
+pub fn started_in_background() -> bool {
+    std::env::args().any(|arg| arg == BACKGROUND_ARG)
+}
+
+/// The binary to register, which is this executable, and how it should start.
+fn autostart_entry(mode: StartupMode) -> Result<auto_launch::AutoLaunch, String> {
+    let exe = std::env::current_exe()
+        .map_err(|err| format!("could not locate the Deepsand binary: {err}"))?;
+    let mut builder = auto_launch::AutoLaunchBuilder::new();
+    builder
         .set_app_name("Deepsand")
         .set_app_path(&exe.to_string_lossy())
         // macOS has no equivalent of a Run key, so this is ignored elsewhere.
-        .set_use_launch_agent(true)
+        .set_use_launch_agent(true);
+    if mode.starts_hidden() {
+        // The app shows its window unless it is told not to, so `Background` is the same binary
+        // with one argument rather than a second way of running.
+        builder.set_args(&[BACKGROUND_ARG]);
+    }
+    builder
         .build()
         .map_err(|err| format!("could not prepare the autostart entry: {err}"))
 }
 
-/// Whether the operating system is currently set to start Deepsand.
+/// The startup mode, as the operating system and the settings file agree on it.
 ///
-/// Read from the OS rather than from the settings file, because the two can diverge:
-/// an operator who removes the entry by hand should see that reflected rather than
-/// being told a setting is on when it is not.
-pub fn start_at_login_impl() -> CmdResult<bool> {
-    let entry = autostart_entry()?;
-    entry.is_enabled().map_err(|err| format!("could not read the autostart state: {err}"))
-}
-
-#[tauri::command]
-pub fn get_start_at_login() -> CmdResult<bool> {
-    start_at_login_impl()
-}
-
-pub fn set_start_at_login_impl(state: &AppState, enabled: bool) -> CmdResult<bool> {
-    let entry = autostart_entry()?;
-    let applied = if enabled {
-        entry.enable().map(|_| true).map_err(|err| {
-            format!(
-                "could not add Deepsand to your startup items ({err}). On Linux this needs a desktop \
-                 session with a writable autostart directory."
-            )
-        })?
+/// The operating system is the truth for *whether* there is an entry -- an operator who removes
+/// it by hand should see that rather than being contradicted -- and the settings file is the
+/// truth for *how* it starts, which the OS cannot express beyond the argument it was given.
+pub fn startup_mode_impl(state: &AppState) -> CmdResult<String> {
+    let entry = autostart_entry(StartupMode::Foreground)?;
+    let enabled = entry
+        .is_enabled()
+        .map_err(|err| format!("could not read the autostart state: {err}"))?;
+    if !enabled {
+        return Ok(StartupMode::Off.as_str().to_string());
+    }
+    let stored = store(state).settings().startup;
+    // An entry that exists while the setting says off was written by something else, or before
+    // there was a mode to store: showing it as foreground is what it will actually do.
+    let mode = if stored.is_on() {
+        stored
     } else {
-        entry.disable().map(|_| false).map_err(|err| {
-            format!("could not remove Deepsand from your startup items ({err})")
-        })?
+        StartupMode::Foreground
     };
+    Ok(mode.as_str().to_string())
+}
 
-    // Only stored once the OS has accepted it, so the setting and the machine agree.
+pub fn set_startup_mode_impl(state: &AppState, mode: StartupMode) -> CmdResult<String> {
+    // Cleared first, always: an entry already there carries the arguments of the mode it was
+    // made for, and enabling over it would keep them -- which is how "start hidden" would
+    // outlive being turned off.
+    autostart_entry(StartupMode::Off)?
+        .disable()
+        .map_err(|err| format!("could not remove the old startup entry ({err})"))?;
+    if mode.is_on() {
+        autostart_entry(mode)?.enable().map_err(|err| {
+            format!(
+                "could not add Deepsand to your startup items ({err}). On Linux this needs a \
+                 desktop session with a writable autostart directory."
+            )
+        })?;
+    }
+
+    // Only stored once the machine has accepted it, so the setting and the machine agree.
     {
         let mut store = store(state);
-        store.settings_mut().start_at_login = applied;
+        store.settings_mut().startup = mode;
         store.save().map_err(fail)?;
     }
-    Ok(applied)
+    Ok(mode.as_str().to_string())
 }
 
 #[tauri::command]
-pub fn set_start_at_login(state: State<'_, AppState>, enabled: bool) -> CmdResult<bool> {
-    set_start_at_login_impl(&state, enabled)
+pub fn get_startup_mode(state: State<'_, AppState>) -> CmdResult<String> {
+    startup_mode_impl(&state)
+}
+
+#[tauri::command]
+pub fn set_startup_mode(state: State<'_, AppState>, mode: String) -> CmdResult<String> {
+    let mode =
+        StartupMode::from_str(&mode).ok_or_else(|| format!("unknown startup mode {mode:?}"))?;
+    set_startup_mode_impl(&state, mode)
+}
+
+/// Whether closing the window hides Deepsand instead of stopping it.
+pub fn closes_to_tray(state: &AppState) -> bool {
+    store(state).settings().close_to_tray
+}
+
+/// Set that, and put the tray icon where it is now needed -- or take it away.
+#[tauri::command]
+pub fn set_close_to_tray(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> CmdResult<bool> {
+    {
+        let mut store = store(state.inner());
+        store.settings_mut().close_to_tray = enabled;
+        store.save().map_err(fail)?;
+    }
+    crate::tray::set_visible(&app, enabled);
+    Ok(enabled)
 }
 
 #[tauri::command]

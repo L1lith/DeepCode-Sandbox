@@ -539,6 +539,98 @@ impl Default for SecuritySettings {
     }
 }
 
+/// What Deepsand should do when the operator logs in.
+///
+/// Three options rather than a switch, because "start with the computer" and "start with the
+/// computer and take over the screen" are different intentions. `Background` is for an operator
+/// who wants their sandboxes and their tray icon waiting without a window appearing over
+/// whatever they were doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StartupMode {
+    #[default]
+    Off,
+    /// Start at login with no window; the tray icon is the way in.
+    Background,
+    /// Start at login with the window showing, which is what the earlier boolean meant.
+    Foreground,
+}
+
+impl StartupMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StartupMode::Off => "off",
+            StartupMode::Background => "background",
+            StartupMode::Foreground => "foreground",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "false" | "no" => Some(StartupMode::Off),
+            "background" | "tray" | "minimised" | "minimized" => Some(StartupMode::Background),
+            "foreground" | "window" | "on" | "true" | "yes" => Some(StartupMode::Foreground),
+            _ => None,
+        }
+    }
+
+    /// Whether the operating system should have a startup entry at all.
+    pub fn is_on(self) -> bool {
+        !matches!(self, StartupMode::Off)
+    }
+
+    /// Whether the window should stay hidden when started this way.
+    pub fn starts_hidden(self) -> bool {
+        matches!(self, StartupMode::Background)
+    }
+}
+
+impl std::fmt::Display for StartupMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl serde::Serialize for StartupMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// Reads the three names, and the boolean this replaced.
+///
+/// `start_at_login: true` used to mean "start with the computer", which is the default here:
+/// losing it silently because the field grew a third state would be a small betrayal of whoever
+/// had turned it on.
+impl<'de> serde::Deserialize<'de> for StartupMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = StartupMode;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a startup mode (off, background, foreground), or the boolean it replaced")
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, on: bool) -> Result<StartupMode, E> {
+                Ok(if on {
+                    StartupMode::Foreground
+                } else {
+                    StartupMode::Off
+                })
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<StartupMode, E> {
+                StartupMode::from_str(value).ok_or_else(|| {
+                    serde::de::Error::custom(format!("unknown startup mode {value:?}"))
+                })
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     /// Runtime image tag.
@@ -571,14 +663,24 @@ pub struct AppSettings {
     /// Servers that expose this GUI over HTTP, and how much each may do.
     #[serde(default)]
     pub remote: crate::remote::RemoteAccessSettings,
-    /// Start Deepsand when the operator logs in.
+    /// Start Deepsand when the operator logs in, and how.
     ///
     /// Off by default, and deliberately independent of
     /// `remote.persist_across_restarts`: wanting the app ready when you sit down is
     /// a different intention from wanting a network-reachable control plane that is
     /// already listening.
+    ///
+    /// The alias is the boolean this replaced, and the custom deserializer above reads it: an
+    /// existing `start_at_login: true` becomes `Foreground`, which is what it meant.
+    #[serde(default, alias = "start_at_login")]
+    pub startup: StartupMode,
+    /// Whether the window's close button hides Deepsand instead of stopping it.
+    ///
+    /// Off by default, because the surprising behaviour is hiding: an operator who closes the
+    /// window expects their sandboxes to stop, and one who does not gets a machine quietly
+    /// running containers they cannot see.
     #[serde(default)]
-    pub start_at_login: bool,
+    pub close_to_tray: bool,
 }
 
 fn default_image() -> String {
@@ -622,7 +724,8 @@ impl Default for AppSettings {
             default_model: default_model(),
             data_dir: None,
             remote: crate::remote::RemoteAccessSettings::default(),
-            start_at_login: false,
+            startup: StartupMode::Off,
+            close_to_tray: false,
         }
     }
 }
@@ -1074,6 +1177,66 @@ mod reasoning_effort_tests {
 /// so that every build in circulation can read the file. These tests are what make that a
 /// fact rather than a hope, because a state file that no longer loads is an operator's
 /// projects gone.
+#[cfg(test)]
+mod startup_mode_tests {
+    use super::*;
+
+    /// The three names round-trip, and the default is off.
+    #[test]
+    fn every_startup_mode_survives_a_round_trip() {
+        assert_eq!(StartupMode::default(), StartupMode::Off, "off is the default");
+        for mode in [
+            StartupMode::Off,
+            StartupMode::Background,
+            StartupMode::Foreground,
+        ] {
+            let text = serde_json::to_string(&mode).unwrap();
+            assert_eq!(text, format!("\"{}\"", mode.as_str()));
+            let back: StartupMode = serde_json::from_str(&text).unwrap();
+            assert_eq!(back, mode);
+        }
+    }
+
+    /// The boolean this replaced, so nobody's autostart silently turns off.
+    #[test]
+    fn the_boolean_this_replaced_is_still_read() {
+        let on: StartupMode = serde_json::from_str("true").unwrap();
+        assert_eq!(on, StartupMode::Foreground);
+        let off: StartupMode = serde_json::from_str("false").unwrap();
+        assert_eq!(off, StartupMode::Off);
+    }
+
+    /// An older state file uses the old *key*, which the field aliases.
+    #[test]
+    fn a_settings_file_with_the_old_key_still_parses() {
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"start_at_login": true}"#).unwrap();
+        assert_eq!(settings.startup, StartupMode::Foreground);
+        let other: AppSettings = serde_json::from_str(r#"{"startup": "background"}"#).unwrap();
+        assert_eq!(other.startup, StartupMode::Background);
+        assert!(other.startup.starts_hidden());
+        assert!(!other.startup.starts_hidden() || other.startup.is_on());
+    }
+
+    /// A mode nobody recognises is an error rather than a silent "off": this controls whether
+    /// the app starts with the machine, and guessing wrong is worse than saying so.
+    #[test]
+    fn an_unknown_mode_is_an_error() {
+        assert!(serde_json::from_str::<StartupMode>("\"sometimes\"").is_err());
+        assert_eq!(StartupMode::from_str("  Background "), Some(StartupMode::Background));
+        assert_eq!(StartupMode::from_str("tray"), Some(StartupMode::Background));
+        assert_eq!(StartupMode::from_str("nonsense"), None);
+    }
+
+    /// Closing to the tray is off unless somebody says otherwise.
+    #[test]
+    fn closing_to_the_tray_is_off_by_default() {
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.close_to_tray);
+        assert_eq!(settings.startup, StartupMode::Off);
+    }
+}
+
 #[cfg(test)]
 mod network_policy_tests {
     use super::*;

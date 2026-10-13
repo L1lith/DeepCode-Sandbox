@@ -24,7 +24,7 @@ npm run app:dev         # app with hot reload
 | --- | --- |
 | `npm run app:dev` | Tauri app with hot reload |
 | `npm run app:build` | platform installer |
-| `npm run core:test` | `cargo test -p deepsand-core` — 361 tests |
+| `npm run core:test` | `cargo test -p deepsand-core` — 366 tests |
 | `npm run app:test` | `cargo test -p deepsand-app` — the app crate's own tests, including the zombie guard. Part of `npm test`: it was not, and tests that never run are decoration |
 | `npm run core:check` | `cargo check --workspace` |
 | `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |
@@ -268,6 +268,16 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   emptied *only* when a build that used it failed for a reason that is about the build -- a
   daemon that went away is neither the cache's fault nor the build's, and emptying on one of
   those would throw away minutes of compiling for nothing.
+* **Hiding is only allowed when there is a way back.** Closing to the tray and starting in the
+  background are one feature with the tray icon, not two: `tray::wanted` is the rule and the
+  first thing its tests check, because a window that can vanish with no way back is a machine
+  quietly running containers nobody can see. The difference between hiding and closing is one
+  branch in `on_window_event`: hiding never runs `shutdown_cleanup`, so the sandboxes keep
+  running -- which is the entire point of closing to the tray -- while the tray's Quit goes
+  through the ordinary exit, so it does stop them. Startup has three modes rather than the
+  boolean it replaced, and the boolean is still read: `start_at_login: true` becomes
+  `Foreground`, which is what it meant, and the field keeps the old name as an alias so an
+  existing state file is understood rather than silently ignored.
 * **A build that stops talking is stopped.** The readers are blocked on the child's pipe, so
   the only thing that can interrupt a `docker build` which has stopped producing output is
   ending the process: `BUILD_SILENCE_LIMIT` (ten minutes of *silence*, not of elapsed time, and

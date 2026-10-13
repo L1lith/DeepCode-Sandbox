@@ -19,6 +19,7 @@ import { baseName, shortPath } from "../lib/format";
 import {
   DEFAULT_LIMITS,
   type AppSettings,
+  type StartupMode,
   type PermissionRequestView,
   type ProjectView,
   type ResourceLimits,
@@ -696,29 +697,36 @@ export function ProjectSettingsDialog(props: { project: ProjectView; onClose: ()
  * press the button, not when they later close a form.
  */
 /**
- * The start-with-the-computer toggle.
+ * The start-with-the-computer control.
  *
- * The switch reflects the operating system, not the settings file: if the entry is
- * removed by hand the toggle follows, rather than claiming to be on.
+ * The switch reflects the operating system, not the settings file: if the entry is removed by
+ * hand the control follows, rather than claiming to be on.
+ *
+ * Three options rather than a checkbox, because "start with the computer" and "start with the
+ * computer and take over the screen" are different intentions. Background is the one that needs
+ * the tray icon, which the app puts in place by itself.
  */
 function AutostartSection() {
-  const [enabled, setEnabled] = createSignal<boolean | null>(null);
+  const [mode, setMode] = createSignal<StartupMode | null>(null);
   const [busy, setBusy] = createSignal(false);
   const [problem, setProblem] = createSignal<string | null>(null);
 
   onMount(() => {
     void api
-      .getStartAtLogin()
-      .then(setEnabled)
-      .catch(() => setEnabled(null));
+      .getStartupMode()
+      .then((value) => setMode(value))
+      .catch(() => setMode(null));
   });
 
-  async function toggle(next: boolean) {
+  async function choose(next: StartupMode) {
+    const previous = mode();
     setBusy(true);
     setProblem(null);
+    setMode(next);
     try {
-      setEnabled(await api.setStartAtLogin(next));
+      setMode(await api.setStartupMode(next));
     } catch (error) {
+      setMode(previous);
       setProblem(describeError(error));
     } finally {
       setBusy(false);
@@ -728,16 +736,25 @@ function AutostartSection() {
   return (
     <div class="field">
       <label>Starting up</label>
-      <label class="row-inline small">
-        <input
-          type="checkbox"
-          checked={enabled() === true}
-          disabled={busy() || enabled() === null}
-          onChange={(event) => void toggle(event.currentTarget.checked)}
-        />
-        Start Deepsand when I sign in
-      </label>
-      <Show when={enabled() === null}>
+      <div class="row-inline">
+        <span class="grow">
+          Start Deepsand when I sign in.
+          <span class="hint">
+            In the background it starts with no window at all — the tray icon opens it, and it is
+            running so your sandboxes can be.
+          </span>
+        </span>
+        <select
+          value={mode() ?? "off"}
+          disabled={busy() || mode() === null}
+          onChange={(event) => void choose(event.currentTarget.value as StartupMode)}
+        >
+          <option value="off">Off</option>
+          <option value="background">In the background</option>
+          <option value="foreground">With the window</option>
+        </select>
+      </div>
+      <Show when={mode() === null}>
         <span class="hint">
           The startup state could not be read on this system, so it cannot be changed from here.
         </span>
@@ -746,8 +763,8 @@ function AutostartSection() {
         {(message) => <div class="callout callout-danger">{message()}</div>}
       </Show>
       <span class="hint">
-        Deepsand starts with its window, and sandboxes only start when you run them. A project set to
-        run on its own is not affected by this.
+        Sandboxes still only start when you run them; a project set to run on its own is not
+        affected by this.
       </span>
     </div>
   );
@@ -1183,6 +1200,18 @@ export function SettingsDialog(props: { settings: AppSettings; onClose: () => vo
    * what this section is for. A failed check is shown as itself rather than as "up to
    * date": a laptop on a train is not the same thing as a current install.
    */
+  async function toggleCloseToTray(enabled: boolean) {
+    const previous = draft().close_to_tray;
+    setDraft({ ...draft(), close_to_tray: enabled });
+    try {
+      await api.setCloseToTray(enabled);
+      await refreshSettings();
+    } catch (error) {
+      setDraft({ ...draft(), close_to_tray: previous });
+      toast("error", "Could not change the closing behaviour", describeError(error));
+    }
+  }
+
   async function checkUpdates() {
     setUpdateBusy(true);
     try {
@@ -1467,6 +1496,23 @@ export function SettingsDialog(props: { settings: AppSettings; onClose: () => vo
           <span class="hint">
             Docker Desktop runs the daemon inside a VM, so the hardened profile and AppArmor cannot be applied
             there. Deepsand says so in the plan preview rather than pretending otherwise.
+          </span>
+        </div>
+
+        <div class="field">
+          <label>Closing</label>
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={draft().close_to_tray}
+              onChange={(event) => void toggleCloseToTray(event.currentTarget.checked)}
+            />
+            The close button hides Deepsand in the tray instead of stopping it
+          </label>
+          <span class="hint">
+            Off, closing does what it has always done: the sandboxes stop and Deepsand quits. On, the
+            window disappears and everything keeps running — the tray icon opens it again, and its
+            Quit stops the sandboxes.
           </span>
         </div>
 

@@ -21,6 +21,7 @@
 
 pub mod commands;
 mod host_config;
+mod tray;
 mod instance;
 pub mod remote_server;
 mod state;
@@ -319,11 +320,41 @@ pub fn run() {
                     commands::reconcile_remote_servers(&handle, &state).await;
                 });
             }
+
+            // The tray icon, when hiding is possible, and the hidden start itself. Both are
+            // decided here rather than in the window's own event because this is the first
+            // moment there is an app to attach either to.
+            let state = tauri::Manager::state::<AppState>(app.handle());
+            let started_hidden = commands::started_in_background();
+            if tray::wanted(commands::closes_to_tray(&state), started_hidden) {
+                if let Err(err) = tray::install(app.handle()) {
+                    tracing::warn!(%err, "could not put the tray icon in place");
+                }
+            }
+            if started_hidden {
+                if let Some(window) = tauri::Manager::get_webview_window(app.handle(), "main") {
+                    let _ = window.hide();
+                    tracing::info!("started in the background; the tray icon opens the window");
+                }
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
             // Closing the window must not leave a container running with the operator's
             // project mounted: stop every session first.
+            // Closing hides instead of stopping when the operator has asked for that. This
+            // branch never runs `shutdown_cleanup`, which is the whole difference: the
+            // sandboxes keep running, and the tray icon is how the window comes back.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = tauri::Manager::app_handle(window);
+                let state = tauri::Manager::state::<AppState>(app);
+                if commands::closes_to_tray(&state) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    tracing::info!("the window was hidden; Deepsand is still running");
+                }
+            }
             if let tauri::WindowEvent::Destroyed = event {
                 // Bounded, and then the process ends either way.
                 //
@@ -383,8 +414,9 @@ pub fn run() {
             commands::set_settings,
             commands::set_egress_allowlist,
             commands::network_presets,
-            commands::get_start_at_login,
-            commands::set_start_at_login,
+            commands::get_startup_mode,
+            commands::set_startup_mode,
+            commands::set_close_to_tray,
             commands::list_secrets,
             commands::set_secret,
             commands::delete_secret,

@@ -236,6 +236,14 @@ export interface SecuritySettings {
   tmpfs_noexec: boolean;
 }
 
+/**
+ * What Deepsand should do when the operator logs in.
+ *
+ * `background` starts with no window and only the tray icon, which is the difference the old
+ * boolean could not express.
+ */
+export type StartupMode = "off" | "background" | "foreground";
+
 export interface AppSettings {
   image: string;
   default_network: NetworkPolicy;
@@ -247,6 +255,9 @@ export interface AppSettings {
   default_base_url: string;
   default_model: string;
   data_dir?: string | null;
+  startup: StartupMode;
+  /** Closing the window hides Deepsand instead of stopping it. Off by default. */
+  close_to_tray: boolean;
 }
 
 export interface ProjectView {
