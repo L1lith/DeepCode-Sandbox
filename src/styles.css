@@ -285,17 +285,37 @@ pre,
    Terminal
    -------------------------------------------------------------------------- */
 
+/* Holds whichever tab is showing. The terminal's host stays mounted and is hidden
+   rather than removed, so its scrollback survives a tab switch. */
+.tab-host {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.tab-host-hidden {
+  display: none;
+}
+
 .terminal-wrap {
   position: relative;
   flex: 1;
   min-height: 0;
   background: #0a0c11;
   padding: 0.5rem 0.25rem 0.25rem 0.65rem;
+  /* Clip, so a terminal measured against a taller box can never extend past the
+     pane invisibly: xterm's own viewport has to be the only thing that scrolls,
+     or the wheel does nothing and the bottom of the session is unreachable. */
+  overflow: hidden;
 }
 
 .terminal-host {
   width: 100%;
   height: 100%;
+  min-height: 0;
+  /* The scrollbar belongs to xterm's viewport, not to this element. */
+  overflow: hidden;
 }
 
 .terminal-overlay {

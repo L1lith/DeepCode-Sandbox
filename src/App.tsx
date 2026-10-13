@@ -299,9 +299,14 @@ export default function App() {
                   </button>
                 </nav>
 
-                <Show when={tab() === "terminal"}>
+                {/* The terminal stays mounted while another tab is showing, and is
+                    hidden rather than unmounted. Recreating it per tab switch threw away
+                    the scrollback and re-measured the pane mid-layout, which is what made
+                    the terminal refuse to scroll until something resized it. Hidden, the
+                    buffer survives and the pane re-fits when it is shown again. */}
+                <div class="tab-host" classList={{ "tab-host-hidden": tab() !== "terminal" }}>
                   <TerminalPane />
-                </Show>
+                </div>
                 <Show when={tab() === "tools"}>
                   <ToolsPanel />
                 </Show>

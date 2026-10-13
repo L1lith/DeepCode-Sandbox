@@ -54,7 +54,13 @@ export function TerminalPane() {
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon());
     term.open(host);
-    safeFit();
+
+    // Fit on the next frame, not inline. `onMount` runs while the element exists but
+    // may not have its final box yet, and a fit against a box that is too tall leaves
+    // xterm believing the whole buffer already fits on screen: the scrollback exists,
+    // the wheel does nothing, and resizing anything fixes it. Measuring after layout is
+    // what makes the wheel work the first time.
+    const firstFit = window.requestAnimationFrame(() => safeFit());
 
     // Keystrokes go straight to the container.
     const dataSub = term.onData((data) => {
@@ -68,11 +74,17 @@ export function TerminalPane() {
       });
     });
 
-    // Keep the PTY the same size as the pane.
+    // Keep the PTY the same size as the pane. The observer covers the pane's own box
+    // changing; the window listener covers the case the observer cannot see, such as
+    // the pane being hidden and shown again while the window itself is resized.
     const observer = new ResizeObserver(() => safeFit());
     observer.observe(host);
+    const onWindowResize = () => safeFit();
+    window.addEventListener("resize", onWindowResize);
 
     onCleanup(() => {
+      window.cancelAnimationFrame(firstFit);
+      window.removeEventListener("resize", onWindowResize);
       observer.disconnect();
       dataSub.dispose();
       term?.dispose();
@@ -81,6 +93,10 @@ export function TerminalPane() {
 
   function safeFit() {
     if (!fit || !term || !host) return;
+    // A hidden pane has no box, and fitting to zero produces a one-row terminal that
+    // then has to be corrected. Doing nothing is correct: the resize observer fires
+    // when the pane is shown again.
+    if (host.clientWidth === 0 || host.clientHeight === 0) return;
     try {
       fit.fit();
       const current = project();
