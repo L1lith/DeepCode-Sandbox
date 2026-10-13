@@ -177,9 +177,9 @@ impl Docker {
                 status.server_version = version;
             }
             _ => {
-                status.detail =
-                    "the Docker daemon is not reachable. Start Docker Desktop and try again."
-                        .to_string();
+                // Asked only here: the extra call costs nothing on the path that matters, and
+                // this is the one case where the answer changes what to say.
+                status.detail = unreachable_detail(desktop_process_running()).to_string();
                 return status;
             }
         }
@@ -642,6 +642,55 @@ impl Docker {
 /// an indeterminate bar instead of a fabricated number.
 /// How many lines of build output a failure carries. Enough for the failing step's own
 /// message and its last line of context; not so many that the toast is a wall of text.
+/// What to tell the operator when the daemon does not answer.
+///
+/// The daemon and the Docker Desktop application are not the same thing. The window can be up
+/// with every one of its processes running -- `Docker Desktop.exe`, `com.docker.backend.exe`,
+/// `com.docker.build.exe` -- while the daemon behind it answers nothing, which is a state this
+/// machine spends real time in. Telling somebody to start what they can see running is how a
+/// correct message gets ignored, so the two cases say different things.
+pub fn unreachable_detail(desktop_running: bool) -> &'static str {
+    if desktop_running {
+        "Docker Desktop is running, but its daemon is not answering. It can take a minute to come \
+         up after starting; if it stays like this, restart Docker Desktop."
+    } else {
+        "Docker Desktop is not running. Start it and try again."
+    }
+}
+
+/// Whether the Docker Desktop application is running, asked only when the daemon did not answer.
+///
+/// Windows and macOS only, and deliberately forgiving: a check that cannot run says "not
+/// running", which is the message that was there before this existed.
+fn desktop_process_running() -> bool {
+    #[cfg(windows)]
+    {
+        let mut command = std::process::Command::new("tasklist");
+        command.args(["/FI", "IMAGENAME eq Docker Desktop.exe", "/NH"]);
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+        // `tasklist` exits 0 whether or not the task exists, and says so in the output, so this
+        // looks for the image name rather than for success.
+        return command
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).contains("Docker Desktop.exe"))
+            .unwrap_or(false);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return std::process::Command::new("pgrep")
+            .args(["-x", "Docker Desktop"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+    }
+    #[allow(unreachable_code)]
+    false
+}
+
 /// The client and server versions out of `docker version --format '{{json .}}'`.
 ///
 /// A daemon that is not running still prints a `Client` block, and may omit `Server` or
@@ -873,6 +922,36 @@ fn which(program: &str) -> Option<PathBuf> {
 /// The probe reads JSON that Docker produces, and the two pieces it needs from it. Worth
 /// testing on its own: the shapes below are trimmed copies of real output, including the
 /// daemon-less case, which is the one that has to be distinguished from a parse failure.
+/// The words for a daemon that is not answering, which have to separate two situations an
+/// operator can see differently on their own screen.
+#[cfg(test)]
+mod unreachable_tests {
+    use super::*;
+
+    #[test]
+    fn a_running_desktop_is_not_told_to_start_itself() {
+        let running = unreachable_detail(true);
+        assert!(running.contains("Docker Desktop is running"));
+        assert!(running.contains("daemon"), "name the part that is not answering");
+        assert!(
+            !running.contains("Start it"),
+            "it cannot be told to start what is already running: {running}"
+        );
+    }
+
+    #[test]
+    fn a_desktop_that_is_not_running_is_told_to_start() {
+        let stopped = unreachable_detail(false);
+        assert!(stopped.contains("Docker Desktop is not running"));
+        assert!(stopped.contains("Start it"));
+    }
+
+    #[test]
+    fn the_two_messages_are_different() {
+        assert_ne!(unreachable_detail(true), unreachable_detail(false));
+    }
+}
+
 /// The output filter, tested on the case it exists for: the 32 KiB of NULs a dying daemon
 /// leaves in the pipe, which was written into the build log as if it were a line.
 #[cfg(test)]

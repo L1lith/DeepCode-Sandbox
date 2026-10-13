@@ -220,6 +220,20 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   tested: beating -> hand the launch over; stopped beating with a window -> leave it alone
   (the operator can see it); stopped beating with no window -> clear it and start. A launch
   must never be silently swallowed by a process that cannot show anything.
+* **A status the window shows has to be re-read where it can change.** `app_info`
+  deliberately carries no Docker status -- probing there put three Docker CLI calls in front of
+  the first paint -- so re-reading it means calling `docker_status`. `refreshSettings` used to
+  be the thing that refreshed Docker, and when the field left `app_info` the compiler could not
+  see across the TS boundary: the announcement of a change arrived and nothing was re-read, so
+  the app went on saying the daemon was unreachable with Docker plainly running. Worse, a "no"
+  was kept forever: the probe runs once, after the window is ready, which is routinely while
+  Docker Desktop is still starting. It is retried while the answer is no, and re-asked when the
+  window takes focus. If you move a field out of a command, grep the frontend for it.
+* **When something is unreachable, say which part.** Docker Desktop running with a daemon that
+  is not answering is not the same situation as Docker Desktop not running, and they get
+  different sentences (`docker::unreachable_detail`, chosen by asking whether the Desktop
+  processes exist -- only on the failure path, where the answer changes what to say). Telling
+  an operator to start what they can see running is how a correct message gets ignored.
 * **An error the operator can see is written down.** Every box the window raises with
   `toast("error" | "warn", ...)` goes to the log, every failed command is logged with its own
   name by `api.ts`, and so are the startup notice and the screen for a window that could not

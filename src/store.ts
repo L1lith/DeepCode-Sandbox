@@ -151,13 +151,45 @@ export async function bootstrap() {
  * as "checking" -- the honest state, rather than claiming the daemon is unreachable when
  * what failed was the question.
  */
+let dockerRetry: number | null = null;
+
+/**
+ * Ask the backend about Docker, and put the answer where the status strip reads it.
+ *
+ * Separate from `bootstrap` on purpose: this is the slow part of starting up and none of the
+ * first paint depends on it.
+ *
+ * A "no" is not an answer to keep. Docker Desktop is routinely still starting when the window
+ * opens, and a probe taken then answers "the daemon is not reachable" -- which the app then
+ * went on saying for the rest of the session, with Docker plainly running, because nothing
+ * asked again. So while the answer is no, it keeps asking, until it is yes.
+ */
 export async function refreshDockerStatus() {
   try {
     const docker = await api.dockerStatus();
     setStore("info", "docker", docker);
+    if (docker.available) {
+      if (dockerRetry !== null) {
+        window.clearTimeout(dockerRetry);
+        dockerRetry = null;
+      }
+    } else {
+      scheduleDockerRetry();
+    }
   } catch {
-    /* left as null: the strip keeps saying it is still checking */
+    // The question failed rather than answering. Ask again: `info.docker` keeps whatever it
+    // said last, which is the honest state of knowledge.
+    scheduleDockerRetry();
   }
+}
+
+/** Look again in a moment, unless a look is already scheduled. */
+function scheduleDockerRetry() {
+  if (dockerRetry !== null) return;
+  dockerRetry = window.setTimeout(() => {
+    dockerRetry = null;
+    void refreshDockerStatus();
+  }, 10_000);
 }
 
 export async function refreshProjects() {
@@ -192,7 +224,11 @@ export async function refreshProjectData(projectId: string) {
 
 export async function refreshSettings() {
   const [settings, info] = await Promise.all([api.getSettings(), api.appInfo()]);
-  setStore({ settings, info });
+  // `app_info` deliberately carries no Docker status: probing for it there put three Docker
+  // CLI calls in front of the window's first paint. So keep the one already known -- replacing
+  // it with null puts the strip back to "Checking Docker…" every time settings are reloaded,
+  // which is what the operator saw as the app losing track of a daemon that was running.
+  setStore({ settings, info: { ...info, docker: store.info?.docker ?? info.docker } });
 }
 
 export async function refreshRequests() {
@@ -286,13 +322,21 @@ export async function wireEvents(): Promise<() => void> {
       void refreshProjects();
       const current = store.selectedId;
       if (current) void refreshProjectData(current);
-      // Docker appearing or disappearing is announced the same way, and the status shown
-      // to the operator lives in `info`, so it has to be re-read -- otherwise the app
-      // keeps saying Docker is unavailable until it is restarted, which is the bug this
-      // is here to fix.
+      // Docker appearing or disappearing is announced the same way, and the status shown to
+      // the operator lives in `info`. This used to re-read it through `refreshSettings`, which
+      // stopped carrying it when the probe moved off the startup path -- so the announcement
+      // arrived and nothing was re-read. Ask for it directly.
+      void refreshDockerStatus();
       void refreshSettings();
     }),
   ]);
+
+  // Docker Desktop is usually started *because* the window said it was not running. Coming
+  // back to the window is the moment to look again, rather than waiting up to ten seconds.
+  const onFocus = () => {
+    if (store.info?.docker?.available === false) void refreshDockerStatus();
+  };
+  window.addEventListener("focus", onFocus);
 
   // One quiet check for a newer Deepsand, a few seconds in so it does not compete with
   // the startup sweep and the Docker probe.
@@ -317,6 +361,7 @@ export async function wireEvents(): Promise<() => void> {
   }, 5000);
 
   return () => {
+    window.removeEventListener("focus", onFocus);
     for (const unlisten of unlisteners) {
       try {
         unlisten();

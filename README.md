@@ -213,7 +213,7 @@ desktop app and the headless CLI cannot behave differently.
 
 ```bash
 npm run app:dev              # app with hot reload
-npm run core:test            # 334 Rust tests: paths, policy, broker, proxy, credentials, seccomp, durability
+npm run core:test            # 337 Rust tests: paths, policy, broker, proxy, credentials, seccomp, durability
 npm run test:bridge          # 55 checks: the permission protocol end to end
 npm test                     # both suites
 npm run core:check           # cargo check --workspace
@@ -261,6 +261,11 @@ request). That includes every error the window showed in a corner box, every com
 failed, and any panic. A Windows release build has no console, so this file is the only place
 those are readable after the fact — and the boxes themselves can be copied with the button in
 the corner, or selected directly.
+
+If Docker Desktop itself misbehaves — its volumes flagged, its daemon not answering while the
+window is up, a build dying with an RPC error — that is Docker Desktop's VM rather than
+Deepsand. Restarting Docker Desktop cleared all three here, and the five `deepsand-state-*`
+volumes came back readable with their contents intact. Nothing in Deepsand deletes a volume.
 
 ## Releases and updates
 
