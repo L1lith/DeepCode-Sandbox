@@ -35,7 +35,54 @@ on:
       - release
 
 jobs:
+  # The release is created here, once, before any build starts.
+  #
+  # It used to be created by `tauri-action` inside every matrix job, and five jobs starting
+  # at once is a race: when the tag does not exist yet, more than one of them creates a
+  # release for it and the artifacts are scattered across the results -- which happened,
+  # and left two drafts of the same version each holding a different half of the platforms.
+  create-release:
+    permissions:
+      contents: write
+    runs-on: ubuntu-22.04
+    outputs:
+      id: ${{ steps.create.outputs.result }}
+      tag: ${{ steps.create.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create the release if it is not there yet
+        id: create
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const version = require("./package.json").version;
+            const tag = `app-v${version}`;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            try {
+              const existing = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+              core.info(`reusing the existing release ${existing.data.id}`);
+              core.setOutput("tag", tag);
+              return existing.data.id;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            const created = await github.rest.repos.createRelease({
+              owner,
+              repo,
+              tag_name: tag,
+              name: `Deepsand v${version}`,
+              body: "Downloads for Windows, Linux and macOS. The app updates itself from this release; see Settings, Updates.",
+              draft: true,
+              prerelease: false,
+              target_commitish: context.sha,
+            });
+            core.info(`created the release ${created.data.id}`);
+            core.setOutput("tag", tag);
+            return created.data.id;
+
   publish-tauri:
+    needs: create-release
     permissions:
       contents: write
     strategy:
@@ -125,8 +172,8 @@ jobs:
           # than merely unidentified. Ignored on other platforms.
           APPLE_SIGNING_IDENTITY: "-"
         with:
-          tagName: app-v__VERSION__
-          releaseName: "Deepsand v__VERSION__"
-          releaseBody: "Downloads for Windows, Linux and macOS. The app updates itself from this release; see Settings, Updates."
+          # Upload into the release `create-release` owns. No tagName or releaseName: naming
+          # a release here is what let several jobs create one at the same time.
+          releaseId: ${{ needs.create-release.outputs.id }}
           releaseDraft: true
           prerelease: false
