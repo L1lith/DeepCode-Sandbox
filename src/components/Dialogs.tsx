@@ -223,7 +223,10 @@ export function PermissionDialog(props: { request: PermissionRequestView; queued
           </button>
           <button
             class="btn btn-primary"
-            disabled={busy() || !path().trim() || blocked()}
+            // Only a directory request needs a path. Requiring one for every kind left the
+            // button dead for the kinds that have no path at all: a network request could
+            // not be approved, because the field it was waiting for is never shown.
+            disabled={busy() || blocked() || (isDirectoryKind() && !path().trim())}
             onClick={() => void decide("allow")}
           >
             Grant access
@@ -312,11 +315,9 @@ export function PermissionDialog(props: { request: PermissionRequestView; queued
           </div>
         </Show>
 
+        <Show when={isDirectoryKind()}>
         <div class="field">
           <label>Access to grant</label>
-          <Show when={!isDirectoryKind()}>
-            <span class="hint">Not applicable: this request is not about files.</span>
-          </Show>
           <div class="access-choice">
             <button
               class="access-option"
@@ -336,6 +337,7 @@ export function PermissionDialog(props: { request: PermissionRequestView; queued
             </button>
           </div>
         </div>
+        </Show>
 
         <div class="field">
           <label for="perm-note">Reply to DeepCode (optional)</label>
