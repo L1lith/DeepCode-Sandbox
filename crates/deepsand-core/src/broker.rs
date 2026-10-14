@@ -765,6 +765,7 @@ mod tests {
     fn snapshots_describe_the_sandbox_to_itself() {
         let fixture = Fixture::new();
         let project = Project {
+            disabled_secrets: Vec::new(),
             id: "p1".into(),
             name: "my-website".into(),
             slug: "my-website".into(),
@@ -807,6 +808,7 @@ mod tests {
     fn turning_requests_off_patches_the_running_sandbox_and_leaves_the_rest_alone() {
         let fixture = Fixture::new();
         let project = Project {
+            disabled_secrets: Vec::new(),
             id: "p1".into(),
             name: "my-website".into(),
             slug: "my-website".into(),

@@ -815,6 +815,35 @@ pre.output {
   margin-left: 0.25rem;
 }
 
+/* The editors, on their own full-width row under the secret they belong to. They were in
+   the actions cell before, which is sized for buttons: the input and the save button
+   overflowed the column and hung off the edge of the panel. */
+.secret-edit-row td {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.secret-edit-row .hint {
+  flex: 0 0 auto;
+}
+
+.secret-edit-row input {
+  min-width: 0;
+}
+
+/* A disabled secret still has to be readable, so this dims it rather than greying it out. */
+.secret-off td {
+  opacity: 0.55;
+}
+
+.secret-badge {
+  margin-left: 0.4rem;
+  font-size: 0.7rem;
+  vertical-align: middle;
+}
+
 .btn.small {
   font-size: 0.78rem;
   padding: 0.15rem 0.5rem;

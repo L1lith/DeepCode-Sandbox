@@ -774,6 +774,7 @@ mod tests {
             std::fs::create_dir_all(data_dir.join("projects").join("p1").join("config")).unwrap();
 
             let project = Project {
+                disabled_secrets: Vec::new(),
                 id: "p1".into(),
                 name: "my-website".into(),
                 slug: "my-website".into(),

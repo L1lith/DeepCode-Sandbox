@@ -653,7 +653,12 @@ fn prepare_plan(
     let endpoints = model_endpoints(&resolved.base_url);
 
     let secrets_env_file = open_secrets(state, project_id)
-        .and_then(|secrets| secrets.write_env_file(&config_dir).ok().flatten());
+        .and_then(|secrets| {
+            secrets
+                .write_env_file(&config_dir, &disabled_secrets(state, project_id))
+                .ok()
+                .flatten()
+        });
 
     container_settings::write_project_config(
         &config_dir,
@@ -3329,9 +3334,10 @@ pub async fn list_models(state: State<'_, AppState>, project_id: String) -> CmdR
 /* Secrets                                                                   */
 /* ------------------------------------------------------------------------- */
 
-fn secret_view(name: &str, value: &str) -> SecretView {
+fn secret_view(name: &str, value: &str, enabled: bool) -> SecretView {
     SecretView {
         name: name.to_string(),
+        enabled,
         // A fixed run of dots rather than a partial reveal: a preview is a leak that
         // looks like a convenience.
         masked: "\u{2022}".repeat(12),
@@ -3371,19 +3377,38 @@ pub fn list_secrets_impl(state: &AppState, project_id: &str) -> CmdResult<Secret
         }
     };
 
-    let view = secret_view_list(&secrets, project_id, restart_needed);
+    let view = secret_view_list(
+        &secrets,
+        project_id,
+        restart_needed,
+        &disabled_secrets(state, project_id),
+    );
     Ok(view)
+}
+
+/// The secret names this project has switched off.
+///
+/// Read from the project rather than passed around: every caller that builds a view wants
+/// the same answer, and reading it in one place is what keeps them agreeing.
+fn disabled_secrets(state: &impl AsAppState, project_id: &str) -> Vec<String> {
+    store(state)
+        .project(project_id)
+        .map(|project| project.disabled_secrets.clone())
+        .unwrap_or_default()
 }
 
 fn secret_view_list(
     secrets: &deepsand_core::secrets::Secrets,
     project_id: &str,
     restart_needed: bool,
+    disabled: &[String],
 ) -> SecretListView {
     match secrets.all() {
         Ok(map) => SecretListView {
             project_id: project_id.to_string(),
-            secrets: map.iter().map(|(name, value)| secret_view(name, value)).collect(),
+            secrets: map.iter().map(|(name, value)| {
+                secret_view(name, value, !disabled.iter().any(|off| off == name))
+            }).collect(),
             available: true,
             unavailable_reason: None,
             restart_needed,
@@ -3407,6 +3432,176 @@ pub fn list_secrets(state: State<'_, AppState>, project_id: String) -> CmdResult
 
 /// Store or replace one secret.
 ///
+/// Put text on the clipboard without it passing through the window.
+///
+/// The value goes to the child's stdin and never into an argument, so it is not in a process
+/// listing; and it is never returned to the UI, so the panel can say it copied a secret
+/// without ever holding one. Every platform helper here reads stdin for exactly this reason.
+fn set_clipboard(text: &str) -> std::result::Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let candidates: &[&[&str]] = &[&["clip.exe"]];
+    #[cfg(target_os = "macos")]
+    let candidates: &[&[&str]] = &[&["pbcopy"]];
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let candidates: &[&[&str]] = &[
+        &["wl-copy"],
+        &["xclip", "-selection", "clipboard"],
+        &["xsel", "--clipboard", "--input"],
+    ];
+
+    let mut last = String::from("no clipboard tool is installed");
+    for candidate in candidates {
+        let mut command = std::process::Command::new(candidate[0]);
+        command
+            .args(&candidate[1..])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let Ok(mut child) = command.spawn() else {
+            continue;
+        };
+        let mut wrote = false;
+        if let Some(mut pipe) = child.stdin.take() {
+            use std::io::Write as _;
+            wrote = pipe.write_all(text.as_bytes()).is_ok();
+        }
+        match child.wait() {
+            Ok(status) if status.success() && wrote => return Ok(()),
+            Ok(status) => last = format!("{} exited with {status}", candidate[0]),
+            Err(err) => last = format!("{} could not be waited on: {err}", candidate[0]),
+        }
+    }
+    Err(format!("the secret could not be copied: {last}"))
+}
+
+/// Copy a secret's value to the clipboard.
+///
+/// The value is read here, handed to the clipboard, and dropped. It is not in the return
+/// value and so never reaches the window, which is the same rule the rest of this panel
+/// follows -- see the module note on SecretsPanel.
+pub fn copy_secret_impl(state: &AppState, project_id: &str, name: &str) -> CmdResult<()> {
+    let secrets = open_secrets(state, project_id).ok_or_else(|| {
+        "Deepsand could not open the encryption key for your secrets.".to_string()
+    })?;
+    let map = secrets.all().map_err(fail)?;
+    let value = map.get(name.trim()).ok_or_else(|| {
+        format!("there is no secret called '{}'.", name.trim())
+    })?;
+    set_clipboard(value)
+}
+
+#[tauri::command]
+pub fn copy_secret(
+    state: State<'_, AppState>,
+    project_id: String,
+    name: String,
+) -> CmdResult<()> {
+    copy_secret_impl(&state, &project_id, &name)
+}
+
+/// Switch a secret out of, or back into, the sandbox environment.
+///
+/// Disabling does not delete anything: the value stays encrypted and the row stays visible,
+/// it simply is not written into the environment file the container is handed.
+pub fn set_secret_enabled_impl(
+    state: &AppState,
+    project_id: &str,
+    name: &str,
+    enabled: bool,
+) -> CmdResult<SecretListView> {
+    let name = name.trim().to_string();
+    {
+        let mut store = store(state);
+        let project = store.project_mut(project_id).map_err(fail)?;
+        project.disabled_secrets.retain(|off| off != &name);
+        if !enabled {
+            project.disabled_secrets.push(name.clone());
+        }
+        let project_id = project.id.clone();
+        store.append_audit(
+            &project_id,
+            &format!("{} secret {name}", if enabled { "ENABLE " } else { "DISABLE" }),
+        );
+        store.save().map_err(fail)?;
+    }
+
+    let secrets = open_secrets(state, project_id).ok_or_else(|| {
+        "Deepsand could not open the encryption key for your secrets.".to_string()
+    })?;
+    let restart_needed = state
+        .sessions
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains_key(project_id);
+    Ok(secret_view_list(
+        &secrets,
+        project_id,
+        restart_needed,
+        &disabled_secrets(state, project_id),
+    ))
+}
+
+#[tauri::command]
+pub fn set_secret_enabled(
+    state: State<'_, AppState>,
+    project_id: String,
+    name: String,
+    enabled: bool,
+) -> CmdResult<SecretListView> {
+    set_secret_enabled_impl(&state, &project_id, &name, enabled)
+}
+
+/// Rename a secret, keeping its value and its on/off state.
+pub fn rename_secret_impl(
+    state: &AppState,
+    project_id: &str,
+    from: &str,
+    to: &str,
+) -> CmdResult<SecretListView> {
+    let from = from.trim();
+    let to = to.trim();
+    let secrets = open_secrets(state, project_id).ok_or_else(|| {
+        "Deepsand could not open the encryption key for your secrets, so nothing was renamed."
+            .to_string()
+    })?;
+    secrets.rename(from, to).map_err(fail)?;
+
+    {
+        let mut store = store(state);
+        let project = store.project_mut(project_id).map_err(fail)?;
+        // The off switch belongs to the name the operator chose, so it travels with the
+        // rename rather than being left behind pointing at a name that no longer exists.
+        if let Some(index) = project.disabled_secrets.iter().position(|off| off == from) {
+            project.disabled_secrets[index] = to.to_string();
+        }
+        let project_id = project.id.clone();
+        store.append_audit(&project_id, &format!("RENAME secret {from} -> {to}"));
+        store.save().map_err(fail)?;
+    }
+
+    let restart_needed = state
+        .sessions
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains_key(project_id);
+    Ok(secret_view_list(
+        &secrets,
+        project_id,
+        restart_needed,
+        &disabled_secrets(state, project_id),
+    ))
+}
+
+#[tauri::command]
+pub fn rename_secret(
+    state: State<'_, AppState>,
+    project_id: String,
+    from: String,
+    to: String,
+) -> CmdResult<SecretListView> {
+    rename_secret_impl(&state, &project_id, &from, &to)
+}
+
 /// The value is written and then dropped: it is never echoed back, never logged, and
 /// the returned view contains only the name and a length.
 pub fn set_secret_impl(
@@ -3437,7 +3632,12 @@ pub fn set_secret_impl(
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .contains_key(project_id);
-    Ok(secret_view_list(&secrets, project_id, restart_needed))
+    Ok(secret_view_list(
+        &secrets,
+        project_id,
+        restart_needed,
+        &disabled_secrets(state, project_id),
+    ))
 }
 
 #[tauri::command]
@@ -3473,7 +3673,12 @@ pub fn delete_secret_impl(
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .contains_key(project_id);
-    Ok(secret_view_list(&secrets, project_id, restart_needed))
+    Ok(secret_view_list(
+        &secrets,
+        project_id,
+        restart_needed,
+        &disabled_secrets(state, project_id),
+    ))
 }
 
 #[tauri::command]

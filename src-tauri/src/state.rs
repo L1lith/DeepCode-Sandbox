@@ -219,6 +219,9 @@ pub struct AppInfo {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretView {
+    /// False when the operator has switched this secret off: still stored, not in the
+    /// sandbox environment.
+    pub enabled: bool,
     pub name: String,
     /// A fixed placeholder, so the table shows that something is stored without
     /// showing how long it is or what it starts with.

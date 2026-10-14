@@ -349,6 +349,7 @@ mod tests {
 
     fn project() -> Project {
         Project {
+            disabled_secrets: Vec::new(),
             id: "p1".into(),
             name: "my-website".into(),
             slug: "my-website".into(),

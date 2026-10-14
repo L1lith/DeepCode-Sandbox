@@ -183,6 +183,17 @@ impl Secrets {
         self.save(&map)
     }
 
+    /// Rename a secret, keeping its value.
+    ///
+    /// One save rather than a set and a remove: two writes would leave a moment where both
+    /// names exist, and a failure between them would leave the value under the new name with
+    /// the old one still listed, or the value gone under both.
+    pub fn rename(&self, from: &str, to: &str) -> Result<()> {
+        let map = renamed(&self.load()?, from, to)?;
+        self.save(&map)
+    }
+
+
     fn load(&self) -> Result<BTreeMap<String, String>> {
         if !self.path.is_file() {
             return Ok(BTreeMap::new());
@@ -264,8 +275,15 @@ impl Secrets {
     ///
     /// Written 0600 in the project's own directory. `-e` would put every value in the
     /// process argument list, where any local user could read it with `ps`.
-    pub fn write_env_file(&self, dir: &Path) -> Result<Option<PathBuf>> {
-        let map = self.all()?;
+    /// Write the environment file the container is handed.
+    ///
+    /// `disabled` names are left out, which is what the toggle in the panel means: the secret
+    /// stays stored and stays replaceable, it simply is not in the environment. Filtering here
+    /// rather than at each caller is deliberate -- this is the only place the values leave the
+    /// store, so it is the only place that has to know.
+    pub fn write_env_file(&self, dir: &Path, disabled: &[String]) -> Result<Option<PathBuf>> {
+        let mut map = self.all()?;
+        map.retain(|name, _| !disabled.iter().any(|off| off == name));
         let path = dir.join("secrets.env");
         if map.is_empty() {
             // Remove a stale file, so a secret that was deleted does not linger in
@@ -590,14 +608,14 @@ mod tests {
         let env_dir = dir.join("config");
         std::fs::create_dir_all(&env_dir).unwrap();
 
-        assert!(secrets.write_env_file(&env_dir).unwrap().is_none());
+        assert!(secrets.write_env_file(&env_dir, &[]).unwrap().is_none());
         secrets.set("STRIPE_KEY", "sk_live_x").unwrap();
-        let path = secrets.write_env_file(&env_dir).unwrap().expect("a file once secrets exist");
+        let path = secrets.write_env_file(&env_dir, &[]).unwrap().expect("a file once secrets exist");
         let body = std::fs::read_to_string(&path).unwrap();
         assert_eq!(body, "STRIPE_KEY=sk_live_x\n");
 
         secrets.remove("STRIPE_KEY").unwrap();
-        assert!(secrets.write_env_file(&env_dir).unwrap().is_none());
+        assert!(secrets.write_env_file(&env_dir, &[]).unwrap().is_none());
         assert!(!path.exists(), "a stale environment file must not be left behind");
     }
 
@@ -643,5 +661,77 @@ mod tests {
         secrets.set("SHORT", "abcdef").unwrap();
         let redacted = secrets.redact("token=abcdefghij");
         assert!(!redacted.contains("ghij"), "{redacted}");
+    }
+}
+
+/// The map a rename would produce, or the reason it cannot happen.
+///
+/// Pure, so the rules are testable without the operating system's keystore: the store needs
+/// a real key to open, and these rules are exactly the part worth checking.
+pub fn renamed(
+    map: &BTreeMap<String, String>,
+    from: &str,
+    to: &str,
+) -> Result<BTreeMap<String, String>> {
+    let from = from.trim();
+    let to = validate_name(to)?;
+    let Some(value) = map.get(from) else {
+        return Err(SandboxError::policy(format!(
+            "there is no secret called '{from}', so there is nothing to rename."
+        )));
+    };
+    if from == to {
+        return Ok(map.clone());
+    }
+    if map.contains_key(&to) {
+        return Err(SandboxError::policy(format!(
+            "'{to}' already exists. Rename that one first, or remove it."
+        )));
+    }
+    let mut next = map.clone();
+    next.remove(from);
+    next.insert(to, value.clone());
+    Ok(next)
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+
+    fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn renaming_keeps_the_value_and_drops_the_old_name() {
+        let after = renamed(&map(&[("OLD_KEY", "s3cret")]), "OLD_KEY", "NEW_KEY").unwrap();
+        assert_eq!(after.get("NEW_KEY").map(String::as_str), Some("s3cret"));
+        assert!(!after.contains_key("OLD_KEY"));
+    }
+
+    #[test]
+    fn renaming_onto_another_secret_is_refused_rather_than_overwriting_it() {
+        let both = map(&[("A", "one"), ("B", "two")]);
+        assert!(renamed(&both, "A", "B").is_err(), "B must not be quietly lost");
+    }
+
+    #[test]
+    fn renaming_something_that_is_not_there_says_so() {
+        assert!(renamed(&map(&[]), "MISSING", "ANY").is_err());
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_name_is_refused() {
+        assert!(renamed(&map(&[("A", "one")]), "A", "not a name").is_err());
+        assert!(renamed(&map(&[("A", "one")]), "A", "1LEADING").is_err());
+    }
+
+    #[test]
+    fn renaming_to_its_own_name_changes_nothing() {
+        let before = map(&[("A", "one")]);
+        assert_eq!(renamed(&before, "A", "A").unwrap(), before);
     }
 }

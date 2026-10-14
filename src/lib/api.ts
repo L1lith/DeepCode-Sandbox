@@ -142,6 +142,19 @@ export const setSecret = (projectId: string, name: string, value: string) =>
 export const deleteSecret = (projectId: string, name: string) =>
   call<SecretListView>("delete_secret", { projectId, name });
 
+/**
+ * Copy a secret value to the clipboard.
+ *
+ * The value is read by the backend and written to the clipboard there. It is not returned,
+ * so the window never holds it -- the same rule the rest of the panel follows.
+ */
+export const copySecret = (projectId: string, name: string) =>
+  call<void>("copy_secret", { projectId, name });
+export const setSecretEnabled = (projectId: string, name: string, enabled: boolean) =>
+  call<SecretListView>("set_secret_enabled", { projectId, name, enabled });
+export const renameSecret = (projectId: string, from: string, to: string) =>
+  call<SecretListView>("rename_secret", { projectId, from, to });
+
 export const listTools = (projectId: string) =>
   call<ToolCatalogView>("list_tools", { projectId });
 export const setProjectTools = (projectId: string, ids: string[]) =>

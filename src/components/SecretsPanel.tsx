@@ -13,7 +13,7 @@
 
 import { createMemo, createSignal, For, onMount, Show } from "solid-js";
 import * as api from "../lib/api";
-import type { SecretListView } from "../lib/types";
+import type { SecretListView, SecretView } from "../lib/types";
 import { describeError, selectedProject, toast } from "../store";
 
 export function SecretsPanel() {
@@ -23,6 +23,8 @@ export function SecretsPanel() {
   const [value, setValue] = createSignal("");
   const [editing, setEditing] = createSignal<string | null>(null);
   const [editValue, setEditValue] = createSignal("");
+  const [renaming, setRenaming] = createSignal<string | null>(null);
+  const [newName, setNewName] = createSignal("");
 
   const project = () => selectedProject();
 
@@ -46,13 +48,15 @@ export function SecretsPanel() {
     }
   }
 
-  const nameProblem = createMemo(() => {
-    const candidate = name().trim();
-    if (!candidate) return null;
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(candidate)) {
+  // The name rules in one place: the add form, the rename form and the backend all have to
+  // agree, and a second copy is how they stop agreeing.
+  function checkName(candidate: string): string | null {
+    const trimmed = candidate.trim();
+    if (!trimmed) return null;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) {
       return "Use letters, digits and underscores, starting with a letter or underscore.";
     }
-    const upper = candidate.toUpperCase();
+    const upper = trimmed.toUpperCase();
     if (upper.startsWith("DEEPSAND_")) {
       return "Names starting with DEEPSAND_ are reserved.";
     }
@@ -60,7 +64,9 @@ export function SecretsPanel() {
       return `${upper} is reserved, because the sandbox itself uses it.`;
     }
     return null;
-  });
+  }
+
+  const nameProblem = createMemo(() => checkName(name()));
 
   async function add() {
     const current = project();
@@ -97,6 +103,59 @@ export function SecretsPanel() {
       toast("ok", `${target} replaced`, "The old value is gone; it was overwritten, not kept.");
     } catch (error) {
       toast("error", "Could not replace the secret", describeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copy(target: string) {
+    const current = project();
+    if (!current || busy()) return;
+    setBusy(true);
+    try {
+      await api.copySecret(current.id, target);
+      toast("ok", `${target} copied`, "The value is on your clipboard. It was never shown here.");
+    } catch (error) {
+      toast("error", "Could not copy that secret", describeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggleEnabled(secret: SecretView) {
+    const current = project();
+    if (!current || busy()) return;
+    setBusy(true);
+    try {
+      const saved = await api.setSecretEnabled(current.id, secret.name, !secret.enabled);
+      setView(saved);
+      toast(
+        "ok",
+        secret.enabled ? `${secret.name} disabled` : `${secret.name} enabled`,
+        secret.enabled
+          ? "Still stored and still replaceable, just not handed to the sandbox."
+          : "It will be in the environment next time this project starts.",
+      );
+    } catch (error) {
+      toast("error", "Could not change that secret", describeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rename(target: string) {
+    const current = project();
+    const next = newName().trim();
+    if (!current || busy() || !next || checkName(next)) return;
+    setBusy(true);
+    try {
+      const saved = await api.renameSecret(current.id, target, next);
+      setView(saved);
+      setRenaming(null);
+      setNewName("");
+      toast("ok", `${target} renamed to ${next}`, "The value and its on/off state came with it.");
+    } catch (error) {
+      toast("error", "Could not rename that secret", describeError(error));
     } finally {
       setBusy(false);
     }
@@ -166,67 +225,153 @@ export function SecretsPanel() {
                     <tbody>
                       <For each={current().secrets}>
                         {(secret) => (
-                          <tr>
-                            <td class="mono">{secret.name}</td>
-                            <td class="mono faint">{secret.masked}</td>
-                            <td class="num faint">{secret.length}</td>
-                            <td class="actions">
-                              <Show
-                                when={editing() === secret.name}
-                                fallback={
-                                  <>
-                                    <button
-                                      class="btn btn-ghost small"
-                                      disabled={busy()}
-                                      onClick={() => {
-                                        setEditing(secret.name);
-                                        setEditValue("");
-                                      }}
-                                    >
-                                      Replace
-                                    </button>
-                                    <button
-                                      class="btn btn-ghost small"
-                                      disabled={busy()}
-                                      onClick={() => void remove(secret.name)}
-                                    >
-                                      Remove
-                                    </button>
-                                  </>
-                                }
-                              >
-                                <input
-                                  type="password"
-                                  class="grow"
-                                  autocomplete="off"
-                                  placeholder="new value"
-                                  aria-label={`New value for ${secret.name}`}
-                                  value={editValue()}
-                                  onInput={(event) => setEditValue(event.currentTarget.value)}
-                                  onKeyDown={(event) => {
-                                    if (event.key === "Enter") void replace(secret.name);
-                                    if (event.key === "Escape") setEditing(null);
-                                  }}
-                                />
+                          <>
+                            <tr classList={{ "secret-off": !secret.enabled }}>
+                              <td class="mono">
+                                {secret.name}
+                                <Show when={!secret.enabled}>
+                                  <span class="badge secret-badge">disabled</span>
+                                </Show>
+                              </td>
+                              <td class="mono faint">{secret.masked}</td>
+                              <td class="num faint">{secret.length}</td>
+                              <td class="actions">
                                 <button
-                                  class="btn btn-primary small"
-                                  disabled={busy() || !editValue()}
-                                  onClick={() => void replace(secret.name)}
+                                  class="btn btn-ghost small"
+                                  disabled={busy()}
+                                  title="Copy the value to your clipboard"
+                                  onClick={() => void copy(secret.name)}
                                 >
-                                  Save
+                                  Copy
                                 </button>
                                 <button
                                   class="btn btn-ghost small"
+                                  disabled={busy()}
+                                  title={
+                                    secret.enabled
+                                      ? "Keep it stored, but stop handing it to the sandbox"
+                                      : "Hand it to the sandbox again"
+                                  }
+                                  onClick={() => void toggleEnabled(secret)}
+                                >
+                                  {secret.enabled ? "Disable" : "Enable"}
+                                </button>
+                                <button
+                                  class="btn btn-ghost small"
+                                  disabled={busy()}
                                   onClick={() => {
+                                    setRenaming(secret.name);
+                                    setNewName(secret.name);
                                     setEditing(null);
-                                    setEditValue("");
                                   }}
                                 >
-                                  Cancel
+                                  Rename
                                 </button>
+                                <button
+                                  class="btn btn-ghost small"
+                                  disabled={busy()}
+                                  onClick={() => {
+                                    setEditing(secret.name);
+                                    setEditValue("");
+                                    setRenaming(null);
+                                  }}
+                                >
+                                  Replace
+                                </button>
+                                <button
+                                  class="btn btn-ghost small"
+                                  disabled={busy()}
+                                  onClick={() => void remove(secret.name)}
+                                >
+                                  Remove
+                                </button>
+                              </td>
+                            </tr>
+
+                            {/*
+                              The editors live in a row of their own, spanning the table,
+                              rather than inside the actions cell. In that cell they were
+                              squeezed into a column sized for buttons and the save button
+                              hung off the edge of the panel; a full-width row under the
+                              secret being edited cannot do that.
+                            */}
+                            <Show when={editing() === secret.name}>
+                              <tr class="secret-edit-row">
+                                <td colspan={4}>
+                                  <span class="hint">New value for {secret.name}</span>
+                                  <input
+                                    type="password"
+                                    class="grow"
+                                    autocomplete="off"
+                                    placeholder="new value"
+                                    aria-label={`New value for ${secret.name}`}
+                                    value={editValue()}
+                                    onInput={(event) => setEditValue(event.currentTarget.value)}
+                                    onKeyDown={(event) => {
+                                      if (event.key === "Enter") void replace(secret.name);
+                                      if (event.key === "Escape") setEditing(null);
+                                    }}
+                                  />
+                                  <button
+                                    class="btn btn-primary small"
+                                    disabled={busy() || !editValue()}
+                                    onClick={() => void replace(secret.name)}
+                                  >
+                                    Save
+                                  </button>
+                                  <button
+                                    class="btn btn-ghost small"
+                                    onClick={() => {
+                                      setEditing(null);
+                                      setEditValue("");
+                                    }}
+                                  >
+                                    Cancel
+                                  </button>
+                                </td>
+                              </tr>
+                            </Show>
+
+                            <Show when={renaming() === secret.name}>
+                              <tr class="secret-edit-row">
+                                <td colspan={4}>
+                                  <span class="hint">Rename {secret.name} to</span>
+                                  <input
+                                    type="text"
+                                    class="grow"
+                                    autocomplete="off"
+                                    placeholder="NEW_NAME"
+                                    aria-label={`New name for ${secret.name}`}
+                                    value={newName()}
+                                    onInput={(event) => setNewName(event.currentTarget.value)}
+                                    onKeyDown={(event) => {
+                                      if (event.key === "Enter") void rename(secret.name);
+                                      if (event.key === "Escape") setRenaming(null);
+                                    }}
+                                  />
+                                  <button
+                                    class="btn btn-primary small"
+                                    disabled={busy() || !newName().trim() || checkName(newName()) !== null}
+                                    onClick={() => void rename(secret.name)}
+                                  >
+                                    Save
+                                  </button>
+                                  <button
+                                    class="btn btn-ghost small"
+                                    onClick={() => {
+                                      setRenaming(null);
+                                      setNewName("");
+                                    }}
+                                  >
+                                    Cancel
+                                  </button>
+                                </td>
+                              </tr>
+                              <Show when={checkName(newName())}>
+                                {(problem) => <tr><td colspan={4} class="hint tool-unavailable">{problem()}</td></tr>}
                               </Show>
-                            </td>
-                          </tr>
+                            </Show>
+                          </>
                         )}
                       </For>
                     </tbody>

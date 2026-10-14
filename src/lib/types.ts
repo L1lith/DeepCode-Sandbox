@@ -103,6 +103,8 @@ export interface SecretView {
   masked: string;
   /** Worth knowing only for spotting a truncated paste. */
   length: number;
+  /** False when this secret is stored but deliberately not given to the sandbox. */
+  enabled: boolean;
 }
 
 export interface SecretListView {

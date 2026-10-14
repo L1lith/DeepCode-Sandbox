@@ -385,6 +385,13 @@ pub struct Project {
     /// than being indistinguishable from never having chosen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
+    /// Secrets that are stored but deliberately not handed to the sandbox.
+    ///
+    /// Kept on the project rather than in the encrypted store: the store is one map of name
+    /// to value, and whether a secret may be used is a decision about the project rather than
+    /// part of the secret. Names are matched exactly, as environment variables are.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_secrets: Vec<String>,
     /// Whether the sandbox may ask for anything at all.
     ///
     /// On by default, and that default is the point: a sandbox that cannot ask is a

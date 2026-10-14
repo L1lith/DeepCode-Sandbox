@@ -416,6 +416,7 @@ fn migrate(state: &mut StoreDocument) {
         let slug = paths::unique_slug(&paths::slugify(name), |c| taken.iter().any(|t| t == c));
 
         let project = Project {
+            disabled_secrets: Vec::new(),
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
             slug,
