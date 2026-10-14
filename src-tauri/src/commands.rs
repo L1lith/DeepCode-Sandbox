@@ -95,8 +95,17 @@ pub fn app_info_impl(state: &AppState) -> CmdResult<AppInfo> {
 }
 
 #[tauri::command]
-pub fn docker_status(state: State<'_, AppState>) -> CmdResult<DockerStatus> {
-    docker_status_impl(&state)
+pub async fn docker_status(app: AppHandle) -> CmdResult<DockerStatus> {
+    // Async, because the probe is several docker CLI calls and a sync command runs them on the
+    // main thread: one wedged daemon call froze the entire window for its whole timeout. A
+    // blocked worker is invisible; a blocked main thread is a window that does not repaint.
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = tauri::Manager::state::<AppState>(&handle);
+        docker_status_impl(&state)
+    })
+    .await
+    .map_err(|err| format!("the docker check could not be completed: {err}"))?
 }
 
 pub fn docker_status_impl(state: &AppState) -> CmdResult<DockerStatus> {
@@ -694,8 +703,16 @@ fn verify_seccomp_profile(
 }
 
 #[tauri::command]
-pub fn preview_plan(state: State<'_, AppState>, project_id: String) -> CmdResult<PlanPreview> {
-    preview_plan_impl(&state, project_id)
+pub async fn preview_plan(app: AppHandle, project_id: String) -> CmdResult<PlanPreview> {
+    // Async for the same reason docker_status is: the plan touches docker (the live proxy and the
+    // seccomp check), and a sync command would run that on the main thread.
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = tauri::Manager::state::<AppState>(&handle);
+        preview_plan_impl(&state, project_id)
+    })
+    .await
+    .map_err(|err| format!("the plan could not be previewed: {err}"))?
 }
 
 pub fn preview_plan_impl(state: &AppState, project_id: String) -> CmdResult<PlanPreview> {

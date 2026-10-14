@@ -59,6 +59,15 @@ pub fn install(app: &tauri::AppHandle) -> tauri::Result<()> {
             {
                 show_main_window(tray.app_handle());
             }
+            // Windows users double-click tray icons; the first click of a double is a plain Click,
+            // so this only matters when the platform sends a DoubleClick without the Click.
+            if let tauri::tray::TrayIconEvent::DoubleClick {
+                button: tauri::tray::MouseButton::Left,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
         });
     if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone());

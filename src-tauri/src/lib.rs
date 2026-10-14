@@ -164,13 +164,9 @@ pub fn run() {
     // thread, the launch disappears entirely -- no window, no error. Clearing such a process
     // here means the plugin finds nothing to hand off to.
     let claim = instance::claim(&data_dir_path);
-    let single_instance = match &claim {
-        instance::Claim::TakeOverUncleared(pid) => {
-            tracing::error!(pid, "starting without the single-instance guard");
-            false
-        }
-        instance::Claim::Primary(_) | instance::Claim::Cleared(_, _) | instance::Claim::Secondary => true,
-    };
+    if let instance::Claim::TakeOverUncleared(pid) = &claim {
+        tracing::error!(pid, "an earlier Deepsand was not responding; it has been cleared and this one takes over");
+    }
     // The lock lives as long as this binding: dropping it is how the next launch knows this
     // one is gone.
     let _instance_lock = match claim {
@@ -185,27 +181,21 @@ pub fn run() {
     let state = AppState::new(store, startup_error);
 
     let mut builder = tauri::Builder::default();
-    if single_instance {
-        // Registered first among the plugins that do anything: it decides whether this process
-        // becomes the instance at all. Two windows would fight over the same container names,
-        // and each one's startup sweep would kill the other's sandboxes. Skipped only when an
-        // earlier instance is stuck and could not be cleared, because an app that refuses to
-        // open at all is worse than two that have to be sorted out by hand.
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-                // A second launch is somebody asking for the window -- from the Start menu, a
-                // shortcut, or a file manager -- and there is one process, so the launch is handed
-                // here. Doing nothing left them with no window and no sign of one, because the
-                // instance they already had was in the tray.
-                tray::show_main_window(app);
-            use tauri::Manager as _;
-            tracing::info!("another launch was handed to this instance; showing the window");
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-        }));
-    }
+    // Registered first among the plugins that do anything: it decides whether this process
+    // becomes the instance at all. Always on, because two windows would fight over the same
+    // container names, and a second launch is somebody asking for the window -- it is handed
+    // here and shown, which is the one-instance behaviour an operator expects. Any stuck
+    // predecessor has already been cleared by `instance::claim` above.
+    builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            tray::show_main_window(app);
+        use tauri::Manager as _;
+        tracing::info!("another launch was handed to this instance; showing the window");
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }));
     builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
