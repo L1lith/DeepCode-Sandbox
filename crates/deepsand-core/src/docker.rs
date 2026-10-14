@@ -219,6 +219,67 @@ impl Docker {
         result
     }
 
+    /// Stream a file from this machine into a container.
+    ///
+    /// The bytes go through the CLI's stdin rather than through `docker cp`. `docker cp` needs
+    /// the *daemon* to be able to read the path, which with Docker Desktop means the drive has
+    /// to be shared with it: a file dropped from an unshared drive, or from a network path, then
+    /// fails for a reason that has nothing to do with the file. Stdin asks no such thing, and it
+    /// streams, so a large file is never held in memory to be sent.
+    ///
+    /// The name is passed as a positional argument, never interpolated into the script, so a
+    /// file called `$(whatever)` is a file with an awkward name and nothing more.
+    pub fn write_file_into_container(
+        &self,
+        container: &str,
+        dir: &str,
+        name: &str,
+        host: &std::path::Path,
+    ) -> Result<()> {
+        let mut source = std::fs::File::open(host).map_err(|err| {
+            SandboxError::policy(format!("{} could not be read: {err}", host.display()))
+        })?;
+        let script = "mkdir -p \"$1\" && cat > \"$1/$2\"";
+        let mut command = std::process::Command::new(self.program());
+        command.args(self.fmt(&["exec", "-i", container, "sh", "-c", script, "sh", dir, name]));
+        command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let mut child = command.spawn().map_err(|err| {
+            SandboxError::policy(format!("docker could not be started: {err}"))
+        })?;
+
+        let sent = match child.stdin.take() {
+            Some(mut pipe) => std::io::copy(&mut source, &mut pipe).map(|_| ()),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "the container had no stdin to write to",
+            )),
+        };
+        // Waited on after the pipe is dropped: the child sees end-of-file only once every
+        // writer of it is closed, and waiting first would wait for something that never comes.
+        let output = child.wait_with_output().map_err(|err| {
+            SandboxError::policy(format!("docker could not be waited on: {err}"))
+        })?;
+        if let Err(err) = sent {
+            return Err(SandboxError::policy(format!(
+                "{} could not be copied into the sandbox: {err}",
+                host.display()
+            )));
+        }
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let why = sanitize_output_line(stderr.trim())
+                .unwrap_or_else(|| "no reason was given".to_string());
+            return Err(SandboxError::policy(format!(
+                "{} could not be copied into the sandbox: {why}",
+                host.display()
+            )));
+        }
+        Ok(())
+    }
+
     /// Start one throwaway container to learn whether the container runtime can start
     /// containers at all, returning what happened when it cannot.
     ///

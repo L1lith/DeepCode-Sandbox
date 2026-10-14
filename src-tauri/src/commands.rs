@@ -2944,7 +2944,14 @@ const ATTACHMENTS_DIR: &str = "/home/deepcode/.deepcode/attachments";
 
 /// The largest attachment. These bytes travel through the app's memory and then through
 /// `docker exec`'s stdin, so a dropped disk image should be a message rather than a hang.
+/// A ceiling for something pasted. Those bytes come through the window encoded as base64, so
+/// they are held in memory more than once before they are anywhere.
 const MAX_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
+
+/// A ceiling for a dropped file, which is streamed off the disk into the container: never all
+/// in memory at once, and no requirement that Docker can see the drive. Generous on purpose,
+/// because a tarball or a log an operator wants looked at is exactly what gets dropped in.
+const MAX_DROPPED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// A safe name for an attachment, prefixed so two pastes never collide.
 ///
@@ -3073,16 +3080,24 @@ pub fn attach_paths_impl(
             ));
             continue;
         }
-        let bytes = match std::fs::read(&canonical) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                view.problems.push(format!("{name} could not be read: {err}"));
-                continue;
-            }
-        };
-        match put_attachment(state, &container, &name, &bytes) {
-            Ok(path) => view.paths.push(path),
-            Err(err) => view.problems.push(err),
+        // Streamed from its path, rather than read into memory and sent with `docker cp` as it
+        // used to be. Reading it in put a ceiling on it that had nothing to do with what the
+        // sandbox can hold, and copying it asked the daemon to be able to see the drive it is
+        // on, which is what a file from outside the project directory trips over.
+        if meta.len() > MAX_DROPPED_BYTES {
+            view.problems.push(format!(
+                "{} is {} MB, and the limit for a dropped file is {} MB.",
+                name,
+                meta.len() / (1024 * 1024),
+                MAX_DROPPED_BYTES / (1024 * 1024)
+            ));
+            continue;
+        }
+        let dest = attachment_name(&name, deepsand_core::now_ms().max(0) as u64);
+        let docker = state.docker().map_err(fail)?;
+        match docker.write_file_into_container(&container, ATTACHMENTS_DIR, &dest, &canonical) {
+            Ok(()) => view.paths.push(format!("{ATTACHMENTS_DIR}/{dest}")),
+            Err(err) => view.problems.push(err.to_string()),
         }
     }
 
