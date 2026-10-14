@@ -518,12 +518,12 @@ async fn await_image(
             }
             if building && !said_so {
                 said_so = true;
-                let _ = app.emit(
-                    events::BUILD_LOG,
-                    serde_json::json!({ "line": format!(
-                        "Waiting for {image} to finish building before starting the sandbox."
-                    ) }),
-                );
+                // Deliberately a log line and not a UI event. `BUILD_LOG` is what tells the
+                // window a build is in progress, and a build is what `BUILD_DONE` ends -- so a
+                // waiting notice sent that way opened the progress panel with nothing left to
+                // close it, and it stayed open after the build it was describing had finished.
+                // The build's own events are already driving that panel; this is for the file.
+                tracing::info!(%image, "waiting for the image build before starting the sandbox");
             }
             if std::time::Instant::now() >= deadline {
                 return Err(format!("{image} was still being built after thirty minutes"));
