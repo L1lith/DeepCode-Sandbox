@@ -139,6 +139,8 @@ export function PermissionDialog(props: { request: PermissionRequestView; queued
         message: note(),
         hostPath: decision === "allow" ? path() : null,
         access: decision === "allow" ? access() : null,
+        secretName: request().secretName ?? null,
+        secretValue: request().secretValue ?? null,
         restart: true,
       });
       if (decision === "allow" && allowed) {

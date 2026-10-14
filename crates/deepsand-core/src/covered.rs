@@ -61,6 +61,10 @@ pub fn already_covered(
         // "I need something but do not know where it is" has no target to compare, so
         // there is nothing here that can be certain.
         RequestKind::LocateResource => None,
+        // A secret is a decision about a value the operator holds, not about something the
+        // sandbox already has, so this is always worth asking. (The request to *write* one
+        // also carries the value, which the operator has to see before it is stored.)
+        RequestKind::Secret => None,
     }
 }
 

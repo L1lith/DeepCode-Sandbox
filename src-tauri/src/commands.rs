@@ -1472,6 +1472,8 @@ fn request_view(state: &impl AsAppState, request: &PermissionRequest) -> Permiss
         .unwrap_or_else(|_| "(unknown project)".to_string());
 
     let claimed_path = request.claimed_host_path().map(str::to_string);
+    let claimed_secret_name = request.secret_name();
+    let claimed_secret_value = request.secret_value();
 
     // Pre-flight the claimed path so the dialog can explain a refusal up front
     // instead of letting the operator approve something that will be rejected.
@@ -1502,6 +1504,10 @@ fn request_view(state: &impl AsAppState, request: &PermissionRequest) -> Permiss
             "DeepCode is asking for a tool: {}",
             request.description()
         ),
+        RequestKind::Secret => match request.secret_name() {
+            Some(name) => format!("DeepCode is asking for a secret: {name}"),
+            None => "DeepCode is asking for a secret to be added to this project".to_string(),
+        },
     };
 
     PermissionRequestView {
@@ -1520,6 +1526,8 @@ fn request_view(state: &impl AsAppState, request: &PermissionRequest) -> Permiss
         has_claimed_path: claimed_path.is_some(),
         claimed_path,
         claimed_path_rejection,
+        secret_name: claimed_secret_name,
+        secret_value: claimed_secret_value,
         received_at: request.created_at.clone(),
         surfaced_at_ms: now_ms(),
         provenance: "Requested by the sandbox. Everything here -- the path, the wording, \
@@ -1687,6 +1695,77 @@ pub fn answer_request_impl(app: &AppHandle, state: &AppState, payload: DecisionP
                 });
             }
 
+            let _ = app.emit(
+                events::BROKER_RESOLVED,
+                serde_json::json!({ "requestId": request_id, "decision": "allow" }),
+            );
+            return Ok(true);
+        }
+
+        RequestKind::Secret => {
+            // What the operator settled on wins over what the sandbox claimed: the request
+            // is a prefill, not an instruction, and the operator may have replaced either
+            // half of it in the dialog.
+            let name = payload
+                .secret_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .or_else(|| request.secret_name())
+                .unwrap_or_default();
+            let value = payload
+                .secret_value
+                .clone()
+                .filter(|value| !value.is_empty())
+                .or_else(|| request.secret_value())
+                .unwrap_or_default();
+
+            let refusal = if name.is_empty() {
+                Some(
+                    "a secret needs a name, and neither the operator nor the sandbox supplied one."
+                        .to_string(),
+                )
+            } else {
+                match deepsand_core::secrets::validate_name(&name) {
+                    Err(err) => Some(format!("that name cannot be used as a secret: {err}")),
+                    Ok(name) if deepsand_core::secrets::reserved_names().contains(&name) => {
+                        Some(format!("{name} is reserved by Deepsand and cannot be set as a secret."))
+                    }
+                    Ok(name) if value.is_empty() => Some(format!(
+                        "{name} was approved without a value, so there is nothing to hand to the sandbox yet."
+                    )),
+                    Ok(_) => None,
+                }
+            };
+
+            if let Some(refusal) = refusal {
+                let _ = app.emit(
+                    events::BROKER_RESOLVED,
+                    serde_json::json!({ "requestId": request_id, "decision": "deny" }),
+                );
+                broker.answer(&PermissionResponse::deny(&request_id, &refusal)).map_err(fail)?;
+                return Ok(false);
+            }
+
+            let data_dir = store(&state).data_dir().to_path_buf();
+            let secrets =
+                deepsand_core::secrets::Secrets::open(&data_dir, &request.project).map_err(fail)?;
+            secrets.set(&name, &value).map_err(fail)?;
+
+            let message = format!(
+                "{name} is saved for this project and is handed to the sandbox as an environment \
+                 variable. A sandbox that is already running keeps the environment it started with, \
+                 so restart the project to pick it up."
+            );
+            broker
+                .answer(
+                    &PermissionResponse::allow(&request_id, &message, None, true).with_secret(
+                        deepsand_core::model::SecretSpec { name, value },
+                    ),
+                )
+                .map_err(fail)?;
+            tracing::info!("a secret was added from an approved request");
             let _ = app.emit(
                 events::BROKER_RESOLVED,
                 serde_json::json!({ "requestId": request_id, "decision": "allow" }),

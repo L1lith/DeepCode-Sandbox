@@ -245,6 +245,7 @@ async function main() {
       "deepsand_request_directory_access",
       "deepsand_request_network_access",
       "deepsand_request_resource",
+      "deepsand_request_secret",
       "deepsand_request_tool",
       "deepsand_sandbox_info",
     ]);

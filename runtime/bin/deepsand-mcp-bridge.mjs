@@ -178,6 +178,38 @@ const TOOLS = [
     },
   },
   {
+    name: "deepsand_request_secret",
+    description:
+      "Ask the operator to add a secret to this project. The value is stored for the project and handed to " +
+      "this sandbox as an environment variable, which is how an API key, token or password is meant to reach " +
+      "you. Suggest a name, and a value if you have one; the operator can change either before approving. " +
+      "When it is approved you are told the name and the value, so you can use it at once -- but a sandbox " +
+      "that is already running keeps the environment it started with, so the project has to be restarted " +
+      "before the variable appears in your environment.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description:
+            "The variable name to suggest, for example 'STRIPE_SECRET_KEY'. Letters, digits and underscores.",
+        },
+        value: {
+          type: "string",
+          description:
+            "The value, if you have it. Leave it out when only the operator can know it, such as a key from " +
+            "their own account.",
+        },
+        purpose: {
+          type: "string",
+          description: "One short sentence explaining what it is for.",
+        },
+      },
+      required: ["purpose"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "deepsand_request_tool",
     description:
       "Ask the operator to install a tool into this sandbox's container image. Only a fixed catalogue exists; call " +
@@ -432,12 +464,13 @@ async function sandboxInfoText() {
     "enforced by the container runtime, not by policy, so there is no alternative path to those paths - do not",
     "go looking for one.",
     "",
-    "Need something more? Four tools, one per kind of need:",
+    "Need something more? Five tools, one per kind of need:",
     "",
     "  deepsand_request_directory_access  - you can name the host path",
     "  deepsand_request_resource          - you know what you need but not where it lives",
     "  deepsand_request_network_access    - a destination the network policy is blocking",
     "  deepsand_request_tool              - a program that is not installed",
+    "  deepsand_request_secret            - a key, token or password this project needs",
     "",
     "Approved directory access is applied by recreating this container, which restarts your session.",
     "Approved network access takes effect at once. An approved tool needs its image rebuilt first, so it",
@@ -599,6 +632,43 @@ async function callTool(name, args) {
       const early = earlyOutcome(outcome, "network access", "the decision");
       if (early) return early;
       return renderDecision("network", outcome.response);
+    }
+
+    case "deepsand_request_secret": {
+      const secretName = String(args?.name ?? "").trim();
+      const secretValue = args?.value === undefined || args?.value === null ? "" : String(args.value);
+      const secretPurpose = String(args?.purpose ?? "").trim();
+      if (!secretPurpose) return textResult("purpose is required.", true);
+      if (!secretName && !secretValue) {
+        return textResult("suggest a name, or a value to store, so the operator has something to approve.", true);
+      }
+      const outcome = await submitAndWait("secret", {
+        name: secretName,
+        value: secretValue,
+        purpose: secretPurpose,
+      });
+      const early = earlyOutcome(outcome, "secret", "the decision");
+      if (early) return early;
+      const secretResponse = outcome.response ?? {};
+      if (secretResponse.decision !== "allow") {
+        return textResult(
+          `DENIED. The operator did not add that secret${secretResponse.message ? `: ${secretResponse.message}` : "."}`,
+        );
+      }
+      // The answer carries the name and the value the operator settled on, which may not be
+      // what was asked for: they can rename it or fill a value in themselves.
+      const settled = secretResponse.secret ?? {};
+      const finalName = settled.name || secretName;
+      const finalValue = settled.value ?? secretValue;
+      return textResult(
+        `ALLOWED. The project secret ${finalName} is saved, and its value is handed to this sandbox as an ` +
+          `environment variable.\n` +
+          `Name: ${finalName}\n` +
+          `Value: ${finalValue}\n` +
+          `A sandbox that is already running keeps the environment it started with, so ask the operator to ` +
+          `restart the project before you rely on it, then read it from your environment (for example ` +
+          `process.env.${finalName}).`
+      );
     }
 
     case "deepsand_request_tool": {

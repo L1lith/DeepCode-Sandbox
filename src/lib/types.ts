@@ -404,6 +404,9 @@ export interface PermissionRequestView {
   receivedAt: string;
   surfacedAtMs: number;
   provenance: string;
+  /** A secret a request named, so the dialog can show and confirm it. */
+  secretName: string | null;
+  secretValue: string | null;
 }
 
 export interface RejectedRequestView {
@@ -426,6 +429,9 @@ export interface DecisionPayload {
   hostPath?: string | null;
   access?: "read" | "write" | null;
   restart?: boolean | null;
+  /** What the operator settled on for a secret request. */
+  secretName?: string | null;
+  secretValue?: string | null;
 }
 
 export const DEFAULT_LIMITS: ResourceLimits = {

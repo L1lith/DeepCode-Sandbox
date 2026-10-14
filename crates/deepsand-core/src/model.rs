@@ -869,6 +869,12 @@ pub enum RequestKind {
     NetworkAccess,
     /// "DeepCode is asking for a tool to be installed"
     ToolInstall,
+    /// "DeepCode is asking for a secret to be added to the project"
+    ///
+    /// The one kind whose answer carries data back to the model besides a yes: the
+    /// name and value the operator settled on travel in the response, because the
+    /// point of a project secret is that the sandbox is given it.
+    Secret,
 }
 
 impl RequestKind {
@@ -878,6 +884,7 @@ impl RequestKind {
             RequestKind::LocateResource => "locate_resource",
             RequestKind::NetworkAccess => "network_access",
             RequestKind::ToolInstall => "tool_install",
+            RequestKind::Secret => "secret",
         }
     }
 }
@@ -949,6 +956,16 @@ impl PermissionRequest {
                     tools.join(", ")
                 }
             }
+            RequestKind::Secret => match self.secret_name() {
+                Some(name) => {
+                    if self.secret_value().is_some_and(|value| !value.is_empty()) {
+                        format!("{name} (with a value)")
+                    } else {
+                        format!("{name} (value needed)")
+                    }
+                }
+                None => from("description").unwrap_or_else(|| "(unnamed secret)".to_string()),
+            },
         }
     }
 
@@ -975,6 +992,24 @@ impl PermissionRequest {
     /// The host still validates whatever it is handed before it becomes a rule.
     pub fn requested_patterns(&self) -> Vec<String> {
         self.string_list("patterns")
+    }
+
+    /// The secret name the sandbox asked for, if it named one. Display and prefill only.
+    pub fn secret_name(&self) -> Option<String> {
+        self.args
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+    }
+
+    /// The value the sandbox offered, if it offered one. The operator may replace it.
+    pub fn secret_value(&self) -> Option<String> {
+        self.args
+            .get("value")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
     }
 
     /// Tool ids a tool request asks for.
@@ -1026,6 +1061,18 @@ pub struct GrantSpec {
     pub access: Access,
 }
 
+/// The secret an approved request settled on, as it is handed back to the model.
+///
+/// The value is included on purpose. A project secret exists to be given to the agent:
+/// it is written into the sandbox environment, so the agent can already read it there.
+/// Withholding it from the response would only make the agent open a file to find what
+/// the operator had just approved.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretSpec {
+    pub name: String,
+    pub value: String,
+}
+
 /// What the model is told when the operator has turned requests off.
 ///
 /// One string with two readers: the host uses it when it refuses an incoming request,
@@ -1048,12 +1095,22 @@ pub struct PermissionResponse {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant: Option<GrantSpec>,
+    /// Present when an approved request was to add a secret, so the model is told what
+    /// the secret ended up being called and what it holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<SecretSpec>,
     #[serde(default)]
     pub restart_required: bool,
     pub answered_at_ms: i64,
 }
 
 impl PermissionResponse {
+    /// The same answer, with the secret the operator settled on attached for the model.
+    pub fn with_secret(mut self, secret: SecretSpec) -> Self {
+        self.secret = Some(secret);
+        self
+    }
+
     pub fn allow(id: impl Into<String>, message: impl Into<String>, grant: Option<GrantSpec>, restart_required: bool) -> Self {
         Self {
             v: 1,
@@ -1061,6 +1118,7 @@ impl PermissionResponse {
             decision: "allow".to_string(),
             message: message.into(),
             grant,
+            secret: None,
             restart_required,
             answered_at_ms: crate::now_ms(),
         }
@@ -1073,6 +1131,7 @@ impl PermissionResponse {
             decision: "deny".to_string(),
             message: message.into(),
             grant: None,
+            secret: None,
             restart_required: false,
             answered_at_ms: crate::now_ms(),
         }

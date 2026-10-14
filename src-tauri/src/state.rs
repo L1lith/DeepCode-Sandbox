@@ -157,6 +157,10 @@ pub struct PermissionRequestView {
     /// Populated when a path was named and it is refused by policy, so the
     /// dialog can explain *why* before the operator even tries.
     pub claimed_path_rejection: Option<String>,
+    /// The secret a request named, so the dialog can prefill the fields the operator
+    /// confirms or replaces. Both are claims by the sandbox.
+    pub secret_name: Option<String>,
+    pub secret_value: Option<String>,
     pub received_at: String,
     /// When Deepsand first surfaced this dialog, so the UI can age it.
     pub surfaced_at_ms: i64,
@@ -443,6 +447,13 @@ pub struct DecisionPayload {
     /// overrides whatever the sandbox claimed for a directory request.
     #[serde(default)]
     pub host_path: Option<String>,
+    /// What the operator settled on for a secret request. Either may be empty: the
+    /// sandbox's own suggestion is used when the operator changed nothing, and a name
+    /// with no value is refused with an explanation rather than stored empty.
+    #[serde(default)]
+    pub secret_name: Option<String>,
+    #[serde(default)]
+    pub secret_value: Option<String>,
     /// Patterns the operator approved, which may be narrower than what was asked
     /// for. Absent means "as requested".
     #[serde(default)]

@@ -167,3 +167,19 @@ An approved tool is added to the project's image, which means it is **not usable
 - Do not ask for a wildcard to avoid diagnosing which host you actually need. The error message usually says.
 - Do not install tools yourself. They are baked into the image; an install you perform is discarded, and installing something else with a different version is worse than not having it.
 - Do not bundle unrelated requests into one to save a round trip. A request the operator cannot judge is a request they have to refuse.
+
+### Asking for a secret
+
+Use `deepsand_request_secret` when the work needs a key, token or password that you do not have — a
+sandbox cannot invent one, and hard-coding a placeholder wastes everyone's time.
+
+- `name` is the variable name to suggest (`STRIPE_SECRET_KEY`, `GH_TOKEN`). Upper case, digits and
+  underscores; the operator can rename it before approving.
+- `value` is optional. Give it when you know it (a key the operator pasted in chat, a token you generated);
+  leave it out when only the operator can know it, such as a key from their own dashboard.
+- `purpose` is required, and is what the operator reads first.
+
+An approved secret is stored for the project and handed to the sandbox as an environment variable. The
+answer tells you the name *and the value* that were saved, so you can use it immediately — but a sandbox
+that is already running keeps the environment it started with, so ask the operator to restart the project
+before you rely on it. Denied means denied: do not ask again, and do not look for another way in.
