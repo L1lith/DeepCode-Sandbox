@@ -1315,8 +1315,15 @@ impl AppState {
 }
 
 #[tauri::command]
-pub fn stop_session(app: AppHandle, state: State<'_, AppState>, project_id: String) -> CmdResult<()> {
-    stop_session_impl(&app, &state, project_id)
+pub async fn stop_session(app: AppHandle, project_id: String) -> CmdResult<()> {
+    // Async: stopping removes the container and kills the PTY, both of which can block.
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = tauri::Manager::state::<AppState>(&handle);
+        stop_session_impl(&handle, &state, project_id)
+    })
+    .await
+    .map_err(|err| format!("the sandbox could not be stopped: {err}"))?
 }
 
 pub fn stop_session_impl(app: &AppHandle, state: &AppState, project_id: String) -> CmdResult<()> {
@@ -1341,8 +1348,15 @@ pub async fn restart_session_impl(app: &AppHandle, state: &AppState, project_id:
 }
 
 #[tauri::command]
-pub fn write_to_session(state: State<'_, AppState>, project_id: String, data: String) -> CmdResult<()> {
-    write_to_session_impl(&state, project_id, data)
+pub async fn write_to_session(app: AppHandle, project_id: String, data: String) -> CmdResult<()> {
+    // Async: a keystroke is written into the PTY, which on Windows is a ConPTY call that can block.
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = tauri::Manager::state::<AppState>(&handle);
+        write_to_session_impl(&state, project_id, data)
+    })
+    .await
+    .map_err(|err| format!("the keystroke could not be delivered: {err}"))?
 }
 
 pub fn write_to_session_impl(state: &AppState, project_id: String, data: String) -> CmdResult<()> {
@@ -1355,8 +1369,15 @@ pub fn write_to_session_impl(state: &AppState, project_id: String, data: String)
 }
 
 #[tauri::command]
-pub fn resize_session(state: State<'_, AppState>, project_id: String, rows: u16, cols: u16) -> CmdResult<()> {
-    resize_session_impl(&state, project_id, rows, cols)
+pub async fn resize_session(app: AppHandle, project_id: String, rows: u16, cols: u16) -> CmdResult<()> {
+    // Async for the same reason writes are: a terminal resize is a ConPTY call.
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = tauri::Manager::state::<AppState>(&handle);
+        resize_session_impl(&state, project_id, rows, cols)
+    })
+    .await
+    .map_err(|err| format!("the terminal could not be resized: {err}"))?
 }
 
 pub fn resize_session_impl(state: &AppState, project_id: String, rows: u16, cols: u16) -> CmdResult<()> {
@@ -2675,8 +2696,14 @@ pub fn cancel_build_impl(image: Option<String>) -> CmdResult<Vec<String>> {
 }
 
 #[tauri::command]
-pub fn cancel_build(image: Option<String>) -> CmdResult<Vec<String>> {
-    cancel_build_impl(image)
+pub async fn cancel_build(app: AppHandle, image: Option<String>) -> CmdResult<Vec<String>> {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = tauri::Manager::state::<AppState>(&handle);
+        cancel_build_impl(image)
+    })
+    .await
+    .map_err(|err| format!("the build could not be cancelled: {err}"))?
 }
 
 /* ------------------------------------------------------------------------- */
@@ -3369,13 +3396,20 @@ pub fn host_config_summary() -> CmdResult<std::collections::BTreeMap<String, Str
 }
 
 #[tauri::command]
-pub fn build_runtime_image(
+pub async fn build_runtime_image(
     app: AppHandle,
-    state: State<'_, AppState>,
     project_id: Option<String>,
     build_tools: Option<bool>,
 ) -> CmdResult<()> {
-    build_runtime_image_impl(&app, &state, project_id, build_tools, false)
+    // Async: a build takes minutes, and a sync command runs on the main thread -- one Build click
+    // used to freeze the entire window for the whole build.
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = tauri::Manager::state::<AppState>(&handle);
+        build_runtime_image_impl(&handle, &state, project_id, build_tools, false)
+    })
+    .await
+    .map_err(|err| format!("the build could not be started: {err}"))?
 }
 
 /// Build the runtime image for a project's tool selection.
@@ -3913,8 +3947,14 @@ fn runtime_context_dir() -> Option<PathBuf> {
 
 /// Remove managed containers, volumes and networks that no live project owns.
 #[tauri::command]
-pub fn cleanup_orphans(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
-    cleanup_orphans_impl(&state)
+pub async fn cleanup_orphans(app: AppHandle) -> CmdResult<Vec<String>> {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = tauri::Manager::state::<AppState>(&handle);
+        cleanup_orphans_impl(&state)
+    })
+    .await
+    .map_err(|err| format!("orphans could not be cleaned up: {err}"))?
 }
 
 /// Everything to do before the process goes away.
