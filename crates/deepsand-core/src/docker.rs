@@ -1732,6 +1732,68 @@ mod tests {
 /// and that call returns by itself. `killed` is what lets the caller tell "this process was stopped
 /// by the limit" from "this process said something and failed", which are the same shape otherwise
 /// and mean very different things.
+/// What to do about an image the sandbox is about to need.
+///
+/// Kept pure so the decisions can be tested without docker: each of the three answers is a
+/// different bug if it is wrong. "Ready" too early runs a tag that is not there, and docker
+/// reports that as "pull access denied", which reads like a permissions problem. "Wait" too
+/// eagerly hangs a launch that nothing is building. "Give up" too late is the hang.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ImageWait {
+    Ready,
+    Wait,
+    GiveUp(String),
+}
+
+/// `grace_checks_left` is how many more checks to allow for a build that has been asked for
+/// but has not registered itself yet: the request and the registration are not one act, and
+/// giving up in that gap would refuse a launch that was about to be fine.
+pub fn image_wait_step(present: bool, building: bool, grace_checks_left: u32, image: &str) -> ImageWait {
+    if present {
+        return ImageWait::Ready;
+    }
+    if building {
+        return ImageWait::Wait;
+    }
+    if grace_checks_left > 0 {
+        return ImageWait::Wait;
+    }
+    ImageWait::GiveUp(format!(
+        "{image} is not built and nothing is building it. Build it from the project's Activity tab, then start again."
+    ))
+}
+
+#[cfg(test)]
+mod image_wait_tests {
+    use super::*;
+
+    #[test]
+    fn an_image_that_is_there_is_ready_whatever_else_is_happening() {
+        assert_eq!(image_wait_step(true, true, 0, "img"), ImageWait::Ready);
+        assert_eq!(image_wait_step(true, false, 0, "img"), ImageWait::Ready);
+    }
+
+    #[test]
+    fn an_image_being_built_is_waited_for() {
+        assert_eq!(image_wait_step(false, true, 0, "img"), ImageWait::Wait);
+    }
+
+    /// A build that was just asked for has not registered yet; refusing in that gap would
+    /// break the launch it was meant to protect.
+    #[test]
+    fn a_build_that_has_not_registered_yet_is_given_a_moment() {
+        assert_eq!(image_wait_step(false, false, 5, "img"), ImageWait::Wait);
+    }
+
+    #[test]
+    fn an_image_nothing_is_building_is_reported_rather_than_waited_for() {
+        match image_wait_step(false, false, 0, "img") {
+            ImageWait::GiveUp(message) => assert!(message.contains("img")),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+}
+
 fn wait_bounded(
     mut cmd: Command,
     limit: std::time::Duration,
@@ -1760,8 +1822,10 @@ fn wait_bounded(
             Ok(None) if std::time::Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let stdout = stdout_thread.join().unwrap_or_default();
-                let stderr = stderr_thread.join().unwrap_or_default();
+                // Joined so the pipes are closed before the error is returned, but the
+                // output of a command that had to be killed is not worth reporting.
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
                 return Err(format!(
                     "it gave no answer within {}s, so it was killed. This command is not the problem: \
                      something inside Docker is not answering, and restarting Docker Desktop is the usual \

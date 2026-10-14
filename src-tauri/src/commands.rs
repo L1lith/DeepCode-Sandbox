@@ -483,6 +483,59 @@ fn model_endpoints(base_url: &str) -> Vec<String> {
     deepsand_core::allowlist::endpoints_for_url(base_url)
 }
 
+/// Wait until the image the sandbox is about to run exists.
+///
+/// The sandbox cannot run an image that is not there, and `docker run` reports that in the
+/// least helpful way there is: it looks the tag up, tries to pull it, and fails with "pull
+/// access denied for deepsand/runtime", as though the image were private. Two things leave
+/// it unbuilt at this point -- this launch queuing the build behind a "start without
+/// tools", and another project with the same tool selection having started the same build
+/// -- so the launch waits for the image instead of assuming it.
+async fn await_image(
+    docker: deepsand_core::docker::Docker,
+    image: String,
+    app: AppHandle,
+) -> std::result::Result<(), String> {
+    use deepsand_core::docker::{image_wait_step, ImageWait};
+
+    if docker.image_present(&image) {
+        return Ok(());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        // Fifteen seconds of grace, then a two-second beat while a build is running, and
+        // half an hour before calling it stuck: a tool build on a cold machine is slow.
+        let mut grace = 5;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30 * 60);
+        let mut said_so = false;
+        loop {
+            let building = deepsand_core::docker::builds_in_flight()
+                .iter()
+                .any(|tag| tag == &image);
+            match image_wait_step(docker.image_present(&image), building, grace, &image) {
+                ImageWait::Ready => return Ok(()),
+                ImageWait::GiveUp(message) => return Err(message),
+                ImageWait::Wait => {}
+            }
+            if building && !said_so {
+                said_so = true;
+                let _ = app.emit(
+                    events::BUILD_LOG,
+                    serde_json::json!({ "line": format!(
+                        "Waiting for {image} to finish building before starting the sandbox."
+                    ) }),
+                );
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!("{image} was still being built after thirty minutes"));
+            }
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            grace = grace.saturating_sub(1);
+        }
+    })
+    .await
+    .map_err(|err| format!("waiting for the image failed: {err}"))?
+}
+
 fn prepare_plan(
     state: &impl AsAppState,
     project_id: &str,
@@ -491,6 +544,14 @@ fn prepare_plan(
     proxy: Option<&deepsand_core::policy::ProxyEndpoint>,
     network_gateway: Option<String>,
     required_hosts: &[String],
+    // The image to plan for, when the caller has already decided which one it means.
+    //
+    // "Start without tools" runs the image with no tools while the one with them is built
+    // behind it, so the plan has to name the image the launch checked for rather than the
+    // one the project's tool selection implies. Without this the sandbox asked docker to run
+    // a tag that did not exist yet, and the operator was told "pull access denied" for an
+    // image that was, at that moment, still being built.
+    image_override: Option<&str>,
 ) -> CmdResult<(RunPlan, ResolvedCredentials, Vec<String>)> {
     let (project, grants, app_settings, data_dir, guards) = {
         let store = store(state);
@@ -513,7 +574,10 @@ fn prepare_plan(
     // sandbox reads and the plan itself all have to agree on which image this is. The tag in
     // settings is only the stem the project's tag is derived from, and `image_present` has to
     // mean "this project's image is there", not "some image with that stem is".
-    let app_settings = container_settings::settings_for_project(&app_settings, project.tools.as_deref());
+    let mut app_settings = container_settings::settings_for_project(&app_settings, project.tools.as_deref());
+    if let Some(image) = image_override {
+        app_settings.image = image.to_string();
+    }
 
     let daemon = match state.app_state().docker() {
         Ok(docker) => docker.probe(&app_settings.image),
@@ -755,6 +819,8 @@ pub fn preview_plan_impl(state: &AppState, project_id: String) -> CmdResult<Plan
         live_endpoint.as_ref(),
         live_gateway,
         &required_hosts,
+        // A preview shows the command for what the project is configured to run.
+        None,
     )
     .map_err(|err| {
         // The generic message names an internal component and tells the operator to
@@ -1093,6 +1159,9 @@ let mut restricted_proxy: Option<(deepsand_core::policy::ProxyEndpoint, String)>
         restricted_proxy.as_ref().map(|(endpoint, _)| endpoint),
         restricted_proxy.as_ref().map(|(_, gateway)| gateway.clone()),
         &required_hosts,
+        // The image this launch checked for, which is the no-tools one when the operator
+        // asked to start without tools.
+        Some(launch.image.as_str()),
     )?;
 
         tracing::info!("start: plan ready; probing the mounts");
@@ -1148,6 +1217,13 @@ if resolved.api_key.is_none() {
         ));
     }
 
+    // The sandbox cannot run an image that is not there, and `docker run` reports that in the
+    // least helpful way there is -- it looks the tag up, tries to pull it, and fails with
+    // "pull access denied for deepsand/runtime", as though the image were private. Two things
+    // leave it unbuilt at this moment: this launch queuing the build behind a "start without
+    // tools", and another project with the same tool selection starting the same build. So
+    // the launch waits for the image rather than assuming it.
+    await_image(docker.clone(), launch.image.clone(), app.clone()).await?;
     let session = start_container(&app, &project_id, &docker, &launch, plan.args.clone(), warnings.clone())?;
 
     state.sessions.lock().unwrap().insert(
@@ -1283,7 +1359,7 @@ fn spawn_session(
     let output_tx = event_tx.clone();
     let exit_tx = event_tx;
 
-        tracing::info!("start: credentials ready; entering Session::spawn");
+    tracing::info!("start: credentials ready; entering Session::spawn");
 Session::spawn(
         SessionOptions {
             program: docker.program().to_path_buf(),
