@@ -183,3 +183,19 @@ An approved secret is stored for the project and handed to the sandbox as an env
 answer tells you the name *and the value* that were saved, so you can use it immediately — but a sandbox
 that is already running keeps the environment it started with, so ask the operator to restart the project
 before you rely on it. Denied means denied: do not ask again, and do not look for another way in.
+
+### A screen to render into
+
+Some work needs a display: a browser that renders the way it does for a person, a tool that wants
+a window, a screenshot of a page. Ask for the tool **Virtual display (Xvfb)** (id `xvfb`) and,
+if you will be driving a page, **Puppeteer** (id `puppeteer`) as well. Neither is on unless the
+operator turns it on, and adding one means the project image is rebuilt before it can be used.
+
+Once it is installed, `DISPLAY=:99` is already set for you and the screen is 1440x900. It is a
+screen inside this container: nothing appears on anyone's real screen, and nothing outside here
+can see it. Capture it with `xwd -root -out shot.xwd`, or with `import -window root shot.png`
+if ImageMagick happens to be installed. With Puppeteer, `headless: false` renders into that screen instead of into
+nothing.
+
+If the display is missing you will see `Xvfb: command not found` and no `DISPLAY`; ask for
+the tool rather than trying to install it into a read-only image yourself.

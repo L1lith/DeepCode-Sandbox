@@ -217,6 +217,49 @@ log "sandbox up: uid=$TARGET_USER net=$NET_MODE workspace=$(pwd) rootfs=$ROOTFS"
 log "grants: $(find /grants -mindepth 1 -maxdepth 1 2>/dev/null | wc -l) mounted path(s) under /grants"
 
 # ---------------------------------------------------------------------------
+# 4b. The virtual display, when this image has one
+#
+# Started only when Xvfb is in the image, which is to say when the tool was chosen for this
+# project -- there is no separate switch, so the display cannot be believed in and absent.
+#
+# It runs as the sandbox user, on the display's own socket, with -nolisten tcp so there is no
+# TCP port for anything outside this container to be reached on. -ac turns off X11 access
+# control, which is what lets any process in here connect without an xauth cookie. That is
+# safe for a reason that does not generalise: every process that can reach this socket is
+# already a process the sandbox is running, and the other end is a memory buffer in this
+# container rather than the operator's screen.
+# ---------------------------------------------------------------------------
+if command -v Xvfb >/dev/null 2>&1; then
+  mkdir -p /tmp/.X11-unix 2>/dev/null || true
+  chmod 1777 /tmp/.X11-unix 2>/dev/null || true
+  DISPLAY=:99
+  export DISPLAY
+  if [ "$AS_ROOT" = "1" ]; then
+    setpriv \
+      --reuid="$TARGET_USER" \
+      --regid="$TARGET_GROUP" \
+      --clear-groups \
+      --inh-caps=-all \
+      --ambient-caps=-all \
+      --bounding-set=-all \
+      --no-new-privs \
+      Xvfb :99 -screen 0 1440x900x24 -ac -nolisten tcp >/tmp/xvfb.log 2>&1 &
+  else
+    Xvfb :99 -screen 0 1440x900x24 -ac -nolisten tcp >/tmp/xvfb.log 2>&1 &
+  fi
+  # A socket to wait for, so this says something true rather than hoping.
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    [ -e /tmp/.X11-unix/X99 ] && break
+    sleep 0.2
+  done
+  if [ -e /tmp/.X11-unix/X99 ]; then
+    log "virtual display: $DISPLAY is up at 1440x900; screenshot it with xwd or import, and nothing is shown on the host"
+  else
+    log "virtual display: Xvfb did not come up; see /tmp/xvfb.log"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 5. Drop everything and exec
 # ---------------------------------------------------------------------------
 if [ "$AS_ROOT" = "1" ]; then

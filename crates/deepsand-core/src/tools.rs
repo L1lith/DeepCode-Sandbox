@@ -265,6 +265,28 @@ pub const CATALOG: &[Tool] = &[
         base: Base::Debian,
     },
     Tool {
+        id: "xvfb",
+        label: "Virtual display (Xvfb)",
+        description: "A screen that exists only inside this container, for programs that want one. Nothing appears on the operator's screen, and screenshots are taken of the display itself.",
+        category: ToolCategory::PackageManager,
+        provider: Provider::Apt,
+        package: "xvfb x11-utils x11-apps",
+        default_on: false,
+        hosts: &[],
+        base: Base::Debian,
+    },
+    Tool {
+        id: "puppeteer",
+        label: "Puppeteer",
+        description: "A browser controlled from Node, with its own copy of Chromium. Renders into the virtual display when one is enabled, so pages behave as they do for a person.",
+        category: ToolCategory::PackageManager,
+        provider: Provider::Npm,
+        package: "puppeteer",
+        default_on: false,
+        hosts: &["registry.npmjs.org", "storage.googleapis.com"],
+        base: Base::Debian,
+    },
+    Tool {
         id: "wrangler",
         label: "Wrangler",
         description: "Cloudflare's CLI for Workers, Pages and their KV, R2 and D1 stores.",
@@ -608,6 +630,7 @@ mod tests {
     fn every_tool_the_operator_asked_for_exists() {
         for id in [
             "git", "npm", "node", "python", "cargo", "go", "brew", "nix", "apt", "apk", "wrangler",
+            "xvfb", "puppeteer",
         ] {
             assert!(find(id).is_some(), "{id} is missing from the catalogue");
         }
