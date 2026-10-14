@@ -98,25 +98,40 @@ export function TerminalPane() {
     // entirely, and the clipboard is read here instead: text goes in through xterm's own paste,
     // so bracketed paste and the CLI's input box still behave, while an image or a file is
     // copied into the sandbox and its path typed, which is what the CLI can actually read.
+    // Counted rather than flagged: two pastes in quick succession are two separate waits.
+    let pending = 0;
     const onKeyDown = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
       const isPaste =
         ((event.ctrlKey || event.metaKey) && !event.altKey && key === "v") ||
         (event.shiftKey && event.key === "Insert");
       if (!isPaste) return;
-      // Without an API to read the clipboard with, the event is left alone so whatever paste
-      // the webview does by itself keeps working. Swallowing the keystroke and then failing
-      // to read anything would be worse than not interfering at all.
-      if (typeof navigator.clipboard?.read !== "function") return;
-      event.preventDefault();
+      // Stopped, but deliberately not cancelled.
+      //
+      // Stopping it keeps the keystroke out of the PTY, which is the whole point: the CLI
+      // binds Ctrl+V to its own paste-a-picture feature, and that binding is what breaks
+      // pasting text. Cancelling it would also cancel the browser's own paste event, and that
+      // event is the one route to the clipboard that needs no permission and no prompt -- it
+      // carries text, images and files alike. So the keystroke is stopped and the paste event
+      // is left to arrive.
       event.stopPropagation();
-      void pasteClipboard();
+      pending += 1;
+      const ticket = pending;
+      window.setTimeout(() => {
+        // Only if no paste event turned up. Some payloads -- a bare bitmap with no file behind
+        // it, on some builds -- do not come through as an event, and for those the clipboard
+        // has to be read directly, which is what asks for the permission. Offering the prompt
+        // in that case is right; offering it on every paste was the mistake.
+        if (pending === ticket) void pasteClipboard();
+      }, 250);
     };
     host.addEventListener("keydown", onKeyDown, true);
 
     // The paste event itself: the context menu's Paste, and any route the browser handles for
     // us rather than for the key handler. Files are attached; text goes through xterm's paste.
     const onPaste = (event: ClipboardEvent) => {
+      // Answered by an event, so the fallback above stays quiet.
+      pending += 1;
       const files = Array.from(event.clipboardData?.items ?? [])
         .filter((item) => item.kind === "file")
         .map((item) => item.getAsFile())
@@ -414,10 +429,21 @@ export function TerminalPane() {
         "The clipboard is empty, or holds something the terminal cannot take.",
       );
     } catch (error) {
-      // Reading the clipboard needs a permission this webview may not have been given.
-      // Right-click then Paste goes through the browser rather than through here, so that
-      // route still works. Say so, rather than leaving the keystroke doing nothing at all.
       console.warn("the clipboard could not be read", error);
+      // A refusal is a question the operator has to answer, not a fault: saying "could not
+      // paste" for it left them with nothing to act on when the answer was one click away.
+      const refused =
+        error instanceof DOMException &&
+        (error.name === "NotAllowedError" || error.name === "SecurityError");
+      if (refused) {
+        toast(
+          "warn",
+          "Deepsand needs permission to read the clipboard",
+          "Windows asked once and the answer was no, so this paste had nothing to work " +
+            "with. Allow it, then paste again; from then on Ctrl+V goes straight in.",
+        );
+        return;
+      }
       toast(
         "warn",
         "Could not read the clipboard",
