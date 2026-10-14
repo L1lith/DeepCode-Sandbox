@@ -42,6 +42,14 @@ pub mod events {
     /// when the build reports a step, so a subscriber can tell "no news" from
     /// "finished".
     pub const BUILD_PROGRESS: &str = "build://progress";
+    /// Emitted while a launch waits for an image build, with the image, and cleared with a
+    /// null.
+    ///
+    /// Deliberately not `BUILD_LOG`: that one opens the progress bar and only `BUILD_DONE`
+    /// closes it, so a notice sent that way left the bar open with nothing left to close it.
+    /// This one is paired -- set when the wait begins, cleared when it ends, whatever the
+    /// outcome -- so the window can treat it as a state rather than as a message.
+    pub const BUILD_WAIT: &str = "build://wait";
     /// Tools finished building and were copied into a sandbox that had started without them.
     pub const TOOLS_ARRIVED: &str = "build://tools-arrived";
     /// Any persisted change: the frontend re-reads what it needs.

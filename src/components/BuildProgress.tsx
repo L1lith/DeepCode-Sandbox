@@ -34,10 +34,12 @@ export function BuildProgress() {
   const image = () => store.buildImage ?? "the runtime image";
 
   return (
-    <Show when={store.building}>
+    <Show when={store.building || store.buildWait !== null}>
       <div class="build-bar" role="status" aria-live="polite">
         <div class="build-bar-head">
-          <span class="build-bar-title">Installing tools</span>
+          <span class="build-bar-title">
+            {store.building ? "Installing tools" : "Waiting for the image build"}
+          </span>
           <Show
             when={percent() !== null}
             fallback={<span class="build-bar-pct">working…</span>}

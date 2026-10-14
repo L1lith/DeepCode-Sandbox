@@ -41,6 +41,9 @@ interface Store {
   audit: string[];
   buildLog: string[];
   building: boolean;
+  /// The image a launch is waiting for a build of, or null. Held apart from `building` so a
+  /// wait can never leave the progress bar unable to close.
+  buildWait: string | null;
   /**
    * Bumped whenever the operator's own DeepCode settings file changes on disk.
    *
@@ -88,6 +91,7 @@ const [store, setStore] = createStore<Store>({
   audit: [],
   buildLog: [],
   building: false,
+  buildWait: null,
   configRevision: 0,
   sessionBusy: null,
   buildImage: null,
@@ -410,6 +414,13 @@ export async function wireEvents(): Promise<() => void> {
       }
     }),
 
+    api.onBuildWait((payload) => {
+      setStore("buildWait", payload.image);
+      if (payload.image) {
+        setStore("buildImage", payload.image);
+      }
+    }),
+
     api.onBuildProgress((payload) => {
       setStore("building", true);
       setStore("buildImage", payload.image);
@@ -418,6 +429,7 @@ export async function wireEvents(): Promise<() => void> {
 
     api.onBuildDone((payload) => {
       setStore("building", false);
+      setStore("buildWait", null);
       setStore("buildProgress", null);
       setStore("buildImage", null);
       if (payload.ok) {

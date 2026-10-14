@@ -49,6 +49,7 @@ export const EVENTS = {
   buildLog: "build://log",
   buildDone: "build://done",
   buildProgress: "build://progress",
+  buildWait: "build://wait",
   hostConfigChanged: "host-config://changed",
   toolUpdatesChecked: "tool-updates://checked",
   stateChanged: "state://changed",
@@ -364,6 +365,18 @@ export function onBuildProgress(
   return subscribe<{ image: string; step: number; total: number }>(
     EVENTS.buildProgress,
     (event) => handler(event.payload),
+  );
+}
+
+/**
+ * A launch waiting for an image build, with the image, cleared by a null.
+ *
+ * Deliberately separate from the log: a log line opens the progress bar and only a finish
+ * closes it, so a waiting notice sent that way outlived the build it described.
+ */
+export function onBuildWait(handler: (payload: { image: string | null }) => void) {
+  return subscribe<{ image: string | null }>(EVENTS.buildWait, (event) =>
+    handler(event.payload),
   );
 }
 

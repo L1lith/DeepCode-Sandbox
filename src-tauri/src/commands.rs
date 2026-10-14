@@ -1222,7 +1222,21 @@ if resolved.api_key.is_none() {
     // leave it unbuilt at this moment: this launch queuing the build behind a "start without
     // tools", and another project with the same tool selection starting the same build. So
     // the launch waits for the image rather than assuming it.
-    await_image(docker.clone(), launch.image.clone()).await?;
+    // If that image is not there yet, the window is told, so a build that takes minutes looks
+    // like a build instead of like a launch that has stopped. Paired: the second event, with
+    // no image, clears it whether the wait worked or gave up.
+    let waiting = !docker.image_present(&launch.image);
+    if waiting {
+        let _ = app.emit(
+            events::BUILD_WAIT,
+            serde_json::json!({ "image": launch.image.clone() }),
+        );
+    }
+    let waited = await_image(docker.clone(), launch.image.clone()).await;
+    if waiting {
+        let _ = app.emit(events::BUILD_WAIT, serde_json::json!({ "image": null }));
+    }
+    waited?;
     let session = start_container(&app, &project_id, &docker, &launch, plan.args.clone(), warnings.clone())?;
 
     state.sessions.lock().unwrap().insert(
