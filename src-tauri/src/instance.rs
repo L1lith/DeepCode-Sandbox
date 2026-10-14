@@ -153,6 +153,22 @@ fn terminate(pid: u32) -> bool {
 }
 
 /// Ask to be the instance, clearing an earlier one that cannot answer.
+/// Whether this process is the one instance the tray belongs to.
+///
+/// Set once, from the claim, before anything else runs. A second launch hands itself over to
+/// the first and exits, but the hand-over happens inside the plugin, and a process that gets
+/// as far as `setup` would install a tray icon that outlives its brief life -- which is how
+/// a machine ends up with a row of them.
+static PRIMARY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_primary(primary: bool) {
+    PRIMARY.store(primary, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn is_primary() -> bool {
+    PRIMARY.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 pub fn claim(data_dir: &Path) -> Claim {
     if let Some(lock) = try_claim(data_dir) {
         return Claim::Primary(lock);

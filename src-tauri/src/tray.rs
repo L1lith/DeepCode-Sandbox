@@ -26,6 +26,16 @@ pub fn install(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem};
     use tauri::tray::TrayIconBuilder;
 
+    // Only the instance that owns the app may have an icon. A second launch is on its way out
+    // and must not leave one behind.
+    if !crate::instance::is_primary() {
+        return Ok(());
+    }
+    // And only one at a time, even if two callers race: the lookup below and the build are
+    // not atomic together.
+    static INSTALLING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serialised = INSTALLING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
     if app.tray_by_id(TRAY_ID).is_some() {
         return Ok(());
     }

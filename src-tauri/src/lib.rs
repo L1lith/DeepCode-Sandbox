@@ -164,6 +164,10 @@ pub fn run() {
     // thread, the launch disappears entirely -- no window, no error. Clearing such a process
     // here means the plugin finds nothing to hand off to.
     let claim = instance::claim(&data_dir_path);
+    instance::set_primary(matches!(
+        claim,
+        instance::Claim::Primary(_) | instance::Claim::Cleared(_, _)
+    ));
     if let instance::Claim::TakeOverUncleared(pid) = &claim {
         tracing::error!(pid, "an earlier Deepsand was not responding; it has been cleared and this one takes over");
     }

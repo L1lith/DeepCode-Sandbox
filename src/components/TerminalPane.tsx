@@ -141,6 +141,7 @@ export function TerminalPane() {
 
     onCleanup(() => {
       window.cancelAnimationFrame(firstFit);
+      if (settle !== undefined) window.clearTimeout(settle);
       window.removeEventListener("resize", onWindowResize);
       host.removeEventListener("paste", onPaste, true);
       unlistenDrop?.();
@@ -150,6 +151,18 @@ export function TerminalPane() {
     });
   });
 
+  /**
+   * How long a resize has to stop changing before the sandbox is told about it.
+   *
+   * Dragging a window edge fires the observer for every pixel, and each fit used to send its
+   * own resize. Those arrive out of order, so the PTY could be left at the width of some
+   * intermediate frame while the pane showed the final one -- and the sandbox then wrapped
+   * its output at a column the pane did not have, which is what made the text unreadable
+   * after shrinking the window.
+   */
+  const RESIZE_SETTLE_MS = 120;
+  let settle: number | undefined;
+
   function safeFit() {
     if (!fit || !term || !host) return;
     // A hidden pane has no box, and fitting to zero produces a one-row terminal that
@@ -157,14 +170,30 @@ export function TerminalPane() {
     // when the pane is shown again.
     if (host.clientWidth === 0 || host.clientHeight === 0) return;
     try {
+      // Fitting straight away keeps the pane's own wrapping matched to its box while the
+      // drag is happening; only the size the sandbox hears about waits for the drag to stop.
       fit.fit();
-      const current = project();
-      if (current) {
-        void api.resizeSession(current.id, term.rows, term.cols).catch(() => undefined);
-      }
     } catch {
       /* the pane can be zero-sized during layout; nothing to do */
     }
+    if (settle !== undefined) window.clearTimeout(settle);
+    settle = window.setTimeout(() => {
+      settle = undefined;
+      if (!fit || !term || !host) return;
+      if (host.clientWidth === 0 || host.clientHeight === 0) return;
+      try {
+        fit.fit();
+        // Painting the whole viewport again clears the half-wrapped lines a shrink leaves
+        // behind: xterm keeps them until something asks it to draw that part of the buffer.
+        term.refresh(0, Math.max(0, term.rows - 1));
+        const current = project();
+        if (current) {
+          void api.resizeSession(current.id, term.rows, term.cols).catch(() => undefined);
+        }
+      } catch {
+        /* the pane can be zero-sized during layout; nothing to do */
+      }
+    }, RESIZE_SETTLE_MS);
   }
 
   // Re-attach when the selected project changes, clearing the old buffer.
