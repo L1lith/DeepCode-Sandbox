@@ -177,6 +177,14 @@ impl Docker {
         Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    /// Start one throwaway container, on a short leash, to learn whether the container
+    /// runtime can actually start containers. `docker version` and friends answer even
+    /// while `docker run` hangs, so this is the only honest probe of the wedge.
+    pub fn runtime_answers(&self, image: &str) -> bool {
+        let args = self.fmt(&["run", "--rm", "--network=none", "--entrypoint=/bin/true", image]);
+        self.try_run_within(&args, std::time::Duration::from_secs(5)).is_some()
+    }
+
     fn fmt(&self, args: &[&str]) -> Vec<String> {
         args.iter().map(|s| (*s).to_string()).collect()
     }

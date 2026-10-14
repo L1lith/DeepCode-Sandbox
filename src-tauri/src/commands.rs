@@ -111,14 +111,21 @@ pub async fn docker_status(app: AppHandle) -> CmdResult<DockerStatus> {
 pub fn docker_status_impl(state: &AppState) -> CmdResult<DockerStatus> {
 
     let image = store(&state).settings().image.clone();
-    Ok(match state.docker() {
+    let mut status = match state.docker() {
         Ok(docker) => docker.probe(&image),
         Err(err) => DockerStatus {
             available: false,
             detail: err.to_string(),
             ..DockerStatus::default()
         },
-    })
+    };
+    if state.runtime_wedged.load(std::sync::atomic::Ordering::SeqCst) {
+        status.available = false;
+        status.detail =
+            "Docker Desktop is running, but its container runtime is not answering. Restart Docker Desktop."
+                .to_string();
+    }
+    Ok(status)
 }
 
 /* ------------------------------------------------------------------------- */
@@ -903,6 +910,19 @@ pub async fn start_session_impl(
     // that take minutes. An apt package is a set of files in several places and cannot arrive
     // this way, so a selection containing one still needs a restart.
         tracing::info!("start: image ready");
+    // One container start, on a five-second leash, answers the only question that matters
+    // here: can Docker actually start containers? On this machine the daemon has answered
+    // version/images/build while docker run hung, so every later check is blind to the
+    // wedge. Failing now, with the fix named, is kinder than a minute of probes timing out.
+    if !docker.runtime_answers(&launch.image) {
+        state.app_state().runtime_wedged.store(true, std::sync::atomic::Ordering::SeqCst);
+        return Err(
+            "Docker Desktop is running, but its container runtime is not answering: a container \
+             could not be started in five seconds. Restart Docker Desktop, then try again."
+                .to_string(),
+        );
+    }
+    state.app_state().runtime_wedged.store(false, std::sync::atomic::Ordering::SeqCst);
 if without_tools {
         let settings =
             container_settings::settings_for_project(store(&state).settings(), Some(&[] as &[String]));

@@ -503,6 +503,10 @@ pub struct AppState {
     /// up -- so without this two overlapping starts would both proceed and the second
     /// would fail on the container name.
     pub starting: Mutex<std::collections::HashSet<String>>,
+    /// Whether the last container-start attempt found the daemon reachable but its container
+    /// runtime not answering. `docker version` can succeed while `docker run` hangs, and this
+    /// is how the status strip can say so without running a container on every poll.
+    pub runtime_wedged: std::sync::atomic::AtomicBool,
     /// The last model list read from the configured API, with the base URL and key it was
     /// read with.
     ///
@@ -553,6 +557,7 @@ impl AppState {
             proxies: Mutex::new(HashMap::new()),
             remote_servers: Mutex::new(HashMap::new()),
             starting: Mutex::new(std::collections::HashSet::new()),
+        runtime_wedged: std::sync::atomic::AtomicBool::new(false),
             building: Mutex::new(std::collections::HashSet::new()),
             verified_seccomp: Mutex::new(None),
             models: Mutex::new(None),
