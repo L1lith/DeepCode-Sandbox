@@ -123,6 +123,7 @@ RUN set -eux; \
     # the image correct regardless of how the source arrived.
     sed -i 's/\r$$//' /usr/local/lib/deepsand/*.sh /usr/local/lib/deepsand/*.mjs; \
     chmod 0755 /usr/local/lib/deepsand/*.sh /usr/local/lib/deepsand/*.mjs; \
+    ln -sf /usr/local/lib/deepsand/deepsand-display.sh /usr/local/bin/deepsand-display; \
     chmod 0644 /usr/local/lib/deepsand/seccomp-hardened.json; \
     # The profile's digest travels with the image so the host can prove that the bytes it
     # hands to `--security-opt=seccomp=` are the same bytes this image was built with.
