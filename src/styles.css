@@ -815,6 +815,22 @@ pre.output {
   margin-left: 0.25rem;
 }
 
+/* Icon-only buttons: square-ish, so five of them read as a toolbar rather than as a
+   paragraph of words. The border appears on hover to say which one is under the pointer. */
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.22rem 0.32rem;
+  line-height: 1;
+}
+
+.icon {
+  width: 15px;
+  height: 15px;
+  display: block;
+}
+
 /* The editors, on their own full-width row under the secret they belong to. They were in
    the actions cell before, which is sized for buttons: the input and the save button
    overflowed the column and hung off the edge of the panel. */

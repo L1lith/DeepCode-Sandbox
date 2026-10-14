@@ -16,6 +16,57 @@ import * as api from "../lib/api";
 import type { SecretListView, SecretView } from "../lib/types";
 import { describeError, selectedProject, toast } from "../store";
 
+/**
+ * One icon from a path, with its meaning carried in text.
+ *
+ * A picture on its own is not a label: the aria-label is what a screen reader says and the
+ * title is what a pointer reveals, and both come from the same word the button used to
+ * show. The row of five words was the thing being replaced, not the information.
+ */
+function Icon(props: { path: string; label: string }) {
+  return (
+    <svg class="icon" viewBox="0 0 16 16" role="img" aria-label={props.label}>
+      <path
+        d={props.path}
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.4"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      />
+    </svg>
+  );
+}
+
+const ICONS = {
+  copy: "M6 2.5h7.5V10 M2.5 6h7.5v7.5H2.5z",
+  power: "M8 2.5v5 M4.2 4.6a4.8 4.8 0 1 0 7.6 0",
+  pencil: "M3 13l.8-3L10 3.8l2.2 2.2L6 12.2z M9.4 4.4l2.2 2.2",
+  swap: "M3.2 8a4.8 4.8 0 0 1 8-3.4 M12.8 8a4.8 4.8 0 0 1-8 3.4 M11.2 2.6v2.2H9 M4.8 13.4v-2.2H7",
+  trash: "M3.5 5h9 M6 5V3.4h4V5 M4.8 5l.6 8.2h5.2L11.2 5",
+};
+
+/** A button whose whole content is an icon. The label is required, not optional. */
+function IconButton(props: {
+  icon: keyof typeof ICONS;
+  label: string;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      class="btn btn-ghost btn-icon small"
+      type="button"
+      title={props.label}
+      aria-label={props.label}
+      disabled={props.disabled}
+      onClick={props.onClick}
+    >
+      <Icon path={ICONS[props.icon]} label={props.label} />
+    </button>
+  );
+}
+
 export function SecretsPanel() {
   const [view, setView] = createSignal<SecretListView | null>(null);
   const [busy, setBusy] = createSignal(false);
@@ -236,55 +287,48 @@ export function SecretsPanel() {
                               <td class="mono faint">{secret.masked}</td>
                               <td class="num faint">{secret.length}</td>
                               <td class="actions">
-                                <button
-                                  class="btn btn-ghost small"
+                                <IconButton
+                                  icon="copy"
+                                  label="Copy the value to your clipboard"
                                   disabled={busy()}
-                                  title="Copy the value to your clipboard"
                                   onClick={() => void copy(secret.name)}
-                                >
-                                  Copy
-                                </button>
-                                <button
-                                  class="btn btn-ghost small"
-                                  disabled={busy()}
-                                  title={
+                                />
+                                <IconButton
+                                  icon="power"
+                                  label={
                                     secret.enabled
-                                      ? "Keep it stored, but stop handing it to the sandbox"
-                                      : "Hand it to the sandbox again"
+                                      ? "Disable: keep it stored, but stop handing it to the sandbox"
+                                      : "Enable: hand it to the sandbox again"
                                   }
+                                  disabled={busy()}
                                   onClick={() => void toggleEnabled(secret)}
-                                >
-                                  {secret.enabled ? "Disable" : "Enable"}
-                                </button>
-                                <button
-                                  class="btn btn-ghost small"
+                                />
+                                <IconButton
+                                  icon="pencil"
+                                  label="Rename this secret"
                                   disabled={busy()}
                                   onClick={() => {
                                     setRenaming(secret.name);
                                     setNewName(secret.name);
                                     setEditing(null);
                                   }}
-                                >
-                                  Rename
-                                </button>
-                                <button
-                                  class="btn btn-ghost small"
+                                />
+                                <IconButton
+                                  icon="swap"
+                                  label="Replace the value"
                                   disabled={busy()}
                                   onClick={() => {
                                     setEditing(secret.name);
                                     setEditValue("");
                                     setRenaming(null);
                                   }}
-                                >
-                                  Replace
-                                </button>
-                                <button
-                                  class="btn btn-ghost small"
+                                />
+                                <IconButton
+                                  icon="trash"
+                                  label="Remove this secret"
                                   disabled={busy()}
                                   onClick={() => void remove(secret.name)}
-                                >
-                                  Remove
-                                </button>
+                                />
                               </td>
                             </tr>
 

@@ -910,6 +910,44 @@ mod durability_tests {
         dir
     }
 
+    /// Reported as "my secrets being disabled wasn't saved on reboot".
+    ///
+    /// The flag lives on the project, so the whole question is whether it survives the only
+    /// trip that matters: written by one process, read by the next. Asserted rather than
+    /// reasoned about, because a field that is set in memory and never written looks exactly
+    /// like one that is written and never read until you reload.
+    #[test]
+    fn a_disabled_secret_is_still_disabled_after_a_reload() {
+        let dir = scratch("disabled-secrets");
+        // The workspace has to be outside the data directory: the path guards refuse one that
+        // overlaps it, and a test that trips them is testing the wrong thing.
+        let workspace = std::env::temp_dir().join(format!(
+            "deepsand-store-ws-disabled-{}",
+            crate::now_ms()
+        ));
+        std::fs::create_dir_all(&workspace).expect("workspace");
+
+        let mut store = Store::load(&dir).expect("first run");
+        let project = store
+            .create_project("Disabled Test", &workspace.to_string_lossy())
+            .expect("project");
+        store
+            .project_mut(&project.id)
+            .expect("project is there")
+            .disabled_secrets
+            .push("API_KEY".to_string());
+        store.save().expect("save");
+
+        // A fresh process, as far as this can be one.
+        let reloaded = Store::load(&dir).expect("reload");
+        let after = reloaded.project(&project.id).expect("project after reload");
+        assert_eq!(
+            after.disabled_secrets,
+            vec!["API_KEY".to_string()],
+            "the switch has to be on disk, not only in memory"
+        );
+    }
+
     /// The exact failure that was reported: a crash left `state.json` of the right size
     /// and full of NULs, because the rename was durable and the contents were not. The
     /// rolling backup is what stands between that and losing every project.
