@@ -299,7 +299,11 @@ export async function sessionOperation(
   if (store.sessionBusy !== null) {
     // Only this project's buttons are disabled, so a click on another project's Run would
     // otherwise do nothing at all, which reads as a broken button rather than as a queue.
-    toast("warn", "Another sandbox is starting", "Wait for that to finish, then try again.");
+    toast(
+      "warn",
+      "This project is already starting",
+      "If it has been a while, it is most likely building the project image, which takes minutes the first time. That build writes into the terminal, and the sandbox starts on its own when it finishes.",
+    );
     return;
   }
   setStore("sessionBusy", projectId);

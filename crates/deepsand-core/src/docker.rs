@@ -177,6 +177,31 @@ impl Docker {
         Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    /// The argument list for a probe container: named, and without `--rm`.
+    ///
+    /// `--rm` removes the container when the *client* sees it exit. A client killed for
+    /// overstaying its leash never sees anything, so the container the daemon had already
+    /// created stays behind in `Created` -- one per attempt, for good. A name of our own is
+    /// what makes the cleanup possible after the client is gone, and `--rm` alongside it
+    /// would only remove it in the case where we are about to remove it ourselves.
+    pub fn probe_args(args: &[String], name: &str) -> Vec<String> {
+        let mut named: Vec<String> = args.iter().filter(|arg| *arg != "--rm").cloned().collect();
+        if named.first().map(|first| first == "run").unwrap_or(false) {
+            named.insert(1, name.to_string());
+            named.insert(1, "--name".to_string());
+        }
+        named
+    }
+
+    /// Run a throwaway container for a probe and remove it whatever the outcome.
+    pub fn run_probe(&self, args: &[String], leash: std::time::Duration) -> Option<String> {
+        let name = format!("deepsand-probe-{}", crate::now_ms());
+        let result = self.try_run_within(&Self::probe_args(args, &name), leash);
+        // Whatever happened to the client, the container is ours to clear.
+        let _ = self.try_run(&self.fmt(&["rm", "-f", &name]));
+        result
+    }
+
     /// Start one throwaway container to learn whether the container runtime can start
     /// containers at all, returning what happened when it cannot.
     ///
@@ -201,10 +226,10 @@ impl Docker {
                 .ok_or_else(|| "no runtime image exists to start a test container from".to_string())?
         };
 
-        let args = self.fmt(&["run", "--rm", "--network=none", "--entrypoint=/bin/true", &candidate]);
+        let args = self.fmt(&["run", "--network=none", "--entrypoint=/bin/true", &candidate]);
         let mut last = format!("{candidate} did not start within {}s", leash.as_secs());
         for attempt in 1..=2 {
-            if self.try_run_within(&args, leash).is_some() {
+            if self.run_probe(&args, leash).is_some() {
                 return Ok(());
             }
             last = format!(
@@ -749,7 +774,7 @@ impl Docker {
             // the whole command timeout is exactly the launch hang this preflight is meant to
             // prevent. Fifteen seconds is far more than a healthy cat needs, and when it is not
             // enough the message says so instead of pretending the mount is broken.
-            self.try_run_within(&args, std::time::Duration::from_secs(15))
+            self.run_probe(&args, std::time::Duration::from_secs(15))
                 .ok_or_else(|| SandboxError::policy(
                     "the probe did not finish in 15 seconds; Docker's container runtime is not answering",
                 ))
@@ -1794,6 +1819,36 @@ mod image_wait_tests {
     }
 }
 
+#[cfg(test)]
+mod probe_args_tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn a_probe_is_named_so_it_can_be_removed_afterwards() {
+        let named = Docker::probe_args(&args(&["run", "--network=none", "img"]), "probe-1");
+        assert_eq!(named, args(&["run", "--name", "probe-1", "--network=none", "img"]));
+    }
+
+    /// The whole point: a client killed on its leash leaves the container behind, and `--rm`
+    /// cannot remove what the client never saw exit.
+    #[test]
+    fn the_removal_is_not_left_to_the_client() {
+        let named = Docker::probe_args(&args(&["run", "--rm", "img"]), "probe-2");
+        assert!(!named.contains(&"--rm".to_string()));
+        assert!(named.contains(&"--name".to_string()));
+    }
+
+    /// Only a `run` takes a name; anything else is passed through untouched.
+    #[test]
+    fn another_command_is_left_alone() {
+        let unchanged = Docker::probe_args(&args(&["rm", "-f", "probe-3"]), "probe-9");
+        assert_eq!(unchanged, args(&["rm", "-f", "probe-3"]));
+    }
+}
 fn wait_bounded(
     mut cmd: Command,
     limit: std::time::Duration,
