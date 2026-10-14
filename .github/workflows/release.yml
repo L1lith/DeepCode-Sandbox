@@ -19,6 +19,15 @@
 
 name: release
 
+# One release at a time per branch. The workflow answers both to a push of the release
+# branch and to a manual dispatch, so asking for a release of what a push has just
+# triggered is easy -- and two builds racing for the same version fight over the same
+# tag and the same draft release. The newest run wins and the older one is cancelled,
+# which is a quiet cancellation rather than a mystery on the runs page.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
+
 on:
   workflow_dispatch:
   push:
