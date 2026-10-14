@@ -55,6 +55,7 @@ pub fn install(app: &tauri::AppHandle) -> tauri::Result<()> {
             // orphaned.
             "quit" => {
                 tracing::info!("quitting from the tray");
+                remove(app);
                 app.exit(0);
             }
             _ => {}
@@ -97,6 +98,22 @@ pub fn set_visible(app: &tauri::AppHandle, visible: bool) {
         if let Err(err) = tray.set_visible(visible) {
             tracing::warn!(%err, "could not change the tray icon's visibility");
         }
+    }
+}
+
+/// Take the icon out of the notification area before the process goes.
+///
+/// A tray icon belongs to a live process: it is the shell drawing something on behalf of
+/// somebody who has to answer for it. Exit without removing it and the shell keeps an icon
+/// whose owner is gone -- a ghost, which stays there until the pointer is passed over the
+/// notification area -- and a day of launching and closing is a row of them. Nothing here
+/// can remove a ghost whose process is already dead, but this stops the app making any.
+pub fn remove(app: &tauri::AppHandle) {
+    // `None` means there was nothing to remove, which is not a problem: the icon is optional
+    // (a window that closes for real may never have had one), so this says nothing when it
+    // finds nothing.
+    if app.remove_tray_by_id(TRAY_ID).is_some() {
+        tracing::info!("the tray icon was taken down");
     }
 }
 

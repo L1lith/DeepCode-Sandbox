@@ -494,7 +494,6 @@ fn model_endpoints(base_url: &str) -> Vec<String> {
 async fn await_image(
     docker: deepsand_core::docker::Docker,
     image: String,
-    app: AppHandle,
 ) -> std::result::Result<(), String> {
     use deepsand_core::docker::{image_wait_step, ImageWait};
 
@@ -1223,7 +1222,7 @@ if resolved.api_key.is_none() {
     // leave it unbuilt at this moment: this launch queuing the build behind a "start without
     // tools", and another project with the same tool selection starting the same build. So
     // the launch waits for the image rather than assuming it.
-    await_image(docker.clone(), launch.image.clone(), app.clone()).await?;
+    await_image(docker.clone(), launch.image.clone()).await?;
     let session = start_container(&app, &project_id, &docker, &launch, plan.args.clone(), warnings.clone())?;
 
     state.sessions.lock().unwrap().insert(

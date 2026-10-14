@@ -420,6 +420,10 @@ pub fn run() {
                 // enough for a list of containers to be stopped; past it, exiting is the safer
                 // failure -- the containers left behind are removed by the next start's sweep.
                 let app = tauri::Manager::app_handle(window).clone();
+                // The icon comes down first: `process::exit` at the end of this runs no
+                // destructors, so anything still registered with the shell would be left for
+                // it to notice is dead -- a ghost in the notification area.
+                tray::remove(&app);
                 let (done_tx, done_rx) = std::sync::mpsc::channel();
                 std::thread::spawn(move || {
                     let state = tauri::Manager::state::<AppState>(&app);
