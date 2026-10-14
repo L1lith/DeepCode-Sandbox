@@ -162,6 +162,21 @@ impl Docker {
         Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    /// Run with a shorter leash than the full command timeout, returning `None` when the
+    /// command fails *or does not finish in time*. This is for a check whose answer can safely
+    /// default to "no": a resume is a convenience, so waiting the whole 120 seconds would be
+    /// the hang the short leash exists to prevent.
+    pub fn try_run_within(&self, args: &[String], limit: std::time::Duration) -> Option<String> {
+        let mut cmd = self.command();
+        let os_args: Vec<std::ffi::OsString> = args.iter().map(std::ffi::OsString::from).collect();
+        cmd.args(&os_args);
+        let output = wait_bounded(cmd, limit).ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
     fn fmt(&self, args: &[&str]) -> Vec<String> {
         args.iter().map(|s| (*s).to_string()).collect()
     }
@@ -242,15 +257,27 @@ impl Docker {
     /// entrypoint is overridden so nothing from the image gets a say, and the network is
     /// off so the check cannot reach anything.
     pub fn read_file_from_image(&self, image: &str, path: &str) -> Result<String> {
-        let args = self.fmt(&[
-            "run",
-            "--rm",
-            "--network=none",
-            "--entrypoint=/bin/cat",
-            image,
-            path,
-        ]);
-        self.run(&args).map_err(|err| match err {
+        // Reading a file out of the image must not depend on the container runtime, so `docker
+        // run` is not used: `docker create` only writes a container record (which even a wedged
+        // daemon can do, as this machine has shown) and `docker cp` reads the image filesystem
+        // directly. The seccomp verification is a launch preflight, so it must not inherit the
+        // hang that `docker run` gets on a machine whose container runtime is wedged.
+        let name = format!("deepsand-cat-{}", crate::now_ms());
+        let probe = std::env::temp_dir().join(format!("deepsand-cat-{}-{}", std::process::id(), crate::now_ms()));
+        let _ = self.try_run(&self.fmt(&["rm", "-f", &name]));
+        let read = (|| -> Result<String> {
+            self.run(&self.fmt(&["create", "--name", &name, image]))?;
+            let mut cp_args = self.fmt(&["cp", "-"]);
+            cp_args[1] = format!("{name}:{path}");
+            cp_args.push(probe.display().to_string());
+            self.run(&cp_args)?;
+            std::fs::read_to_string(&probe).map_err(|err| {
+                SandboxError::policy(format!("could not read {path} back out of the runtime image {image}: {err}"))
+            })
+        })();
+        let _ = self.try_run(&self.fmt(&["rm", "-f", &name]));
+        let _ = std::fs::remove_file(&probe);
+        read.map_err(|err| match err {
             SandboxError::Docker { stderr, .. } => SandboxError::policy(format!(
                 "could not read {path} out of the runtime image {image}: {stderr}"
             )),
@@ -630,7 +657,8 @@ impl Docker {
             args.push(arg.to_string());
         }
 
-        self.try_run(&args).is_some_and(|out| out.contains("sessions-index.json"))
+        self.try_run_within(&args, std::time::Duration::from_secs(10))
+            .is_some_and(|out| out.contains("sessions-index.json"))
     }
 
     /// Verify that a host directory really can be bind-mounted *and read*.
@@ -679,7 +707,14 @@ impl Docker {
             args.push(format!("{}:/deepsand-probe:ro", dir.display()));
             args.push(image.to_string());
             args.push(format!("/deepsand-probe/{token}"));
-            self.run(&args)
+            // The short leash matters: when the container runtime is wedged, a probe that waits
+            // the whole command timeout is exactly the launch hang this preflight is meant to
+            // prevent. Fifteen seconds is far more than a healthy cat needs, and when it is not
+            // enough the message says so instead of pretending the mount is broken.
+            self.try_run_within(&args, std::time::Duration::from_secs(15))
+                .ok_or_else(|| SandboxError::policy(
+                    "the probe did not finish in 15 seconds; Docker's container runtime is not answering",
+                ))
         };
 
         let candidates: Vec<String> = std::iter::once(image.to_string())

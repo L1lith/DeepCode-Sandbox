@@ -889,8 +889,10 @@ pub async fn start_session_impl(
     state.stop_session_internal(&project_id);
 
     let mut launch = gather_launch(&state, &project_id)?;
+    tracing::info!(image = %launch.image, "start: launch gathered");
 
     let docker = state.docker().map_err(fail)?;
+    tracing::info!("start: docker located");
     docker
         .volume_create(&launch.volume)
         .map_err(|err| format!("could not create the session volume: {err}"))?;
@@ -900,7 +902,8 @@ pub async fn start_session_impl(
     // into the running container -- the compiled binaries and the npm globals, which are the ones
     // that take minutes. An apt package is a set of files in several places and cannot arrive
     // this way, so a selection containing one still needs a restart.
-    if without_tools {
+        tracing::info!("start: image ready");
+if without_tools {
         let settings =
             container_settings::settings_for_project(store(&state).settings(), Some(&[] as &[String]));
         launch.image = settings.image;
@@ -909,7 +912,8 @@ pub async fn start_session_impl(
     // The first Run for a tool selection has no image yet. Build it here rather than
     // refusing: "run this project" plainly means "make it runnable", and the operator
     // should not have to discover a separate build button first.
-    if !docker.image_present(&launch.image) {
+        tracing::info!("start: checking the image");
+if !docker.image_present(&launch.image) {
         // `spawn_blocking`, because a build takes minutes and `start_session` is async:
         // blocking a runtime worker for that long would stall unrelated commands.
         let handle = app.clone();
@@ -981,14 +985,16 @@ pub async fn start_session_impl(
         });
     }
 
-    let wants_resume = resume.unwrap_or(true);
+        tracing::info!("start: deciding whether to resume");
+let wants_resume = resume.unwrap_or(true);
     let can_resume = wants_resume && docker.volume_has_session_index(&launch.volume, &launch.image);
 
     // Restricted egress: the allowlisting proxy has to exist BEFORE the plan is
     // built, because a restricted plan without a proxy is refused outright. This is
     // the order the code needs; getting it backwards means restricted mode can never
     // start at all.
-    let mut restricted_proxy: Option<(deepsand_core::policy::ProxyEndpoint, String)> = None;
+        tracing::info!(network = %launch.project.network_name(), "start: setting up egress");
+let mut restricted_proxy: Option<(deepsand_core::policy::ProxyEndpoint, String)> = None;
     let required_hosts = {
         let store = store(&state);
         let app = store.settings().clone();
@@ -1070,7 +1076,8 @@ pub async fn start_session_impl(
         &required_hosts,
     )?;
 
-    // Preflight: can the container actually read the host directories it is
+        tracing::info!("start: plan ready; probing the mounts");
+// Preflight: can the container actually read the host directories it is
     // about to mount?
     //
     // Docker Desktop must register every host path it is asked to bind-mount, and
@@ -1097,7 +1104,8 @@ pub async fn start_session_impl(
         }
     }
 
-    if resolved.api_key.is_none() {
+        tracing::info!("start: mounts verified; checking credentials");
+if resolved.api_key.is_none() {
         return Err(
             "no API key is configured for this project, so the sandboxed DeepCode would refuse to start. Add one \
              in Settings, or configure ~/.deepcode/settings.json."
@@ -1256,7 +1264,8 @@ fn spawn_session(
     let output_tx = event_tx.clone();
     let exit_tx = event_tx;
 
-    Session::spawn(
+        tracing::info!("start: credentials ready; entering Session::spawn");
+Session::spawn(
         SessionOptions {
             program: docker.program().to_path_buf(),
             args,
