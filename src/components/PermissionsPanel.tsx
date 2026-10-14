@@ -232,29 +232,6 @@ export function PermissionsPanel() {
                 />
                 Let {current().name} ask for permissions
               </label>
-                <label class="check-row">
-                  <input
-                    type="checkbox"
-                    checked={current().resumeOnLaunch}
-                    onChange={async (event) => {
-                      const next = event.currentTarget.checked;
-                      try {
-                        await api.updateProjectSettings({
-                          projectId: current().id,
-                          resumeOnLaunch: next,
-                        });
-                        await refreshProjects();
-                      } catch (error) {
-                        toast("error", "Could not change that setting", describeError(error));
-                      }
-                    }}
-                  />
-                  Start {current().name} again when Deepsand starts
-                </label>
-                <span class="hint">
-                  Resumes this sandbox on launch if it was running when you last closed the app. Off by
-                  default: a sandbox that comes back on its own is something you ask for.
-                </span>
               <span class="hint">
                 <Show
                   when={current().requestsEnabled}
@@ -273,6 +250,33 @@ export function PermissionsPanel() {
                   the requests have become noise — the setting is per project, and the dialog for a
                   request can also turn it off.
                 </Show>
+              </span>
+            </div>
+
+            <div class="card">
+              <h3>On launch</h3>
+              <label class="check-row">
+                <input
+                  type="checkbox"
+                  checked={current().resumeOnLaunch}
+                  onChange={async (event) => {
+                    const next = event.currentTarget.checked;
+                    try {
+                      await api.updateProjectSettings({
+                        projectId: current().id,
+                        resumeOnLaunch: next,
+                      });
+                      await refreshProjects();
+                    } catch (error) {
+                      toast("error", "Could not change that setting", describeError(error));
+                    }
+                  }}
+                />
+                Start {current().name} again when Deepsand starts
+              </label>
+              <span class="hint">
+                Resumes this sandbox on launch if it was running when you last closed the app.
+                Off by default: a sandbox that comes back on its own is something you ask for.
               </span>
             </div>
 

@@ -265,6 +265,17 @@ pub const CATALOG: &[Tool] = &[
         base: Base::Debian,
     },
     Tool {
+        id: "wrangler",
+        label: "Wrangler",
+        description: "Cloudflare's CLI for Workers, Pages and their KV, R2 and D1 stores.",
+        category: ToolCategory::PackageManager,
+        provider: Provider::Npm,
+        package: "wrangler",
+        default_on: false,
+        hosts: &["registry.npmjs.org", "api.cloudflare.com"],
+        base: Base::Debian,
+    },
+    Tool {
         id: "python",
         label: "Python 3",
         description: "Python runtime with pip and a virtualenv module.",
@@ -596,7 +607,7 @@ mod tests {
     #[test]
     fn every_tool_the_operator_asked_for_exists() {
         for id in [
-            "git", "npm", "node", "python", "cargo", "go", "brew", "nix", "apt", "apk",
+            "git", "npm", "node", "python", "cargo", "go", "brew", "nix", "apt", "apk", "wrangler",
         ] {
             assert!(find(id).is_some(), "{id} is missing from the catalogue");
         }
