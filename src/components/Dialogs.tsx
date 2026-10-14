@@ -235,8 +235,6 @@ export function PermissionDialog(props: { request: PermissionRequestView; queued
       }
     >
       <div class="stack">
-        <div class="request-title">{request().title}</div>
-
         <Show when={request().purpose}>
           {(purpose) => (
             <div class="callout callout-info">
@@ -255,17 +253,7 @@ export function PermissionDialog(props: { request: PermissionRequestView; queued
           </div>
         </Show>
 
-        {/* Not a control, a caveat. The spool this came from is writable by the
-            sandbox, so the request is something the contained process wrote -- and a
-            dialog that does not say so invites reading it as a finding. */}
-        <p class="muted small request-provenance">{request().provenance}</p>
 
-        <Show when={isDirectoryKind() && (request().kind === "locate_resource" || !request().claimedPath)}>
-          <div class="callout callout-warn">
-            DeepCode cannot see where this lives on your machine, so pick the folder yourself. It will be told only
-            where the folder appears inside the sandbox — never the host path.
-          </div>
-        </Show>
 
         <Show when={isDirectoryKind()}>
         <div class="field">
@@ -351,8 +339,7 @@ export function PermissionDialog(props: { request: PermissionRequestView; queued
         </div>
 
         <div class="callout callout-info">
-          Approving recreates this project's container so the new mount can be attached, then resumes the session.
-          Denying is final: DeepCode is told not to retry and that no workaround exists.
+          Deepsand cannot verify the agent is being honest, please use your best judgment.
         </div>
       </div>
     </Modal>
