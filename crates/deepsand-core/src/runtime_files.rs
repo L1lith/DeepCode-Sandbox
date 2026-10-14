@@ -30,6 +30,10 @@ const SHIPPED: &[(&str, &[u8])] = &[
         "bin/deepsand-mcp-bridge.mjs",
         include_bytes!("../../../runtime/bin/deepsand-mcp-bridge.mjs"),
     ),
+    (
+        "bin/deepsand-display.sh",
+        include_bytes!("../../../runtime/bin/deepsand-display.sh"),
+    ),
     ("bin/entrypoint.sh", include_bytes!("../../../runtime/bin/entrypoint.sh")),
     ("bin/netfilter.sh", include_bytes!("../../../runtime/bin/netfilter.sh")),
     ("gitconfig", include_bytes!("../../../runtime/gitconfig")),

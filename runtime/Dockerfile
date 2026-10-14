@@ -139,7 +139,8 @@ RUN set -eux; \
     ln -sf /usr/local/lib/deepsand/deepsand-mcp-bridge.mjs /usr/local/bin/deepsand-mcp-bridge; \
     # Fail the build rather than ship a broken shebang.
     head -n 1 /usr/local/lib/deepsand/entrypoint.sh | grep -qx '#!/usr/bin/env bash'; \
-    head -n 1 /usr/local/lib/deepsand/netfilter.sh | grep -qx '#!/usr/bin/env bash'
+    head -n 1 /usr/local/lib/deepsand/netfilter.sh | grep -qx '#!/usr/bin/env bash'; \
+    head -n 1 /usr/local/lib/deepsand/deepsand-display.sh | grep -qx '#!/usr/bin/env bash'
 
 # ---------------------------------------------------------------------------
 # Agent Skills.

@@ -230,10 +230,11 @@ log "grants: $(find /grants -mindepth 1 -maxdepth 1 2>/dev/null | wc -l) mounted
 # container rather than the operator's screen.
 # ---------------------------------------------------------------------------
 if command -v Xvfb >/dev/null 2>&1; then
-  mkdir -p /tmp/.X11-unix 2>/dev/null || true
-  chmod 1777 /tmp/.X11-unix 2>/dev/null || true
   DISPLAY=:99
   export DISPLAY
+  # Through the same script the agent uses to resize it, so the startup size and a later
+  # change go down one path. It runs as the sandbox user either way; the display needs no
+  # privileges, and giving it any would be a reason for it to exist.
   if [ "$AS_ROOT" = "1" ]; then
     setpriv \
       --reuid="$TARGET_USER" \
@@ -243,20 +244,11 @@ if command -v Xvfb >/dev/null 2>&1; then
       --ambient-caps=-all \
       --bounding-set=-all \
       --no-new-privs \
-      Xvfb :99 -screen 0 1440x900x24 -ac -nolisten tcp >/tmp/xvfb.log 2>&1 &
+      "$(dirname "$0")/deepsand-display.sh" 1440x900 || true
   else
-    Xvfb :99 -screen 0 1440x900x24 -ac -nolisten tcp >/tmp/xvfb.log 2>&1 &
+    "$(dirname "$0")/deepsand-display.sh" 1440x900 || true
   fi
-  # A socket to wait for, so this says something true rather than hoping.
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-    [ -e /tmp/.X11-unix/X99 ] && break
-    sleep 0.2
-  done
-  if [ -e /tmp/.X11-unix/X99 ]; then
-    log "virtual display: $DISPLAY is up at 1440x900; screenshot it with xwd or import, and nothing is shown on the host"
-  else
-    log "virtual display: Xvfb did not come up; see /tmp/xvfb.log"
-  fi
+  log "virtual display: $DISPLAY (run 'deepsand-display 1920x1080' to change the size)"
 fi
 
 # ---------------------------------------------------------------------------

@@ -199,3 +199,15 @@ nothing.
 
 If the display is missing you will see `Xvfb: command not found` and no `DISPLAY`; ask for
 the tool rather than trying to install it into a read-only image yourself.
+
+### Changing the size of that screen
+
+`deepsand-display` is on the PATH once the display is installed:
+
+- `deepsand-display` — what is running now, and at what size
+- `deepsand-display 1920x1080` — restart it at that size (320x240 up to 7680x4320)
+- `deepsand-display off` — stop it without stopping the sandbox
+
+Changing the size restarts the server, so anything already drawing into the display is cut off
+and has to be started again. The default is 1440x900. If the command says the image has no
+display, that is the tool to ask for, not something to install.
