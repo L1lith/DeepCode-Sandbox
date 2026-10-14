@@ -910,19 +910,6 @@ pub async fn start_session_impl(
     // that take minutes. An apt package is a set of files in several places and cannot arrive
     // this way, so a selection containing one still needs a restart.
         tracing::info!("start: image ready");
-    // One container start, on a five-second leash, answers the only question that matters
-    // here: can Docker actually start containers? On this machine the daemon has answered
-    // version/images/build while docker run hung, so every later check is blind to the
-    // wedge. Failing now, with the fix named, is kinder than a minute of probes timing out.
-    if !docker.runtime_answers(&launch.image) {
-        state.app_state().runtime_wedged.store(true, std::sync::atomic::Ordering::SeqCst);
-        return Err(
-            "Docker Desktop is running, but its container runtime is not answering: a container \
-             could not be started in five seconds. Restart Docker Desktop, then try again."
-                .to_string(),
-        );
-    }
-    state.app_state().runtime_wedged.store(false, std::sync::atomic::Ordering::SeqCst);
 if without_tools {
         let settings =
             container_settings::settings_for_project(store(&state).settings(), Some(&[] as &[String]));
@@ -1005,7 +992,19 @@ if !docker.image_present(&launch.image) {
         });
     }
 
-        tracing::info!("start: deciding whether to resume");
+        // Can the container runtime start a container at all? `docker version` answers even while
+    // `docker run` hangs, so this is the only honest test of the wedge -- and it belongs here,
+    // after the image is known to exist, because a probe against a missing image would blame
+    // the runtime for a missing image.
+    if let Err(reason) = docker.runtime_check(&launch.image) {
+        state.app_state().runtime_wedged.store(true, std::sync::atomic::Ordering::SeqCst);
+        return Err(format!(
+            "Docker Desktop is running, but its container runtime is not answering: {reason}. \
+             Restart Docker Desktop, then try again."
+        ));
+    }
+    state.app_state().runtime_wedged.store(false, std::sync::atomic::Ordering::SeqCst);
+    tracing::info!("start: deciding whether to resume");
 let wants_resume = resume.unwrap_or(true);
     let can_resume = wants_resume && docker.volume_has_session_index(&launch.volume, &launch.image);
 

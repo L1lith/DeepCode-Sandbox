@@ -177,12 +177,42 @@ impl Docker {
         Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    /// Start one throwaway container, on a short leash, to learn whether the container
-    /// runtime can actually start containers. `docker version` and friends answer even
-    /// while `docker run` hangs, so this is the only honest probe of the wedge.
-    pub fn runtime_answers(&self, image: &str) -> bool {
-        let args = self.fmt(&["run", "--rm", "--network=none", "--entrypoint=/bin/true", image]);
-        self.try_run_within(&args, std::time::Duration::from_secs(5)).is_some()
+    /// Start one throwaway container to learn whether the container runtime can start
+    /// containers at all, returning what happened when it cannot.
+    ///
+    /// `docker version` and friends answer even while `docker run` hangs, so this is the only
+    /// honest probe of the wedge. Two details matter, and both were wrong at first:
+    ///
+    ///   * The leash has to be long. The first container after Docker Desktop starts can take
+    ///     ten seconds or more on a machine that has just booted, and a five-second limit
+    ///     called that "not answering" -- refusing launches that would have worked a moment
+    ///     later. Two attempts of twenty seconds each, because one slow answer is not a wedge.
+    ///   * The image is only a vehicle. A probe against an image that does not exist yet fails
+    ///     for a reason that has nothing to do with the runtime, so a missing image falls back
+    ///     to any local one before any verdict is reached.
+    pub fn runtime_check(&self, image: &str) -> std::result::Result<(), String> {
+        let leash = std::time::Duration::from_secs(20);
+        let candidate = if self.image_present(image) {
+            image.to_string()
+        } else {
+            self.local_runtime_images()
+                .into_iter()
+                .next()
+                .ok_or_else(|| "no runtime image exists to start a test container from".to_string())?
+        };
+
+        let args = self.fmt(&["run", "--rm", "--network=none", "--entrypoint=/bin/true", &candidate]);
+        let mut last = format!("{candidate} did not start within {}s", leash.as_secs());
+        for attempt in 1..=2 {
+            if self.try_run_within(&args, leash).is_some() {
+                return Ok(());
+            }
+            last = format!(
+                "{candidate} did not start within {}s (attempt {attempt} of 2)",
+                leash.as_secs()
+            );
+        }
+        Err(last)
     }
 
     fn fmt(&self, args: &[&str]) -> Vec<String> {
