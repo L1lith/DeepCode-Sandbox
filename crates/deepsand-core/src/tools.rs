@@ -111,7 +111,8 @@ pub enum ToolCategory {
     Language,
     /// Something that installs other things.
     PackageManager,
-    /// Connectivity the agent can use.
+    /// Something the agent gains the ability to do, rather than a tool it runs to do
+    /// something else: connectivity it can use, or a screen it can draw on.
     Capability,
 }
 
@@ -268,7 +269,7 @@ pub const CATALOG: &[Tool] = &[
         id: "xvfb",
         label: "Virtual display (Xvfb)",
         description: "A screen that exists only inside this container, for programs that want one. Nothing appears on the operator's screen, and screenshots are taken of the display itself.",
-        category: ToolCategory::PackageManager,
+        category: ToolCategory::Capability,
         provider: Provider::Apt,
         package: "xvfb x11-utils x11-apps",
         default_on: false,
@@ -279,7 +280,7 @@ pub const CATALOG: &[Tool] = &[
         id: "puppeteer",
         label: "Puppeteer",
         description: "A browser controlled from Node, with its own copy of Chromium. Renders into the virtual display when one is enabled, so pages behave as they do for a person.",
-        category: ToolCategory::PackageManager,
+        category: ToolCategory::Capability,
         provider: Provider::Npm,
         package: "puppeteer",
         default_on: false,
