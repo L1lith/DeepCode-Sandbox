@@ -177,6 +177,23 @@ impl Docker {
         Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    /// Cancel a build that is no longer the build we need.
+    ///
+    /// Changing the tool selection, or any edit under `runtime/`, changes the image tag, so a
+    /// build already running is producing something nothing will ever ask for. It is cancelled
+    /// rather than left to finish: the tag is a hash of the inputs, so the half-built image is
+    /// not "the image, slightly old", it is a different tag that no launch can name.
+    ///
+    /// Same tag means the build is the one we want and is left alone -- that is the case the
+    /// cache mounts make worth protecting, since cancelling a build throws away the layers it
+    /// has already produced.
+    pub fn cancel_superseded(previous: &str, wanted: &str) -> bool {
+        if previous.is_empty() || previous == wanted {
+            return false;
+        }
+        cancel_build(previous)
+    }
+
     /// The argument list for a probe container: named, and without `--rm`.
     ///
     /// `--rm` removes the container when the *client* sees it exit. A client killed for
@@ -1847,6 +1864,63 @@ mod probe_args_tests {
     fn another_command_is_left_alone() {
         let unchanged = Docker::probe_args(&args(&["rm", "-f", "probe-3"]), "probe-9");
         assert_eq!(unchanged, args(&["rm", "-f", "probe-3"]));
+    }
+}
+/// What the image for a set of settings currently is.
+///
+/// Derived from the tag and the build registry rather than from a remembered flag: the tag
+/// is a hash of every build input, so "does this exist" is a complete answer, and a stored
+/// flag is one more thing that can drift out of step with it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ImageState {
+    /// Built and usable now.
+    Ready,
+    /// Not built, and something is building it.
+    Building,
+    /// Not built, and nothing is.
+    Missing,
+}
+
+/// Answer for one tag: does it exist, and is anything building it?
+pub fn image_state(present: bool, building: bool) -> ImageState {
+    match (present, building) {
+        // An image that is there is usable even if a rebuild is also running.
+        (true, _) => ImageState::Ready,
+        (false, true) => ImageState::Building,
+        (false, false) => ImageState::Missing,
+    }
+}
+
+#[cfg(test)]
+mod image_state_tests {
+    use super::*;
+
+    #[test]
+    fn an_image_that_is_there_is_ready() {
+        assert_eq!(image_state(true, false), ImageState::Ready);
+        assert_eq!(image_state(true, true), ImageState::Ready);
+    }
+
+    #[test]
+    fn an_image_that_is_being_built_is_building() {
+        assert_eq!(image_state(false, true), ImageState::Building);
+    }
+
+    #[test]
+    fn an_image_that_is_not_built_and_not_being_built_is_missing() {
+        assert_eq!(image_state(false, false), ImageState::Missing);
+    }
+
+    /// Cancelling the build for the tag we want would throw away the work that is producing
+    /// exactly the image the launch is about to need.
+    #[test]
+    fn nothing_is_cancelled_when_the_build_is_for_the_tag_we_want() {
+        assert!(!Docker::cancel_superseded("img", "img"));
+    }
+
+    #[test]
+    fn nothing_is_cancelled_when_there_was_no_previous_image() {
+        assert!(!Docker::cancel_superseded("", "img"));
     }
 }
 fn wait_bounded(

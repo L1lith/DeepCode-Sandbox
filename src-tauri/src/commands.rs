@@ -2665,6 +2665,14 @@ pub async fn set_project_tools_impl(
         }
     }
 
+    // What the project was building until now, captured before the selection changes.
+    let previous_image = {
+        let store = store(state);
+        let project = store.project(project_id).map_err(fail)?.clone();
+        let app = store.settings().clone();
+        container_settings::settings_for_project(&app, project.tools.as_deref()).image
+    };
+
     {
         let mut store = store(state);
         let project = store.project_mut(project_id).map_err(fail)?;
@@ -2672,6 +2680,23 @@ pub async fn set_project_tools_impl(
         // decision the project records instead of looking like never having chosen.
         project.tools = Some(ids);
         store.save().map_err(fail)?;
+    }
+
+    // The new selection is a different tag, so a build still running for the old one is
+    // building an image nothing will ask for. Cancel it rather than let it compete with the
+    // build this selection needs.
+    let wanted_image = {
+        let store = store(state);
+        let project = store.project(project_id).map_err(fail)?.clone();
+        let app = store.settings().clone();
+        container_settings::settings_for_project(&app, project.tools.as_deref()).image
+    };
+    if deepsand_core::docker::Docker::cancel_superseded(&previous_image, &wanted_image) {
+        tracing::info!(
+            %previous_image,
+            %wanted_image,
+            "a build for the previous tool selection was cancelled"
+        );
     }
 
     refresh_proxies(state).await;
