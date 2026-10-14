@@ -1,7 +1,7 @@
 {
   "name": "deepsand",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Deepsand - a Docker-contained DeepCode desktop sandbox",
   "type": "module",
   "license": "ESMV",

@@ -895,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "deepsand-app"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "auto-launch",
@@ -924,7 +924,7 @@ dependencies = [
 
 [[package]]
 name = "deepsand-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
