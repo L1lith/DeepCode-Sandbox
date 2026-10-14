@@ -90,20 +90,51 @@ export function TerminalPane() {
     const onWindowResize = () => safeFit();
     window.addEventListener("resize", onWindowResize);
 
-    // Pasting into a terminal is where a webview loses the clipboard's *files*: the keystroke
-    // goes to the TUI and an image is never mentioned to anybody. This intercepts a paste that
-    // carries files -- text is left to xterm, which already inserts it -- copies them into the
-    // sandbox and types the path, which is what the CLI can read. Capture phase, so this is seen
-    // before xterm's own listener on the textarea inside.
+    // Ctrl+V is taken over at the keystroke, not only at the paste event.
+    //
+    // The CLI inside the sandbox binds Ctrl+V to its own paste-a-picture feature, and it sees
+    // the keystroke long before any paste event means anything to it -- which is why plain text
+    // pasting is what breaks there. Stopping the keystroke here keeps it out of the PTY
+    // entirely, and the clipboard is read here instead: text goes in through xterm's own paste,
+    // so bracketed paste and the CLI's input box still behave, while an image or a file is
+    // copied into the sandbox and its path typed, which is what the CLI can actually read.
+    const onKeyDown = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      const isPaste =
+        ((event.ctrlKey || event.metaKey) && !event.altKey && key === "v") ||
+        (event.shiftKey && event.key === "Insert");
+      if (!isPaste) return;
+      // Without an API to read the clipboard with, the event is left alone so whatever paste
+      // the webview does by itself keeps working. Swallowing the keystroke and then failing
+      // to read anything would be worse than not interfering at all.
+      if (typeof navigator.clipboard?.read !== "function") return;
+      event.preventDefault();
+      event.stopPropagation();
+      void pasteClipboard();
+    };
+    host.addEventListener("keydown", onKeyDown, true);
+
+    // The paste event itself: the context menu's Paste, and any route the browser handles for
+    // us rather than for the key handler. Files are attached; text goes through xterm's paste.
     const onPaste = (event: ClipboardEvent) => {
       const files = Array.from(event.clipboardData?.items ?? [])
         .filter((item) => item.kind === "file")
         .map((item) => item.getAsFile())
         .filter((file): file is File => file !== null);
-      if (files.length === 0) return;
+      if (files.length > 0) {
+        event.preventDefault();
+        event.stopPropagation();
+        void attachFiles(files);
+        return;
+      }
+      // Text too, for the routes that do not go through the key handler: the context menu's
+      // Paste, and any keyboard route the webview handles itself. Left unhandled it reaches
+      // the CLI's own Ctrl+V binding, which is the thing that breaks it.
+      const text = event.clipboardData?.getData("text/plain") ?? "";
+      if (!text) return;
       event.preventDefault();
       event.stopPropagation();
-      void attachFiles(files);
+      term?.paste(text);
     };
     host.addEventListener("paste", onPaste, true);
 
@@ -117,8 +148,10 @@ export function TerminalPane() {
           setDropping(false);
           return;
         }
-        // The whole pane, not only the xterm element: the overlay and its Run button are part
-        // of the terminal as far as an operator is concerned, and a drop there should land.
+        // A drop on this window is a drop on the terminal: there is one terminal pane per
+        // window, so the position decides whether the drop hint is lit, never whether the
+        // files are taken. Requiring the pointer to land inside the pane meant a drop anywhere
+        // else did nothing at all, and said nothing about it.
         const wrap = host.closest(".terminal-wrap") ?? host;
         const rect = wrap.getBoundingClientRect();
         const scale = window.devicePixelRatio || 1;
@@ -130,7 +163,7 @@ export function TerminalPane() {
           return;
         }
         setDropping(false);
-        if (inside) void attachDroppedPaths(payload.paths);
+        void attachDroppedPaths(payload.paths);
       })
       .then((unlisten) => {
         unlistenDrop = unlisten;
@@ -144,6 +177,7 @@ export function TerminalPane() {
       if (settle !== undefined) window.clearTimeout(settle);
       window.removeEventListener("resize", onWindowResize);
       host.removeEventListener("paste", onPaste, true);
+      host.removeEventListener("keydown", onKeyDown, true);
       unlistenDrop?.();
       observer.disconnect();
       dataSub.dispose();
@@ -337,6 +371,59 @@ export function TerminalPane() {
     void api
       .writeToSession(current.id, `${paths.join(" ")} `)
       .catch((error) => toast("error", "Could not type the path", describeError(error)));
+  }
+
+  /**
+   * Read the clipboard and put it into the session.
+   *
+   * Text is handed to xterm's paste rather than written straight to the session, so it is
+   * wrapped in the bracketed-paste markers the CLI asked for and arrives as one paste rather
+   * than as typing. A screenshot arrives as bytes with no path at all, so it becomes a file
+   * named for its type, is copied into the sandbox, and its sandbox path is typed.
+   */
+  async function pasteClipboard() {
+    const current = project();
+    if (!current) return;
+    try {
+      const items = await navigator.clipboard.read();
+      const files: File[] = [];
+      let text = "";
+      for (const item of items) {
+        const imageType = item.types.find((type) => type.startsWith("image/"));
+        if (imageType) {
+          const blob = await item.getType(imageType);
+          const extension = imageType.split("/")[1] || "png";
+          files.push(new File([blob], `pasted-image.${extension}`, { type: imageType }));
+          continue;
+        }
+        if (item.types.includes("text/plain")) {
+          text += await (await item.getType("text/plain")).text();
+        }
+      }
+      if (files.length > 0) {
+        await attachFiles(files);
+        return;
+      }
+      if (text) {
+        term?.paste(text);
+        return;
+      }
+      toast(
+        "warn",
+        "Nothing to paste",
+        "The clipboard is empty, or holds something the terminal cannot take.",
+      );
+    } catch (error) {
+      // Reading the clipboard needs a permission this webview may not have been given.
+      // Right-click then Paste goes through the browser rather than through here, so that
+      // route still works. Say so, rather than leaving the keystroke doing nothing at all.
+      console.warn("the clipboard could not be read", error);
+      toast(
+        "warn",
+        "Could not read the clipboard",
+        "Use right-click then Paste in the terminal instead.",
+      );
+    }
   }
 
   /**
