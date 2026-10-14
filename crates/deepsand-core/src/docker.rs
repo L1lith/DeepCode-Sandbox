@@ -1709,40 +1709,57 @@ fn wait_bounded(
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|err| format!("could not start it: {err}"))?;
-    let pid = child.id();
-    let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let watching = std::sync::Arc::clone(&finished);
-    let killed = std::sync::Arc::clone(&ended);
-    std::thread::spawn(move || {
-        use std::sync::atomic::Ordering;
-        let deadline = std::time::Instant::now() + limit;
-        while std::time::Instant::now() < deadline {
-            if watching.load(Ordering::SeqCst) {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        killed.store(true, Ordering::SeqCst);
-        kill_process_tree(pid);
-    });
+    let stdout = child.stdout.take().expect("the stdout pipe was requested");
+    let stderr = child.stderr.take().expect("the stderr pipe was requested");
 
-    let output = child
-        .wait_with_output()
-        .map_err(|err| format!("could not be collected: {err}"))?;
-    finished.store(true, std::sync::atomic::Ordering::SeqCst);
-    if ended.load(std::sync::atomic::Ordering::SeqCst) {
-        return Err(format!(
-            "it gave no answer within {}s, so it was killed. This command is not the problem: \
-             something inside Docker is not answering, and restarting Docker Desktop is the usual \
-             fix.",
-            limit.as_secs()
-        ));
-    }
-    Ok(output)
+    // The pipes are drained on threads so a chatty child can never fill one and block while
+    // we poll for its exit. The deadline is enforced with the child's own process handle:
+    // `kill()` is TerminateProcess on Windows, which cannot be refused the way a taskkill of
+    // the tree can be -- and a previous version of this bound waited forever because its
+    // taskkill had been refused.
+    let stdout_thread = std::thread::spawn(move || drain(stdout));
+    let stderr_thread = std::thread::spawn(move || drain(stderr));
+
+    let deadline = std::time::Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let stdout = stdout_thread.join().unwrap_or_default();
+                let stderr = stderr_thread.join().unwrap_or_default();
+                return Err(format!(
+                    "it gave no answer within {}s, so it was killed. This command is not the problem: \
+                     something inside Docker is not answering, and restarting Docker Desktop is the usual \
+                     fix.",
+                    limit.as_secs()
+                ));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(err) => {
+                let _ = child.kill();
+                return Err(format!("could not be waited on: {err}"));
+            }
+        }
+    };
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Read a child pipe to the end on a helper thread.
+fn drain(mut pipe: impl std::io::Read) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let _ = pipe.read_to_end(&mut bytes);
+    bytes
 }
 
 #[cfg(test)]
