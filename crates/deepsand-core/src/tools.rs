@@ -374,7 +374,22 @@ pub fn find(id: &str) -> Option<&'static Tool> {
 }
 
 /// The tools a new project starts with.
+///
+/// Empty, deliberately. A tool is minutes of build time and a larger image, and most of the
+/// catalogue is only needed by some projects; a sandbox that starts with nothing installs
+/// exactly what its project asked for and no more. The catalogue is one dialog away, and an
+/// empty selection is a first-class choice everywhere else, so this is not a special case.
 pub fn default_selection() -> Vec<String> {
+    Vec::new()
+}
+
+/// The tools a project from before the tool system is given.
+///
+/// This list used to be the default for everything. A project with no stored selection has
+/// to keep resolving to the image it already has -- the one its tools were built into -- so
+/// the old list lives here, for `resolve(None)` only. New projects never see it, and the
+/// only way to reach it is to have been created before there was a choice.
+fn legacy_selection() -> Vec<String> {
     CATALOG
         .iter()
         .filter(|tool| tool.default_on && is_available(tool))
@@ -384,13 +399,14 @@ pub fn default_selection() -> Vec<String> {
 
 /// The set of tools that will actually be installed for a project.
 ///
-/// `None` means the project predates the tool system, so it gets the defaults --
-/// which is what its image already contains. An explicit list is honoured as given,
-/// including an empty one, so "no tools" is expressible.
+/// `None` means the project predates the tool system, so it keeps the tools that were
+/// the default when it was created -- which is what its image already contains. An
+/// explicit list is honoured as given, including an empty one, so "no tools" is
+/// expressible, and it is now what a new project starts with.
 pub fn resolve(selection: Option<&[String]>) -> Vec<&'static Tool> {
     let ids: Vec<String> = match selection {
         Some(ids) => ids.to_vec(),
-        None => default_selection(),
+        None => legacy_selection(),
     };
     let mut tools: Vec<&'static Tool> = ids
         .iter()
@@ -556,11 +572,17 @@ mod tests {
         }
     }
 
+    /// Nothing is installed unless the operator asked for it.
     #[test]
-    fn the_requested_utilities_are_default_on() {
-        let defaults = default_selection();
+    fn no_tool_is_on_by_default() {
+        assert!(
+            default_selection().is_empty(),
+            "a new project should start with no tools"
+        );
+        // The ones that used to be on are still there to be chosen -- the default changed,
+        // the catalogue did not.
         for id in ["git", "jq", "ripgrep", "curl", "zip", "htmlq"] {
-            assert!(defaults.contains(&id.to_string()), "{id} should default on");
+            assert!(find(id).is_some(), "{id} left the catalogue");
         }
     }
 
@@ -612,13 +634,16 @@ mod tests {
 
     /* --- selection -------------------------------------------------------- */
 
+    /// A project from before the tool system keeps the tools its image was built with.
     #[test]
-    fn no_selection_means_the_defaults() {
-        assert_eq!(ids(&resolve(None)), {
-            let mut defaults = default_selection();
-            defaults.sort();
-            defaults
+    fn no_selection_means_the_tools_from_before_the_tool_system() {
+        let kept = ids(&resolve(None));
+        assert_eq!(kept, {
+            let mut legacy = legacy_selection();
+            legacy.sort();
+            legacy
         });
+        assert!(!kept.is_empty(), "an older project must not lose the tools it has");
     }
 
     #[test]
