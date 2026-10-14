@@ -745,13 +745,16 @@ impl Docker {
         }
         let _ = std::fs::remove_file(&probe);
 
+        let advice = if last_detail.contains("not answering") || last_detail.contains("not finish") {
+            "Docker's container runtime is not answering. Restart Docker Desktop, then try again."
+        } else {
+            "On Docker Desktop, add the drive that holds your projects under Settings -> Resources \
+             -> File Sharing, choose Apply & Restart, then try again. On Linux, check that the path \
+             is visible to the daemon."
+        };
         SharingCheck::unavailable(format!(
             "Docker could not read a probe file from {} inside a container, so a bind mount would \
-             look like an empty directory to DeepCode.\n\n\
-             On Docker Desktop, add the drive that holds your projects under Settings -> Resources \
-             -> File Sharing, choose Apply & Restart, then try again. On Linux, check that the path \
-             is visible to the daemon.\n\n\
-             Docker itself said: {last_detail}",
+             look like an empty directory to DeepCode.\n\n{advice}\n\nDocker itself said: {last_detail}",
             dir.display()
         ))
     }
