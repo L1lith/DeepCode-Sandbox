@@ -351,9 +351,11 @@ export function PermissionDialog(props: { request: PermissionRequestView; queued
 /* ------------------------------------------------------------------------- */
 
 export function NewProjectDialog(props: { onClose: () => void }) {
+  /** Which half of the dialog is showing: creating from a folder, or importing a repository. */
+  const [mode, setMode] = createSignal<"manual" | "git">("manual");
+  const [busy, setBusy] = createSignal(false);
   const [name, setName] = createSignal("");
   const [root, setRoot] = createSignal("");
-  const [busy, setBusy] = createSignal(false);
   const [check, setCheck] = createSignal<{ ok: boolean; text: string } | null>(null);
 
   async function verify(candidate: string) {
@@ -395,66 +397,250 @@ export function NewProjectDialog(props: { onClose: () => void }) {
     }
   }
 
+  /* ----------------------------------------------------------------------- */
+  /* Import with Git                                                         */
+  /* ----------------------------------------------------------------------- */
+
+  const [gitUrl, setGitUrl] = createSignal("");
+  const [gitParent, setGitParent] = createSignal("");
+  const [gitName, setGitName] = createSignal("");
+  const [gitUser, setGitUser] = createSignal("");
+  const [gitToken, setGitToken] = createSignal("");
+  /** Set once the machine's own credentials were refused: the window then asks for a login. */
+  const [needsLogin, setNeedsLogin] = createSignal(false);
+  const [loginDetail, setLoginDetail] = createSignal("");
+
+  function resetLogin() {
+    setNeedsLogin(false);
+    setLoginDetail("");
+    setGitUser("");
+    setGitToken("");
+  }
+
+  async function browseParent() {
+    const chosen = await open({
+      directory: true,
+      multiple: false,
+      title: "Choose the directory to clone into",
+    });
+    if (typeof chosen === "string") setGitParent(chosen);
+  }
+
+  /**
+   * Clone and import. `signingIn` is true only for the second attempt, after the machine's own
+   * credentials were tried and refused -- the first attempt is always the machine's, so a login
+   * is never offered before it has been given the chance to work.
+   */
+  async function importGit(signingIn: boolean) {
+    setBusy(true);
+    try {
+      const result = await api.importGitProject({
+        url: gitUrl(),
+        parentDir: gitParent(),
+        name: gitName().trim() || undefined,
+        username: signingIn ? gitUser() : undefined,
+        secret: signingIn ? gitToken() : undefined,
+      });
+      if (result.needsCredentials) {
+        setNeedsLogin(true);
+        setLoginDetail(result.detail);
+        return;
+      }
+      if (result.project) {
+        await refreshProjects();
+        toast(
+          "ok",
+          `Imported ${result.project.name}`,
+          "The cloned folder is the project's working directory.",
+        );
+        props.onClose();
+        return;
+      }
+      toast("error", "Could not import the repository", result.detail);
+    } catch (error) {
+      toast("error", "Could not import the repository", describeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const gitReady = () =>
+    !busy() &&
+    gitUrl().trim().length > 0 &&
+    gitParent().trim().length > 0 &&
+    (!needsLogin() || (gitUser().trim().length > 0 && gitToken().length > 0));
+
   return (
     <Modal
-      title="New project"
+      title={mode() === "git" ? "Import with Git" : "New project"}
       subtitle="A project is a working directory plus the permissions DeepCode has inside it."
       onClose={props.onClose}
       footer={
-        <>
-          <button class="btn btn-ghost" onClick={props.onClose}>
-            Cancel
-          </button>
-          <button
-            class="btn btn-primary"
-            disabled={busy() || !name().trim() || !root().trim() || check()?.ok === false}
-            onClick={() => void create()}
-          >
-            Create project
-          </button>
-        </>
+        mode() === "git" ? (
+          <>
+            <button
+              class="btn btn-ghost"
+              disabled={busy()}
+              onClick={() => {
+                resetLogin();
+                setMode("manual");
+              }}
+            >
+              Back
+            </button>
+            <button class="btn btn-primary" disabled={!gitReady()} onClick={() => void importGit(needsLogin())}>
+              {busy() ? "Cloning…" : needsLogin() ? "Sign in and import" : "Import"}
+            </button>
+          </>
+        ) : (
+          <>
+            <button class="btn btn-ghost" onClick={props.onClose}>
+              Cancel
+            </button>
+            <button
+              class="btn btn-primary"
+              disabled={busy() || !name().trim() || !root().trim() || check()?.ok === false}
+              onClick={() => void create()}
+            >
+              Create project
+            </button>
+          </>
+        )
       }
     >
-      <div class="stack">
-        <div class="field">
-          <label for="np-name">Name</label>
-          <input
-            id="np-name"
-            type="text"
-            placeholder="my-website"
-            value={name()}
-            onInput={(event) => setName(event.currentTarget.value)}
-          />
-        </div>
-        <div class="field">
-          <label for="np-root">Primary working directory</label>
-          <div class="row-inline">
-            <input
-              id="np-root"
-              class="grow"
-              type="text"
-              placeholder="D:\work\my-website"
-              value={root()}
-              onInput={(event) => setRoot(event.currentTarget.value)}
-              onChange={(event) => void verify(event.currentTarget.value)}
-            />
-            <button class="btn" onClick={() => void browse()}>
-              Browse…
-            </button>
-          </div>
-          <Show when={check()}>
-            {(result) => (
-              <div class={result().ok ? "callout callout-info" : "callout callout-danger"}>
-                {result().text}
+      <Show
+        when={mode() === "git"}
+        fallback={
+          <div class="stack">
+            <div class="row-inline">
+              <button class="btn" onClick={() => setMode("git")}>
+                Import with Git
+              </button>
+              <span class="faint small">Clone a repository and use the clone as the project.</span>
+            </div>
+            <div class="field">
+              <label for="np-name">Name</label>
+              <input
+                id="np-name"
+                type="text"
+                placeholder="my-website"
+                value={name()}
+                onInput={(event) => setName(event.currentTarget.value)}
+              />
+            </div>
+            <div class="field">
+              <label for="np-root">Primary working directory</label>
+              <div class="row-inline">
+                <input
+                  id="np-root"
+                  class="grow"
+                  type="text"
+                  placeholder="D:\work\my-website"
+                  value={root()}
+                  onInput={(event) => setRoot(event.currentTarget.value)}
+                  onChange={(event) => void verify(event.currentTarget.value)}
+                />
+                <button class="btn" onClick={() => void browse()}>
+                  Browse…
+                </button>
               </div>
-            )}
+              <Show when={check()}>
+                {(result) => (
+                  <div class={result().ok ? "callout callout-info" : "callout callout-danger"}>
+                    {result().text}
+                  </div>
+                )}
+              </Show>
+            </div>
+            <div class="callout callout-info">
+              The sandbox sees this directory at <span class="mono">/workspace</span>. It sees nothing else until you
+              share something — not your home folder, not your other projects, and never a container-runtime socket.
+            </div>
+          </div>
+        }
+      >
+        <div class="stack">
+          <div class="field">
+            <label for="np-git-url">Repository URL</label>
+            <input
+              id="np-git-url"
+              type="text"
+              placeholder="https://github.com/you/project.git"
+              value={gitUrl()}
+              onInput={(event) => {
+                setGitUrl(event.currentTarget.value);
+                // A login is for the URL it was refused for; a different URL starts over.
+                if (needsLogin()) resetLogin();
+              }}
+            />
+          </div>
+          <div class="field">
+            <label for="np-git-parent">Directory to clone into</label>
+            <div class="row-inline">
+              <input
+                id="np-git-parent"
+                class="grow"
+                type="text"
+                placeholder="D:\work"
+                value={gitParent()}
+                onInput={(event) => setGitParent(event.currentTarget.value)}
+              />
+              <button class="btn" onClick={() => void browseParent()}>
+                Browse…
+              </button>
+            </div>
+            <p class="faint small">
+              The repository is cloned into a new folder inside this directory. That cloned folder — not the
+              directory you choose — becomes the project's working directory.
+            </p>
+          </div>
+          <div class="field">
+            <label for="np-git-name">Name (optional)</label>
+            <input
+              id="np-git-name"
+              type="text"
+              placeholder="defaults to the repository's folder name"
+              value={gitName()}
+              onInput={(event) => setGitName(event.currentTarget.value)}
+            />
+          </div>
+          <Show when={needsLogin()}>
+            <div class="callout callout-warn">
+              <p>
+                The credentials already on this machine were tried first — git's stored credentials and its SSH
+                keys — and the repository refused them.
+              </p>
+              <Show when={loginDetail()}>
+                <pre class="output">{loginDetail()}</pre>
+              </Show>
+              <p>
+                Enter a username and a personal access token for this host. They are used for this one clone and
+                are not saved.
+              </p>
+            </div>
+            <div class="field">
+              <label for="np-git-user">Username</label>
+              <input
+                id="np-git-user"
+                type="text"
+                autocomplete="username"
+                value={gitUser()}
+                onInput={(event) => setGitUser(event.currentTarget.value)}
+              />
+            </div>
+            <div class="field">
+              <label for="np-git-token">Token or password</label>
+              <input
+                id="np-git-token"
+                type="password"
+                autocomplete="current-password"
+                value={gitToken()}
+                onInput={(event) => setGitToken(event.currentTarget.value)}
+              />
+            </div>
           </Show>
         </div>
-        <div class="callout callout-info">
-          The sandbox sees this directory at <span class="mono">/workspace</span>. It sees nothing else until you
-          share something — not your home folder, not your other projects, and never a container-runtime socket.
-        </div>
-      </div>
+      </Show>
     </Modal>
   );
 }

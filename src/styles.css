@@ -137,6 +137,9 @@ pre,
   background: transparent;
   cursor: pointer;
   transition: background 120ms ease, border-color 120ms ease;
+  /* Reordering is a pointer gesture that starts on this row, so the row's own text must not be
+     selectable: the browser would otherwise begin a text selection under the drag. */
+  user-select: none;
 }
 
 .project-item:hover {
@@ -172,6 +175,68 @@ pre,
   text-overflow: ellipsis;
   direction: rtl;
   text-align: left;
+}
+
+/* Drag-to-reorder. The row in flight fades, and the row under the pointer gets a line on the
+   side the row will land, so the drop is visible before the button is released. */
+.project-item.dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
+/* The line is on the side the row will land: dragging down puts it after the row it is over,
+   dragging up puts it before, so the indicator and the result agree. */
+.project-item.drop-above {
+  box-shadow: inset 0 2px 0 0 var(--accent);
+}
+
+.project-item.drop-below {
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+}
+
+/* The project right-click menu. Fixed, so it opens where the pointer was whatever the
+   sidebar's scroll, and above the dialogs' scrim because it is a menu rather than a page. */
+.context-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+}
+
+.context-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 12rem;
+  padding: 0.25rem;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 12px 32px #000000a0;
+}
+
+.context-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.4rem 0.55rem;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.context-item:hover {
+  background: var(--bg-panel);
+}
+
+/* The folder-button column in the permissions table: only as wide as the glyph, and never
+   wrapped onto a second line by a long path beside it. */
+td.folder-cell,
+th.folder-cell {
+  width: 1.9rem;
+  white-space: nowrap;
 }
 
 .sidebar-foot {
@@ -835,18 +900,49 @@ pre.output {
    the actions cell before, which is sized for buttons: the input and the save button
    overflowed the column and hung off the edge of the panel. */
 .secret-edit-row td {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
   background: rgba(255, 255, 255, 0.02);
 }
 
-.secret-edit-row .hint {
-  flex: 0 0 auto;
+/*
+ * The editor line: the sentence on the left, the field taking every remaining pixel, the buttons
+ * on the right.
+ *
+ * The line is inside the cell, not the cell. `display: flex` on the `<td>` takes it out of the
+ * table's layout, so the row stopped spanning the table and the line shrink-wrapped to its
+ * contents -- which left the field a few characters wide on any window that was not very wide.
+ * As a flex container inside the cell, the cell is an ordinary one again and this is as wide as
+ * the table.
+ */
+.secret-edit {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  /* So the rule below asks how wide this row is, not how wide the window is. */
+  container-type: inline-size;
 }
 
-.secret-edit-row input {
+.secret-edit .secret-edit-label {
+  flex: 0 1 auto;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.secret-edit input {
+  /* Basis 0, like `.grow` elsewhere: the field is exactly the space the sentence and the buttons
+     leave, whatever their widths are. */
+  flex: 1 1 0;
+  min-width: 7rem;
+}
+
+/* When the row cannot hold both the sentence and a field worth typing in, the sentence goes
+   rather than the field being crushed: the buttons and the name being edited are what matter. */
+@container (max-width: 30rem) {
+  .secret-edit .secret-edit-label {
+    display: none;
+  }
 }
 
 /* A disabled secret still has to be readable, so this dims it rather than greying it out. */

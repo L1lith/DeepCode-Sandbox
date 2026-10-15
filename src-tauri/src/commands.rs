@@ -10,6 +10,7 @@ use deepsand_core::allowlist;
 use deepsand_core::broker::Broker;
 use deepsand_core::credentials::{self, ResolvedCredentials};
 use deepsand_core::docker::Docker;
+use deepsand_core::git::{Git, GitCredential};
 use deepsand_core::model::*;
 use deepsand_core::paths;
 use deepsand_core::policy::{self, MountKind, PlanInput, RunPlan};
@@ -128,6 +129,28 @@ pub fn docker_status_impl(state: &AppState) -> CmdResult<DockerStatus> {
     Ok(status)
 }
 
+/// The status the watcher uses, which may be expensive where the window's may not.
+///
+/// While a wedge is remembered, the daemon answering `version` says nothing -- that is what
+/// a wedge *is* -- so the verdict is only cleared by starting a container. The watcher is the
+/// one caller on a timer that can afford that, and it is what lets the status strip notice on
+/// its own that restarting Docker Desktop fixed the machine, rather than going on saying
+/// "daemon unreachable" until a launch happens to clear it.
+pub fn docker_status_watched(state: &AppState) -> CmdResult<DockerStatus> {
+    if state.runtime_wedged.load(std::sync::atomic::Ordering::SeqCst) {
+        if let Ok(docker) = state.docker() {
+            let image = store(&state).settings().image.clone();
+            if docker.runtime_answers(&image, deepsand_core::docker::WEDGE_RECHECK_LEASH) {
+                state
+                    .runtime_wedged
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                tracing::info!("the container runtime answered again; the wedge verdict is cleared");
+            }
+        }
+    }
+    docker_status_impl(state)
+}
+
 /* ------------------------------------------------------------------------- */
 /* Projects                                                                  */
 /* ------------------------------------------------------------------------- */
@@ -179,6 +202,123 @@ pub fn create_project_impl(state: &AppState, name: String, root_dir: String) -> 
     let project = store.create_project(&name, &root_dir).map_err(fail)?;
     drop(store);
     Ok(project_view(&state, &project))
+}
+
+#[tauri::command]
+pub fn move_project(state: State<'_, AppState>, project_id: String, to_index: usize) -> CmdResult<Vec<ProjectView>> {
+    move_project_impl(&state, &project_id, to_index)
+}
+
+/// Reorder the sidebar by moving one project to an index.
+///
+/// The whole list comes back rather than an acknowledgement, so the window draws the order the
+/// store actually holds and cannot keep a stale one after a refusal.
+pub fn move_project_impl(state: &AppState, project_id: &str, to_index: usize) -> CmdResult<Vec<ProjectView>> {
+    {
+        let mut store = store(&state);
+        store.move_project(project_id, to_index).map_err(fail)?;
+    }
+    list_projects_impl(state)
+}
+
+/// What a git import did.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitImportResult {
+    /// The project that was created, when the clone succeeded.
+    pub project: Option<ProjectView>,
+    /// The repository refused the machine's own credentials, so the window should ask for a
+    /// username and token and try again.
+    pub needs_credentials: bool,
+    /// A line for the operator, set whenever nothing was created.
+    pub detail: String,
+}
+
+/// Clone a repository and make the *cloned folder* a project.
+///
+/// The clone runs on the host with the machine's own git credentials first -- its credential
+/// helper, its SSH agent, its keys -- and a typed username and token are only used when that is
+/// refused. `parent_dir` is where the clone goes; the folder git creates inside it, never the
+/// containing directory, becomes the project's working directory.
+///
+/// Desktop-only and absent from the remote command table: a remote client cloning into the host's
+/// filesystem, and handing it a token, is not a thing this app offers.
+#[tauri::command]
+pub async fn import_git_project(
+    app: AppHandle,
+    url: String,
+    parent_dir: String,
+    name: Option<String>,
+    username: Option<String>,
+    secret: Option<String>,
+) -> CmdResult<GitImportResult> {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = tauri::Manager::state::<AppState>(&handle);
+        import_git_project_impl(&state, url, parent_dir, name, username, secret)
+    })
+    .await
+    .map_err(|err| format!("the import could not be completed: {err}"))?
+}
+
+pub fn import_git_project_impl(
+    state: &AppState,
+    url: String,
+    parent_dir: String,
+    name: Option<String>,
+    username: Option<String>,
+    secret: Option<String>,
+) -> CmdResult<GitImportResult> {
+    let git = Git::locate().map_err(fail)?;
+    deepsand_core::git::validate_clone_url(&url).map_err(fail)?;
+
+    let parent = paths::canonical_existing_dir(&parent_dir).map_err(fail)?;
+    if !parent.is_dir() {
+        return Err(format!("{} is not a directory", parent.display()));
+    }
+    let repo_name = deepsand_core::git::repo_name_from_url(&url)
+        .ok_or_else(|| "that repository URL does not name a folder to clone into".to_string())?;
+    let dest = parent.join(&repo_name);
+    if dest.exists() {
+        return Err(format!(
+            "{} already exists. Remove it, or choose a different directory to contain the clone.",
+            dest.display()
+        ));
+    }
+
+    // Both or neither: a username with no token is a half-answer, not a credential.
+    let credential = match (username, secret) {
+        (None, None) => None,
+        (Some(username), Some(secret)) if !username.trim().is_empty() && !secret.is_empty() => {
+            Some(GitCredential { username, secret })
+        }
+        _ => return Err("a sign-in needs both a username and a token (or password)".to_string()),
+    };
+
+    tracing::info!(%url, dest = %dest.display(), "cloning a repository to import");
+    let outcome = git.clone(&url, &dest, credential.as_ref()).map_err(fail)?;
+    if !outcome.ok {
+        if outcome.needs_credentials {
+            tracing::info!(%url, "git asked for a login this machine did not have");
+            return Ok(GitImportResult {
+                project: None,
+                needs_credentials: true,
+                detail: outcome.detail,
+            });
+        }
+        return Err(format!("could not clone {url}: {}", outcome.detail));
+    }
+
+    let project_name = name
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| repo_name.clone());
+    let project = create_project_impl(state, project_name, dest.display().to_string())?;
+    Ok(GitImportResult {
+        project: Some(project),
+        needs_credentials: false,
+        detail: String::new(),
+    })
 }
 
 #[tauri::command]
@@ -4386,6 +4526,62 @@ fn runtime_context_dir() -> Option<PathBuf> {
     deepsand_core::seccomp::runtime_dir()
 }
 
+/// Restart Docker's engine, including the WSL2 distro it runs in on Windows, and wait
+/// until a container can actually start again.
+///
+/// This is the operator's explicit action, never automatic: it stops every container on the
+/// machine, including every other project's sandbox. `confirmed` is their click, passed as a
+/// parameter rather than assumed, so a stray call cannot do it. Like the updater it is absent
+/// from `remote.rs`, because a remote client must not be able to end containers on the host
+/// it reached.
+#[tauri::command]
+pub async fn restart_docker_runtime(
+    app: AppHandle,
+    confirmed: bool,
+) -> CmdResult<()> {
+    if !confirmed {
+        return Err(
+            "restarting Docker Desktop ends every container on this machine, so it has to be \
+             confirmed by the operator"
+                .to_string(),
+        );
+    }
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = tauri::Manager::state::<AppState>(&handle);
+        restart_docker_runtime_impl(&state)
+    })
+    .await
+    .map_err(|err| format!("the restart could not be completed: {err}"))?
+}
+
+pub fn restart_docker_runtime_impl(state: &AppState) -> CmdResult<()> {
+    let docker = state.docker().map_err(fail)?;
+    let image = store(&state).settings().image.clone();
+
+    tracing::warn!("restarting Docker Desktop and its engine at the operator's request");
+    // Best effort: a step that fails is often one that was already true, so what decides is
+    // not the steps but whether a container starts afterwards. Each line is logged either way.
+    for line in docker.restart_engine() {
+        tracing::info!(step = %line, "engine restart");
+    }
+
+    docker
+        .await_runtime(&image, deepsand_core::docker::ENGINE_RECOVERY_DEADLINE)
+        .map_err(|err| {
+            format!(
+                "Docker's container runtime did not answer after the restart: {err}. Docker Desktop \
+                 can take a minute to come up; if it is still starting, try again in a moment."
+            )
+        })?;
+
+    state
+        .runtime_wedged
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    tracing::info!("Docker's container runtime answered again after the restart");
+    Ok(())
+}
+
 /// Remove managed containers, volumes and networks that no live project owns.
 #[tauri::command]
 pub async fn cleanup_orphans(app: AppHandle) -> CmdResult<Vec<String>> {
@@ -4483,6 +4679,38 @@ pub fn reveal_data_dir(state: State<'_, AppState>) -> CmdResult<String> {
 pub fn reveal_data_dir_impl(state: &AppState) -> CmdResult<String> {
 
     Ok(store(&state).data_dir().display().to_string())
+}
+
+/// Open a project's working directory in the machine's file manager.
+///
+/// The path is resolved here from the project id, never accepted as an arbitrary string from
+/// the window: every path worth opening is already a project's or a grant's, and a view should
+/// not be handed a general "open this path on the host" primitive. Desktop-only, like
+/// `reveal_data_dir`: a folder window means nothing to a remote client and would open on the
+/// wrong machine.
+#[tauri::command]
+pub fn reveal_project_dir(app: AppHandle, state: State<'_, AppState>, project_id: String) -> CmdResult<()> {
+    let path = store(&state).project(&project_id).map_err(fail)?.root_dir.clone();
+    open_in_file_manager(&app, &path)
+}
+
+/// Open one shared directory in the machine's file manager.
+#[tauri::command]
+pub fn reveal_grant_dir(app: AppHandle, state: State<'_, AppState>, project_id: String, grant_id: String) -> CmdResult<()> {
+    let grant = store(&state)
+        .grants(&project_id)
+        .into_iter()
+        .find(|grant| grant.id == grant_id)
+        .ok_or_else(|| "that shared directory is no longer listed".to_string())?;
+    open_in_file_manager(&app, &grant.host_path)
+}
+
+/// Open a host directory with whatever the desktop opens folders in.
+fn open_in_file_manager(app: &AppHandle, path: &str) -> CmdResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|err| format!("could not open {} in the file manager: {err}", path))
 }
 
 #[tauri::command]

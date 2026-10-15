@@ -294,6 +294,19 @@ export interface ProjectView {
   pendingRequests: number;
 }
 
+/** What one `importGitProject` did. */
+export interface GitImportResult {
+  /** The project that was created, when the clone succeeded. */
+  project: ProjectView | null;
+  /**
+   * The repository refused the credentials already on this machine, so the window should ask for
+   * a username and token and try again.
+   */
+  needsCredentials: boolean;
+  /** Git's own last words, when nothing was created. */
+  detail: string;
+}
+
 /** A newer version than the one this build reports. */
 export interface UpdateInfo {
   version: string;

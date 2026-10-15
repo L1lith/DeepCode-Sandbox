@@ -342,36 +342,37 @@ export function SecretsPanel() {
                             <Show when={editing() === secret.name}>
                               <tr class="secret-edit-row">
                                 <td colspan={4}>
-                                  <span class="hint">New value for {secret.name}</span>
-                                  <input
-                                    type="password"
-                                    class="grow"
-                                    autocomplete="off"
-                                    placeholder="new value"
-                                    aria-label={`New value for ${secret.name}`}
-                                    value={editValue()}
-                                    onInput={(event) => setEditValue(event.currentTarget.value)}
-                                    onKeyDown={(event) => {
-                                      if (event.key === "Enter") void replace(secret.name);
-                                      if (event.key === "Escape") setEditing(null);
-                                    }}
-                                  />
-                                  <button
-                                    class="btn btn-primary small"
-                                    disabled={busy() || !editValue()}
-                                    onClick={() => void replace(secret.name)}
-                                  >
-                                    Save
-                                  </button>
-                                  <button
-                                    class="btn btn-ghost small"
-                                    onClick={() => {
-                                      setEditing(null);
-                                      setEditValue("");
-                                    }}
-                                  >
-                                    Cancel
-                                  </button>
+                                  <div class="secret-edit">
+                                    <span class="secret-edit-label hint">New value for {secret.name}</span>
+                                    <input
+                                      type="password"
+                                      autocomplete="off"
+                                      placeholder="new value"
+                                      aria-label={`New value for ${secret.name}`}
+                                      value={editValue()}
+                                      onInput={(event) => setEditValue(event.currentTarget.value)}
+                                      onKeyDown={(event) => {
+                                        if (event.key === "Enter") void replace(secret.name);
+                                        if (event.key === "Escape") setEditing(null);
+                                      }}
+                                    />
+                                    <button
+                                      class="btn btn-primary small"
+                                      disabled={busy() || !editValue()}
+                                      onClick={() => void replace(secret.name)}
+                                    >
+                                      Save
+                                    </button>
+                                    <button
+                                      class="btn btn-ghost small"
+                                      onClick={() => {
+                                        setEditing(null);
+                                        setEditValue("");
+                                      }}
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
                                 </td>
                               </tr>
                             </Show>
@@ -379,36 +380,37 @@ export function SecretsPanel() {
                             <Show when={renaming() === secret.name}>
                               <tr class="secret-edit-row">
                                 <td colspan={4}>
-                                  <span class="hint">Rename {secret.name} to</span>
-                                  <input
-                                    type="text"
-                                    class="grow"
-                                    autocomplete="off"
-                                    placeholder="NEW_NAME"
-                                    aria-label={`New name for ${secret.name}`}
-                                    value={newName()}
-                                    onInput={(event) => setNewName(event.currentTarget.value)}
-                                    onKeyDown={(event) => {
-                                      if (event.key === "Enter") void rename(secret.name);
-                                      if (event.key === "Escape") setRenaming(null);
-                                    }}
-                                  />
-                                  <button
-                                    class="btn btn-primary small"
-                                    disabled={busy() || !newName().trim() || checkName(newName()) !== null}
-                                    onClick={() => void rename(secret.name)}
-                                  >
-                                    Save
-                                  </button>
-                                  <button
-                                    class="btn btn-ghost small"
-                                    onClick={() => {
-                                      setRenaming(null);
-                                      setNewName("");
-                                    }}
-                                  >
-                                    Cancel
-                                  </button>
+                                  <div class="secret-edit">
+                                    <span class="secret-edit-label hint">Rename {secret.name} to</span>
+                                    <input
+                                      type="text"
+                                      autocomplete="off"
+                                      placeholder="NEW_NAME"
+                                      aria-label={`New name for ${secret.name}`}
+                                      value={newName()}
+                                      onInput={(event) => setNewName(event.currentTarget.value)}
+                                      onKeyDown={(event) => {
+                                        if (event.key === "Enter") void rename(secret.name);
+                                        if (event.key === "Escape") setRenaming(null);
+                                      }}
+                                    />
+                                    <button
+                                      class="btn btn-primary small"
+                                      disabled={busy() || !newName().trim() || checkName(newName()) !== null}
+                                      onClick={() => void rename(secret.name)}
+                                    >
+                                      Save
+                                    </button>
+                                    <button
+                                      class="btn btn-ghost small"
+                                      onClick={() => {
+                                        setRenaming(null);
+                                        setNewName("");
+                                      }}
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
                                 </td>
                               </tr>
                               <Show when={checkName(newName())}>

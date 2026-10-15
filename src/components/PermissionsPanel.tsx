@@ -22,10 +22,32 @@ import {
   describeError,
   refreshProjects,
   refreshProjectData,
+  revealGrantDir,
+  revealProjectDir,
   selectedProject,
   store,
   toast,
 } from "../store";
+
+/**
+ * A folder, for the button that opens a directory in the machine's file manager.
+ *
+ * Its own small component rather than a shared icon set: this is the one glyph the panel needs,
+ * and the toolbar pattern it sits in is the same `.btn-icon` the other panels use.
+ */
+function FolderIcon() {
+  return (
+    <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M1.6 4.4a1.2 1.2 0 0 1 1.2-1.2h2.9c.3 0 .6.13.8.35l.95 1.05h5.75a1.2 1.2 0 0 1 1.2 1.2v6.1a1.2 1.2 0 0 1-1.2 1.2H2.8a1.2 1.2 0 0 1-1.2-1.2z"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.3"
+        stroke-linejoin="round"
+      />
+    </svg>
+  );
+}
 
 export function PermissionsPanel() {
   const project = () => selectedProject();
@@ -216,6 +238,20 @@ export function PermissionsPanel() {
     }
   }
 
+  /** Open the project's own directory in the machine's file manager. */
+  async function openProjectDir() {
+    const current = project();
+    if (!current) return;
+    await revealProjectDir(current.id);
+  }
+
+  /** Open one shared directory in the machine's file manager. */
+  async function openGrantDir(grantId: string) {
+    const current = project();
+    if (!current) return;
+    await revealGrantDir(current.id, grantId);
+  }
+
   return (
     <div class="panel">
       <Show when={project()} fallback={<div class="empty">Select a project first.</div>}>
@@ -390,6 +426,7 @@ export function PermissionsPanel() {
               <table>
                 <thead>
                   <tr>
+                    <th class="folder-cell" />
                     <th>Reachable at</th>
                     <th>Host path</th>
                     <th>Access</th>
@@ -399,6 +436,17 @@ export function PermissionsPanel() {
                 </thead>
                 <tbody>
                   <tr>
+                    <td class="folder-cell">
+                      {/* The project row's icon opens the project's own directory, so the
+                          workspace is reachable from this table like every other row. */}
+                      <button
+                        class="btn btn-icon"
+                        title={`Open ${current().rootDir} in the file manager`}
+                        onClick={() => void openProjectDir()}
+                      >
+                        <FolderIcon />
+                      </button>
+                    </td>
                     <td class="path">/workspace</td>
                     <td class="path">{current().rootDir}</td>
                     <td>
@@ -410,6 +458,20 @@ export function PermissionsPanel() {
                   <For each={store.grants}>
                     {(grant) => (
                       <tr>
+                        <td class="folder-cell">
+                          <button
+                            class="btn btn-icon"
+                            disabled={!grant.exists}
+                            title={
+                              grant.exists
+                                ? `Open ${grant.hostPath} in the file manager`
+                                : "This directory is no longer on disk"
+                            }
+                            onClick={() => void openGrantDir(grant.id)}
+                          >
+                            <FolderIcon />
+                          </button>
+                        </td>
                         <td class="path">{grant.containerPath}</td>
                         <td class="path">{grant.hostPath}</td>
                         <td>

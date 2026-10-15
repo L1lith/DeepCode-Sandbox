@@ -331,7 +331,7 @@ pub fn run() {
                         let probe = handle.clone();
                         let available = tauri::async_runtime::spawn_blocking(move || {
                             let state = tauri::Manager::state::<AppState>(&probe);
-                            commands::docker_status_impl(&state)
+                            commands::docker_status_watched(&state)
                                 .map(|status| status.available)
                                 .unwrap_or(false)
                         })
@@ -450,6 +450,10 @@ pub fn run() {
             commands::list_projects,
             commands::get_project,
             commands::create_project,
+            commands::move_project,
+            // Clones onto the host's filesystem and can take a credential, so it is desktop-only
+            // and absent from the remote command table.
+            commands::import_git_project,
             commands::update_project_settings,
             commands::set_requests_enabled,
             commands::delete_project,
@@ -500,7 +504,16 @@ pub fn run() {
             commands::build_runtime_image,
             commands::cleanup_orphans,
             commands::reveal_data_dir,
+            // Open a folder window on the machine the window is on. Desktop-only, like the
+            // updater and the Docker restart: to a remote client these mean nothing and would
+            // act on the wrong machine.
+            commands::reveal_project_dir,
+            commands::reveal_grant_dir,
             commands::startup_error,
+            // Ends every container on the machine, so it is desktop-only like the updater
+            // commands and absent from the remote command table for the same reason: a
+            // remote client must not be able to end containers on the host it reached.
+            commands::restart_docker_runtime,
             // Self-updates. Desktop-only with the plugin, and absent from the remote
             // command table on purpose: a remote client must not be able to replace the
             // binary on the host it reached.

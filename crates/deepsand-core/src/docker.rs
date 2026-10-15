@@ -15,6 +15,61 @@ use std::process::{Command, Stdio};
 pub const LABEL_MANAGED: &str = "deepsand.managed=1";
 pub const LABEL_PROJECT_PREFIX: &str = "deepsand.project=";
 
+/// How long one engine-restart step may take before it is ended.
+///
+/// `docker desktop stop` waits for the engine to go down, which is the slow one; the rest
+/// are quick. A step that outlives this is ended and the next one still runs, because the
+/// goal is a fresh engine, not a tidy shutdown.
+pub const ENGINE_RESTART_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The leash for one attempt at "can a container start yet".
+///
+/// Shorter than the launch gate's, because recovery is a wait that repeats rather than a
+/// verdict reached once.
+const RUNTIME_RECOVERY_LEASH: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How long the recovery waits for the runtime to answer before giving up on it.
+pub const ENGINE_RECOVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// The leash the status watcher uses to notice, on its own, that a wedge has cleared.
+pub const WEDGE_RECHECK_LEASH: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// One step in the sequence that brings a wedged container runtime back.
+///
+/// A value rather than a pile of `Command::new` calls, because the order is the part worth
+/// asserting: Docker Desktop owns the engine, but on Windows the engine runs inside a WSL2
+/// distro that can survive a Docker Desktop restart still wedged -- which is exactly the
+/// `docker create` answers / `docker start` hangs state this recovery exists for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineRestartStep {
+    /// `docker desktop restart` — one command, for a platform with no WSL underneath.
+    RestartDockerDesktop,
+    /// `docker desktop stop` — shut Docker Desktop down cleanly before its VM is killed.
+    StopDockerDesktop,
+    /// `wsl --terminate docker-desktop` — end the distro the engine runs in. Named, never
+    /// `wsl --shutdown`, which would take every other distro with it.
+    TerminateWslDistro(&'static str),
+    /// `docker desktop start` — start Docker Desktop again so it recreates that distro.
+    StartDockerDesktop,
+}
+
+/// The ordered steps that restart Docker's engine.
+///
+/// On Windows the engine lives in a WSL2 distro, and that distro is what actually stays
+/// wedged: `docker desktop restart` reuses a running one. So the distro is ended between a
+/// clean stop and a start, which is the part that is specific to this machine.
+pub fn engine_restart_plan(windows: bool) -> Vec<EngineRestartStep> {
+    if windows {
+        vec![
+            EngineRestartStep::StopDockerDesktop,
+            EngineRestartStep::TerminateWslDistro("docker-desktop"),
+            EngineRestartStep::StartDockerDesktop,
+        ]
+    } else {
+        vec![EngineRestartStep::RestartDockerDesktop]
+    }
+}
+
 /// The result of a host-file-sharing preflight.
 ///
 /// `ok` is the only thing callers should branch on; `detail` is written to be
@@ -91,16 +146,7 @@ impl Docker {
     }
 
     fn command(&self) -> Command {
-        let mut cmd = Command::new(&self.program);
-        // Never pop a console window when Deepsand runs as a GUI app on Windows.
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        cmd.stdin(Stdio::null());
-        cmd
+        bare_command(&self.program)
     }
 
     /// How long one docker command may take before its process is ended.
@@ -294,7 +340,103 @@ impl Docker {
     ///     for a reason that has nothing to do with the runtime, so a missing image falls back
     ///     to any local one before any verdict is reached.
     pub fn runtime_check(&self, image: &str) -> std::result::Result<(), String> {
-        let leash = std::time::Duration::from_secs(20);
+        self.runtime_check_within(image, 2, std::time::Duration::from_secs(20))
+    }
+
+    /// One bounded attempt at starting a container.
+    ///
+    /// For the two callers that are waiting rather than deciding: the status watcher, which
+    /// has to notice on its own that a restart fixed the machine, and the recovery itself,
+    /// which asks again until a deadline. The launch gate uses `runtime_check`, which is
+    /// patient with a single reason to be.
+    pub fn runtime_answers(&self, image: &str, leash: std::time::Duration) -> bool {
+        self.runtime_check_within(image, 1, leash).is_ok()
+    }
+
+    /// Wait, after a restart, until a container actually starts.
+    ///
+    /// The daemon answering `version` is not the runtime answering -- that is the whole shape
+    /// of the wedge -- so this asks the only honest question, again and again, until it is yes
+    /// or the deadline passes.
+    pub fn await_runtime(
+        &self,
+        image: &str,
+        deadline: std::time::Duration,
+    ) -> std::result::Result<(), String> {
+        let started = std::time::Instant::now();
+        loop {
+            let last = match self.runtime_check_within(image, 1, RUNTIME_RECOVERY_LEASH) {
+                Ok(()) => return Ok(()),
+                Err(err) => err,
+            };
+            if started.elapsed() >= deadline {
+                return Err(last);
+            }
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
+    }
+
+    /// Restart Docker's engine, ending the WSL2 distro it lives in on Windows.
+    ///
+    /// Best effort and bounded: this is the recovery for a runtime that will not start a
+    /// container, so a step that hangs must not hang the recovery with it. Returns one line
+    /// per step, for the log and for the operator's error box.
+    pub fn restart_engine(&self) -> Vec<String> {
+        // The distro is looked up rather than assumed: Docker Desktop on Windows is not always
+        // WSL-backed -- it can run in its own LinuxKit VM, where there is no distro at all --
+        // and a machine with no docker distro must not be told its WSL terminate failed.
+        let distro = if cfg!(windows) { docker_wsl_distro() } else { None };
+        engine_restart_plan(cfg!(windows))
+            .into_iter()
+            .map(|step| self.run_restart_step(step, distro.as_deref()))
+            .collect()
+    }
+
+    fn run_restart_step(&self, step: EngineRestartStep, distro: Option<&str>) -> String {
+        let (program, args, label): (PathBuf, Vec<String>, String) = match step {
+            EngineRestartStep::StopDockerDesktop => (
+                self.program.clone(),
+                self.fmt(&["desktop", "stop"]),
+                "docker desktop stop".to_string(),
+            ),
+            EngineRestartStep::StartDockerDesktop => (
+                self.program.clone(),
+                self.fmt(&["desktop", "start"]),
+                "docker desktop start".to_string(),
+            ),
+            EngineRestartStep::RestartDockerDesktop => (
+                self.program.clone(),
+                self.fmt(&["desktop", "restart"]),
+                "docker desktop restart".to_string(),
+            ),
+            EngineRestartStep::TerminateWslDistro(wanted) => match distro {
+                Some(found) => (
+                    PathBuf::from("wsl"),
+                    vec!["--terminate".to_string(), found.to_string()],
+                    format!("wsl --terminate {found}"),
+                ),
+                None => return format!("wsl --terminate {wanted}: no docker WSL distro on this machine"),
+            },
+        };
+        let mut cmd = bare_command(&program);
+        cmd.args(&args);
+        match wait_bounded(cmd, ENGINE_RESTART_STEP_TIMEOUT) {
+            Ok(output) if output.status.success() => format!("{label}: done"),
+            Ok(output) => {
+                let why = sanitize_output_line(String::from_utf8_lossy(&output.stderr).trim())
+                    .unwrap_or_else(|| "no reason was given".to_string());
+                format!("{label}: {why}")
+            }
+            Err(err) => format!("{label}: {err}"),
+        }
+    }
+
+    fn runtime_check_within(
+        &self,
+        image: &str,
+        attempts: usize,
+        leash: std::time::Duration,
+    ) -> std::result::Result<(), String> {
         let candidate = if self.image_present(image) {
             image.to_string()
         } else {
@@ -306,12 +448,12 @@ impl Docker {
 
         let args = self.fmt(&["run", "--network=none", "--entrypoint=/bin/true", &candidate]);
         let mut last = format!("{candidate} did not start within {}s", leash.as_secs());
-        for attempt in 1..=2 {
+        for attempt in 1..=attempts {
             if self.run_probe(&args, leash).is_some() {
                 return Ok(());
             }
             last = format!(
-                "{candidate} did not start within {}s (attempt {attempt} of 2)",
+                "{candidate} did not start within {}s (attempt {attempt} of {attempts})",
                 leash.as_secs()
             );
         }
@@ -814,8 +956,14 @@ impl Docker {
     ///
     /// Since the project directory is always bind-mounted, that would make
     /// Deepsand look broken rather than misconfigured. So a probe file is written
-    /// on the host and read back from inside a container, and the answer is a
-    /// plain-language verdict instead of a mystery.
+    /// on the host and read back through a container that has the directory
+    /// mounted, and the answer is a plain-language verdict instead of a mystery.
+    ///
+    /// The container is *created* but never *started*, because starting one is the one
+    /// step a wedged runtime refuses while `version`, `images`, `create` and `cp` keep
+    /// answering on this machine. `docker cp` still reads the file through the daemon's
+    /// view of the bind mount, so a directory the container would not be able to see is
+    /// still caught; a directory that is merely waiting on a stuck runtime is not.
     pub fn check_host_sharing(&self, dir: &Path, image: &str) -> SharingCheck {
         let token = format!("deepsand-sharing-probe-{}", crate::now_ms());
         let probe = dir.join(&token);
@@ -833,29 +981,36 @@ impl Docker {
         // but an image that has not been built yet is not a reason to fail: docker would try to
         // pull it and report "pull access denied", which says nothing about the mount. A local
         // runtime image answers just as well.
+        //
+        // Nothing is started, for the same reason `read_file_from_image` starts nothing: this
+        // machine's container runtime wedges while the rest of the daemon -- version, images,
+        // create, cp -- keeps answering. A `docker run` here burns its leash on a directory a
+        // container can read perfectly well, and the launch is refused for a wedge that has
+        // nothing to do with file sharing. `docker create` records the bind mount and `docker cp`
+        // reads the probe file back through the daemon's own view of the host -- the same
+        // file-sharing layer the launch depends on -- so a genuinely unshared directory still
+        // fails, and it fails carrying docker's own words instead of a timeout sentence of ours.
         let attempt = |image: &str| -> crate::Result<String> {
-            let mut args = self.fmt(&[
-                "run",
-                "--rm",
-                "--network=none",
-                "--read-only",
-                "--cap-drop=ALL",
-                "--security-opt=no-new-privileges",
-                "--user=0:0",
-                "--entrypoint=/bin/cat",
-                "-v",
-            ]);
-            args.push(format!("{}:/deepsand-probe:ro", dir.display()));
-            args.push(image.to_string());
-            args.push(format!("/deepsand-probe/{token}"));
-            // The short leash matters: when the container runtime is wedged, a probe that waits
-            // the whole command timeout is exactly the launch hang this preflight is meant to
-            // prevent. Fifteen seconds is far more than a healthy cat needs, and when it is not
-            // enough the message says so instead of pretending the mount is broken.
-            self.run_probe(&args, std::time::Duration::from_secs(15))
-                .ok_or_else(|| SandboxError::policy(
-                    "the probe did not finish in 15 seconds; Docker's container runtime is not answering",
-                ))
+            let name = format!("deepsand-sharing-{}", crate::now_ms());
+            let host = std::env::temp_dir().join(format!(
+                "deepsand-sharing-{}-{}",
+                std::process::id(),
+                crate::now_ms()
+            ));
+            let _ = self.try_run(&self.fmt(&["rm", "-f", &name]));
+            let read = (|| -> crate::Result<String> {
+                self.run(&Self::sharing_probe_create_args(image, dir, &name))?;
+                let from = format!("{name}:/deepsand-probe/{token}");
+                self.run(&self.fmt(&["cp", &from, &host.display().to_string()]))?;
+                std::fs::read_to_string(&host).map_err(|err| {
+                    SandboxError::policy(format!(
+                        "the probe file could be copied out of {image} but not read back: {err}"
+                    ))
+                })
+            })();
+            let _ = self.try_run(&self.fmt(&["rm", "-f", &name]));
+            let _ = std::fs::remove_file(&host);
+            read
         };
 
         let candidates: Vec<String> = std::iter::once(image.to_string())
@@ -898,6 +1053,23 @@ impl Docker {
              look like an empty directory to DeepCode.\n\n{advice}\n\nDocker itself said: {last_detail}",
             dir.display()
         ))
+    }
+
+    /// The `docker create` argv for the sharing probe.
+    ///
+    /// It declares the bind mount and names the container so it can be removed afterwards, but it
+    /// starts nothing. Kept as a pure function, and without `run`, so a test can assert that the
+    /// sharing check never depends on the step a wedged runtime refuses.
+    fn sharing_probe_create_args(image: &str, dir: &Path, name: &str) -> Vec<String> {
+        vec![
+            "create".to_string(),
+            "--name".to_string(),
+            name.to_string(),
+            "--network=none".to_string(),
+            "-v".to_string(),
+            format!("{}:/deepsand-probe:ro", dir.display()),
+            image.to_string(),
+        ]
     }
 
     /// Every local runtime image, newest first.
@@ -1462,7 +1634,10 @@ fn parse_pair(value: &str) -> Option<(u32, u32)> {
 }
 
 /// Minimal `which`: avoids a dependency for something this small.
-fn which(program: &str) -> Option<PathBuf> {
+///
+/// `pub(crate)` so `git.rs` locates the host's git the same way this locates docker, rather
+/// than growing a second `PATH` walk that could disagree with it.
+pub(crate) fn which(program: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     let exts: Vec<String> = if cfg!(windows) {
         std::env::var("PATHEXT")
@@ -1926,6 +2101,107 @@ mod probe_args_tests {
         let unchanged = Docker::probe_args(&args(&["rm", "-f", "probe-3"]), "probe-9");
         assert_eq!(unchanged, args(&["rm", "-f", "probe-3"]));
     }
+
+    /// The sharing probe must not depend on the container runtime *starting* anything: a wedged
+    /// runtime answers `create` and refuses `start`, so a probe that used `run` would call a
+    /// perfectly readable directory unreadable and refuse the launch for the wrong reason. The
+    /// bind mount still has to be declared, because that is what makes the host directory visible
+    /// to the daemon's own `cp`.
+    #[test]
+    fn the_sharing_probe_never_starts_a_container() {
+        let argv = Docker::sharing_probe_create_args(
+            "deepsand/runtime:tag",
+            Path::new("C:/Users/05L1/Projects/WebSLC-Site"),
+            "deepsand-sharing-1",
+        );
+        assert_eq!(argv.first().map(String::as_str), Some("create"));
+        assert!(
+            !argv.iter().any(|arg| arg == "run" || arg == "start"),
+            "nothing may start a container: {argv:?}"
+        );
+        assert!(argv.contains(&"deepsand-sharing-1".to_string()), "named so it can be removed");
+        assert!(
+            argv.iter()
+                .any(|arg| arg == "C:/Users/05L1/Projects/WebSLC-Site:/deepsand-probe:ro"),
+            "the host directory has to be bind-mounted: {argv:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod engine_restart_tests {
+    use super::*;
+
+    /// The distro is named, never `wsl --shutdown`: the recovery must not take down every
+    /// other distro the operator is using, and a distro the engine does not use is not ours
+    /// to end.
+    #[test]
+    fn the_wsl_step_terminates_only_the_docker_distro() {
+        let steps = engine_restart_plan(true);
+        assert_eq!(
+            steps,
+            vec![
+                EngineRestartStep::StopDockerDesktop,
+                EngineRestartStep::TerminateWslDistro("docker-desktop"),
+                EngineRestartStep::StartDockerDesktop,
+            ]
+        );
+        assert!(
+            !format!("{steps:?}").to_lowercase().contains("shutdown"),
+            "`wsl --shutdown` would end every distro, not just the engine's"
+        );
+    }
+
+    /// The distro is ended between a clean stop and a start: `docker desktop restart` alone
+    /// reuses a running distro, and that is the distro that stays wedged.
+    #[test]
+    fn the_windows_plan_stops_before_it_terminates_and_starts_after() {
+        let steps = engine_restart_plan(true);
+        let stop = steps.iter().position(|step| *step == EngineRestartStep::StopDockerDesktop);
+        let kill = steps
+            .iter()
+            .position(|step| matches!(step, EngineRestartStep::TerminateWslDistro(_)));
+        let start = steps.iter().position(|step| *step == EngineRestartStep::StartDockerDesktop);
+        assert!(
+            stop < kill && kill < start,
+            "stop, terminate, start -- in that order: {steps:?}"
+        );
+    }
+
+    /// Nowhere else is there a WSL distro to end, so one restart is the whole plan.
+    #[test]
+    fn a_platform_without_wsl_just_restarts_docker_desktop() {
+        assert_eq!(
+            engine_restart_plan(false),
+            vec![EngineRestartStep::RestartDockerDesktop]
+        );
+    }
+
+    /// `wsl -l -q` is UTF-16LE, so the search is done on decoded text, not on the raw bytes.
+    #[test]
+    fn the_docker_distro_is_found_in_a_utf16_listing() {
+        let listing = "Ubuntu\ndocker-desktop\ndocker-desktop-data\n";
+        let mut bytes = Vec::new();
+        for unit in listing.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        assert_eq!(decode_utf16le(&bytes), listing);
+        assert_eq!(
+            docker_distro_from_listing(&decode_utf16le(&bytes)).as_deref(),
+            Some("docker-desktop")
+        );
+    }
+
+    /// Docker Desktop can run in its own LinuxKit VM with no WSL at all, and the operator's
+    /// own distros are never Docker's to end. Both are "nothing to terminate".
+    #[test]
+    fn a_listing_without_a_docker_distro_has_nothing_to_terminate() {
+        assert_eq!(docker_distro_from_listing("Ubuntu\nDebian\n"), None);
+        assert_eq!(docker_distro_from_listing(""), None);
+        // A `wsl` that predates WSL2 prints a usage message on stderr and exits non-zero,
+        // so this never sees it -- but garbage must not look like a distro either.
+        assert_eq!(docker_distro_from_listing(&decode_utf16le(b"garbage")), None);
+    }
 }
 /// What the image for a set of settings currently is.
 ///
@@ -1984,7 +2260,65 @@ mod image_state_tests {
         assert!(!Docker::cancel_superseded("", "img"));
     }
 }
-fn wait_bounded(
+/// The WSL2 distro Docker Desktop's engine runs in, if this machine has one.
+///
+/// Docker Desktop is not always WSL-backed: on Windows it can run in its own LinuxKit VM
+/// instead, and then there is no distro to end. `wsl -l -q` fails outright on a `wsl` that
+/// predates WSL2, which is the same answer -- nothing to terminate -- and its output is
+/// UTF-16LE, so it is decoded before it is searched.
+fn docker_wsl_distro() -> Option<String> {
+    let mut cmd = bare_command(Path::new("wsl"));
+    cmd.args(["-l", "-q"]);
+    let output = wait_bounded(cmd, ENGINE_RESTART_STEP_TIMEOUT).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    docker_distro_from_listing(&decode_utf16le(&output.stdout))
+}
+
+/// The docker distro's name in `wsl -l -q` output, if it is listed.
+///
+/// Only a distro whose name begins with `docker-desktop` is Docker's own; an operator's
+/// Ubuntu or Debian distro is theirs, and is never ended.
+fn docker_distro_from_listing(listing: &str) -> Option<String> {
+    listing
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("docker-desktop"))
+        .map(str::to_string)
+}
+
+/// `wsl.exe` writes UTF-16 little-endian, often with a byte-order mark.
+fn decode_utf16le(bytes: &[u8]) -> String {
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    String::from_utf16_lossy(&units).replace('\u{feff}', "")
+}
+
+/// A command with no console window and no stdin.
+///
+/// The docker CLI, the `wsl` it needs for a restart, and the host's git are all spawned by a
+/// GUI app on Windows, where a child process without this flag flashes a console window.
+pub(crate) fn bare_command(program: &Path) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.stdin(Stdio::null());
+    cmd
+}
+
+/// Run a child with a deadline, killing it if it outlives one.
+///
+/// `pub(crate)` so a git clone gets the same bound this gives every docker command: a GUI has
+/// no terminal to interrupt a child that has stopped answering, so the deadline is the only
+/// thing that ends one.
+pub(crate) fn wait_bounded(
     mut cmd: Command,
     limit: std::time::Duration,
 ) -> std::result::Result<std::process::Output, String> {

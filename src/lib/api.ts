@@ -21,6 +21,7 @@ import type {
   DeepCodeMode,
   DockerStatus,
   EffortView,
+  GitImportResult,
   GrantView,
   ModelView,
   NetworkPolicy,
@@ -61,6 +62,18 @@ export const EVENTS = {
 
 export const appInfo = () => call<AppInfo>("app_info");
 export const dockerStatus = () => call<DockerStatus>("docker_status");
+
+/**
+ * Restart Docker's engine, ending the WSL2 distro it runs in on Windows, and wait until a
+ * container can start again.
+ *
+ * The operator's explicit action: it ends every container on this machine, including every
+ * other project's sandbox, so `confirmed` travels with the call rather than being assumed by
+ * the backend. Desktop-only — a remote client cannot reach it.
+ */
+export const restartDockerRuntime = () =>
+  call<void>("restart_docker_runtime", { confirmed: true });
+
 export const startupError = () => call<string | null>("startup_error");
 export const revealDataDir = () => call<string>("reveal_data_dir");
 
@@ -177,7 +190,34 @@ export const listProjects = () => call<ProjectView[]>("list_projects");
 export const getProject = (projectId: string) => call<ProjectView>("get_project", { projectId });
 export const createProject = (name: string, rootDir: string) =>
   call<ProjectView>("create_project", { name, rootDir });
+
+/**
+ * Clone a repository and make the cloned folder a project.
+ *
+ * The clone runs on the host with the machine's own git credentials first; `username`/`secret`
+ * are only sent when that was refused, and they are used for the one clone rather than saved.
+ */
+export const importGitProject = (args: {
+  url: string;
+  parentDir: string;
+  name?: string;
+  username?: string;
+  secret?: string;
+}) => call<GitImportResult>("import_git_project", args);
+
 export const deleteProject = (projectId: string) => call<void>("delete_project", { projectId });
+
+/** Move a project to an index in the sidebar. The reordered list comes back. */
+export const moveProject = (projectId: string, toIndex: number) =>
+  call<ProjectView[]>("move_project", { projectId, toIndex });
+
+/** Open a project's working directory in the machine's file manager. */
+export const revealProjectDir = (projectId: string) =>
+  call<void>("reveal_project_dir", { projectId });
+
+/** Open one shared directory in the machine's file manager. */
+export const revealGrantDir = (projectId: string, grantId: string) =>
+  call<void>("reveal_grant_dir", { projectId, grantId });
 
 export interface ProjectUpdate {
   /** Start this project again when Deepsand starts. */

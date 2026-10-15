@@ -391,11 +391,17 @@ pub fn requirement(command: &str) -> Option<(Capability, Option<&'static str>)> 
         "build_runtime_image" => (ChangeSecurity, None),
         "cleanup_orphans" => (ChangeSecurity, None),
         // Deliberately absent rather than gated:
-        //  * `reveal_data_dir` opens a folder window on the host, which means
-        //    nothing to a remote client and would act on the wrong machine.
+        //  * `reveal_data_dir`, `reveal_project_dir` and `reveal_grant_dir` open a
+        //    folder window on the host, which means nothing to a remote client and
+        //    would act on the wrong machine.
         //  * the remote-access configuration commands are desktop-only, so a
         //    stolen token cannot extend its own reach or rotate itself away from
         //    the operator.
+        //  * `restart_docker_runtime` ends every container on the host, which is a
+        //    power no remote client has any business holding.
+        //  * `import_git_project` clones onto the host's filesystem and takes a
+        //    credential, which a remote client has no business handing over.
+        //  * `move_project` only changes the order of the local sidebar.
         _ => return None,
     })
 }

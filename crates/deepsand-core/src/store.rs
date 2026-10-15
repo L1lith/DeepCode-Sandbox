@@ -477,6 +477,26 @@ fn migrate(state: &mut StoreDocument) {
         Ok(())
     }
 
+    /// Move a project to a new position in the sidebar.
+    ///
+    /// The drawn order *is* the order of the stored array, so this is a splice of that array and
+    /// nothing else -- there is no separate position field that could drift out of step with
+    /// what is on screen, and an older build reads the reordered file exactly as it reads any
+    /// other. `to_index` is the index the project should end up at; it is clamped to the end
+    /// rather than refused, because a drop past the last row means "last".
+    pub fn move_project(&mut self, id: &str, to_index: usize) -> Result<()> {
+        let from = self
+            .state
+            .projects
+            .iter()
+            .position(|p| p.id == id)
+            .ok_or_else(|| SandboxError::ProjectNotFound(id.to_string()))?;
+        let project = self.state.projects.remove(from);
+        let to = to_index.min(self.state.projects.len());
+        self.state.projects.insert(to, project);
+        self.save()
+    }
+
     /// Per-project scratch space: spools, generated config, snapshots.
     pub fn project_dir(&self, project_id: &str) -> PathBuf {
         self.data_dir.join("projects").join(project_id)
@@ -1345,5 +1365,83 @@ mod durability_tests {
         let after = std::fs::read_to_string(dir.join("state.json.bak")).unwrap();
         assert_eq!(after, good, "the rolling backup must survive a substitute");
         assert!(dir.join("state.json").exists(), "and the app must still write its own file");
+    }
+}
+
+/// The sidebar's order is the stored array's order, so these are claims about that array —
+/// including the one that matters after a restart: the order survives being written and read.
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("deepsand-order-{name}-{}", crate::now_ms()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// Outside the data directory: the path guards refuse a workspace that overlaps it.
+    fn workspace(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("deepsand-order-ws-{name}-{}", crate::now_ms()));
+        std::fs::create_dir_all(&dir).expect("workspace");
+        dir
+    }
+
+    fn ids(store: &Store) -> Vec<String> {
+        store.projects().iter().map(|p| p.id.clone()).collect()
+    }
+
+    #[test]
+    fn moving_a_project_changes_the_stored_order_and_survives_a_reload() {
+        let dir = scratch("round-trip");
+        let mut store = Store::load(&dir).expect("store");
+        let a = store.create_project("a", &workspace("a").to_string_lossy()).unwrap();
+        let b = store.create_project("b", &workspace("b").to_string_lossy()).unwrap();
+        let c = store.create_project("c", &workspace("c").to_string_lossy()).unwrap();
+        assert_eq!(ids(&store), vec![a.id.clone(), b.id.clone(), c.id.clone()]);
+
+        store.move_project(&a.id, 2).expect("a to the end");
+        assert_eq!(ids(&store), vec![b.id.clone(), c.id.clone(), a.id.clone()]);
+
+        store.move_project(&c.id, 0).expect("c to the front");
+        assert_eq!(ids(&store), vec![c.id.clone(), b.id.clone(), a.id.clone()]);
+
+        let reloaded = Store::load(&dir).expect("reload");
+        assert_eq!(
+            ids(&reloaded),
+            vec![c.id, b.id, a.id],
+            "the order is the file's order, so it has to be the file's order after a restart"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn moving_past_the_end_lands_at_the_end_and_an_unknown_id_is_refused() {
+        let dir = scratch("clamp");
+        let mut store = Store::load(&dir).expect("store");
+        let a = store.create_project("a", &workspace("a").to_string_lossy()).unwrap();
+        let b = store.create_project("b", &workspace("b").to_string_lossy()).unwrap();
+
+        store.move_project(&a.id, 99).expect("a drop past the last row means last");
+        assert_eq!(ids(&store), vec![b.id.clone(), a.id.clone()]);
+
+        assert!(
+            store.move_project("no-such-project", 0).is_err(),
+            "an unknown id must be refused, not silently ignored"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn moving_a_project_to_where_it_already_is_changes_nothing() {
+        let dir = scratch("noop");
+        let mut store = Store::load(&dir).expect("store");
+        let a = store.create_project("a", &workspace("a").to_string_lossy()).unwrap();
+        let b = store.create_project("b", &workspace("b").to_string_lossy()).unwrap();
+
+        store.move_project(&a.id, 0).expect("move");
+        assert_eq!(ids(&store), vec![a.id, b.id]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

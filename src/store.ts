@@ -216,6 +216,22 @@ function scheduleDockerRetry() {
   }, 10_000);
 }
 
+/**
+ * Restart Docker's engine — including the WSL process it runs in — and refresh what the window
+ * knows about it.
+ *
+ * One implementation for the two surfaces that offer it (the status strip and the project
+ * pane's callout). Throws with the backend's own message when the runtime does not come back;
+ * a caller that had a launch in flight decides for itself whether to retry it, because only
+ * the caller knows that.
+ */
+export async function restartDocker(): Promise<void> {
+  await api.restartDockerRuntime();
+  // The backend has already dropped its `runtime_wedged` verdict, so this is what turns the
+  // status strip back to "Docker <version>" rather than leaving it on the refusal.
+  await refreshDockerStatus();
+}
+
 export async function refreshProjects() {
   const projects = await api.listProjects();
   setStore("projects", projects);
@@ -230,6 +246,49 @@ export async function refreshProjects() {
 export async function selectProject(projectId: string) {
   setStore("selectedId", projectId);
   await refreshProjectData(projectId);
+}
+
+/**
+ * Move a project to an index in the sidebar.
+ *
+ * Optimistic: the row lands where it was dropped at once, then the store's own answer replaces
+ * the list, so the drawn order is always the order the store holds. A refusal re-reads the list
+ * rather than leaving the guess standing.
+ */
+export async function moveProject(projectId: string, toIndex: number): Promise<void> {
+  const from = store.projects.findIndex((entry) => entry.id === projectId);
+  if (from >= 0 && from !== toIndex) {
+    setStore("projects", (list) => {
+      const next = [...list];
+      const [moved] = next.splice(from, 1);
+      next.splice(Math.min(Math.max(toIndex, 0), next.length), 0, moved);
+      return next;
+    });
+  }
+  try {
+    setStore("projects", await api.moveProject(projectId, toIndex));
+  } catch (error) {
+    toast("error", "Could not reorder the projects", describeError(error));
+    await refreshProjects();
+  }
+}
+
+/** Open a project's working directory in the machine's file manager. */
+export async function revealProjectDir(projectId: string): Promise<void> {
+  try {
+    await api.revealProjectDir(projectId);
+  } catch (error) {
+    toast("error", "Could not open the project folder", describeError(error));
+  }
+}
+
+/** Open one shared directory in the machine's file manager. */
+export async function revealGrantDir(projectId: string, grantId: string): Promise<void> {
+  try {
+    await api.revealGrantDir(projectId, grantId);
+  } catch (error) {
+    toast("error", "Could not open that folder", describeError(error));
+  }
 }
 
 /** Drop a host from the "blocked" list once the operator has allowed it. */

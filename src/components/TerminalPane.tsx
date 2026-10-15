@@ -16,7 +16,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import * as api from "../lib/api";
-import { attachTerminal, describeError, selectedProject, sessionOperation, store, toast } from "../store";
+import { attachTerminal, describeError, restartDocker, selectedProject, sessionOperation, store, toast } from "../store";
+import { RestartDockerControl } from "./RestartDocker";
 
 export function TerminalPane() {
   let host!: HTMLDivElement;
@@ -349,6 +350,31 @@ export function TerminalPane() {
     });
   }
 
+  /**
+   * Restart Docker's engine — including the WSL2 distro it runs in — and start the project
+   * again.
+   *
+   * The last resort for a wedged runtime, and the reason it is worth a button: `docker create`
+   * and `docker cp` keep answering while `docker start` hangs, so nothing done to the
+   * *containers* can help; only restarting the engine can. That ends every container on this
+   * machine, so it happens only after the operator confirms, and it re-runs the launch they
+   * were trying to do rather than leaving them to press Run again.
+   */
+  async function restartDockerAndRetry() {
+    const current = project();
+    if (!current) return;
+    await sessionOperation(current.id, async () => {
+      try {
+        await restartDocker();
+        await api.startSession(current.id, true);
+        toast("ok", `Restarted Docker and started ${current.name}`);
+        window.setTimeout(() => safeFit(), 120);
+      } catch (error) {
+        toast("error", "Could not restart Docker", describeError(error));
+      }
+    });
+  }
+
   /* ----------------------------------------------------------------------- */
   /* Attachments                                                             */
   /* ----------------------------------------------------------------------- */
@@ -536,7 +562,24 @@ export function TerminalPane() {
                       moments of every launch, when the question had not been asked. */}
                   <Show when={store.info?.docker && !store.info.docker.available}>
                     <div class="callout callout-danger">
-                      The Docker daemon is not reachable. Start Docker Desktop, then try again.
+                      <p>
+                        {store.info?.docker?.detail ||
+                          "The Docker daemon is not reachable. Start Docker Desktop, then try again."}
+                      </p>
+                      {/* Only Docker Desktop can be restarted this way. The daemon being
+                          wedged is one of the two states this shows, and `docker create`
+                          answering while `docker start` hangs is precisely the one a
+                          container-only fix cannot reach. */}
+                      <Show
+                        when={store.info?.docker?.desktop}
+                        fallback={<p class="hint">Start the Docker daemon, then try again.</p>}
+                      >
+                        <RestartDockerControl
+                          busy={busy()}
+                          confirmLabel="Restart Docker Desktop and retry"
+                          onConfirm={() => void restartDockerAndRetry()}
+                        />
+                      </Show>
                     </div>
                   </Show>
                   <Show
