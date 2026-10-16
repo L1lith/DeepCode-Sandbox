@@ -86,9 +86,21 @@ export function TerminalPane() {
     // Keep the PTY the same size as the pane. The observer covers the pane's own box
     // changing; the window listener covers the case the observer cannot see, such as
     // the pane being hidden and shown again while the window itself is resized.
-    const observer = new ResizeObserver(() => safeFit());
+    //
+    // Both go through one frame's worth of coalescing rather than fitting inside the observer's
+    // callback: the observer can fire several times for a single layout, and a fit performed
+    // inside that callback is itself a layout change being reported back to it.
+    let fitFrame: number | undefined;
+    const scheduleFit = () => {
+      if (fitFrame !== undefined) return;
+      fitFrame = window.requestAnimationFrame(() => {
+        fitFrame = undefined;
+        safeFit();
+      });
+    };
+    const observer = new ResizeObserver(() => scheduleFit());
     observer.observe(host);
-    const onWindowResize = () => safeFit();
+    const onWindowResize = () => scheduleFit();
     window.addEventListener("resize", onWindowResize);
 
     // Ctrl+V is taken over at the keystroke, not only at the paste event.
@@ -190,6 +202,7 @@ export function TerminalPane() {
 
     onCleanup(() => {
       window.cancelAnimationFrame(firstFit);
+      if (fitFrame !== undefined) window.cancelAnimationFrame(fitFrame);
       if (settle !== undefined) window.clearTimeout(settle);
       window.removeEventListener("resize", onWindowResize);
       host.removeEventListener("paste", onPaste, true);
@@ -212,38 +225,83 @@ export function TerminalPane() {
    */
   const RESIZE_SETTLE_MS = 120;
   let settle: number | undefined;
+  /** A fit changes layout, and the observer is watching that layout; this breaks the re-entry. */
+  let fitting = false;
 
+  /**
+   * Match the pane's box: xterm straight away, the sandbox once the box stops moving.
+   *
+   * Both halves do nothing when there is nothing to do, which is the point. A `fit()` against a
+   * box that has not changed still resizes and repaints xterm, and telling the sandbox a size it
+   * already has is not a no-op either: a full-screen TUI redraws everything it has when the
+   * terminal changes size. Re-fitting on every observer callback in that state is a redraw loop,
+   * and it looks like the session scrolling itself over and over -- too fast to read, and
+   * impossible to scroll up in, because the output never stops long enough for the viewport to
+   * stay where it was put.
+   */
   function safeFit() {
     if (!fit || !term || !host) return;
     // A hidden pane has no box, and fitting to zero produces a one-row terminal that
     // then has to be corrected. Doing nothing is correct: the resize observer fires
     // when the pane is shown again.
     if (host.clientWidth === 0 || host.clientHeight === 0) return;
+
+    const proposed = fit.proposeDimensions();
+    // xterm has not measured its character cell yet; there is no answer to act on.
+    if (!proposed) return;
+
+    if (proposed.rows !== term.rows || proposed.cols !== term.cols) {
+      if (!fitting) {
+        fitting = true;
+        try {
+          // Fitting straight away keeps the pane's own wrapping matched to its box while the
+          // drag is happening; only the size the sandbox hears about waits for the drag to stop.
+          fit.fit();
+        } catch {
+          /* the pane can be zero-sized during layout; nothing to do */
+        } finally {
+          fitting = false;
+        }
+      }
+    }
+
+    if (settle !== undefined) window.clearTimeout(settle);
+    settle = window.setTimeout(settleResize, RESIZE_SETTLE_MS);
+  }
+
+  /**
+   * Tell the sandbox the size the pane settled on.
+   *
+   * Sending a repeat is what this must not do -- see `safeFit` -- but the sandbox still has to be
+   * told once per genuine change, including after a restart, when the terminal it is talking to
+   * is a new one: the PTY is created at whatever size the start used, not this pane's.
+   */
+  function settleResize() {
+    settle = undefined;
+    if (!fit || !term || !host) return;
+    if (host.clientWidth === 0 || host.clientHeight === 0) return;
+
+    let changed = false;
     try {
-      // Fitting straight away keeps the pane's own wrapping matched to its box while the
-      // drag is happening; only the size the sandbox hears about waits for the drag to stop.
-      fit.fit();
+      const proposed = fit.proposeDimensions();
+      if (proposed && (proposed.rows !== term.rows || proposed.cols !== term.cols)) {
+        fit.fit();
+        changed = true;
+      }
     } catch {
       /* the pane can be zero-sized during layout; nothing to do */
+      return;
     }
-    if (settle !== undefined) window.clearTimeout(settle);
-    settle = window.setTimeout(() => {
-      settle = undefined;
-      if (!fit || !term || !host) return;
-      if (host.clientWidth === 0 || host.clientHeight === 0) return;
-      try {
-        fit.fit();
-        // Painting the whole viewport again clears the half-wrapped lines a shrink leaves
-        // behind: xterm keeps them until something asks it to draw that part of the buffer.
-        term.refresh(0, Math.max(0, term.rows - 1));
-        const current = project();
-        if (current) {
-          void api.resizeSession(current.id, term.rows, term.cols).catch(() => undefined);
-        }
-      } catch {
-        /* the pane can be zero-sized during layout; nothing to do */
-      }
-    }, RESIZE_SETTLE_MS);
+    if (changed) {
+      // Painting the whole viewport again clears the half-wrapped lines a shrink leaves
+      // behind: xterm keeps them until something asks it to draw that part of the buffer.
+      term.refresh(0, Math.max(0, term.rows - 1));
+    }
+    const current = project();
+    if (!current) return;
+    // The backend drops a size the terminal already has, so this is one call per settle even
+    // when nothing moved -- and a call that costs a compare when it is a repeat.
+    void api.resizeSession(current.id, term.rows, term.cols).catch(() => undefined);
   }
 
   // Re-attach when the selected project changes, clearing the old buffer.

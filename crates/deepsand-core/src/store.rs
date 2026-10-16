@@ -442,6 +442,10 @@ fn migrate(state: &mut StoreDocument) {
             // tracking the catalogue: adding a utility to the defaults should reach
             // every project that never expressed an opinion about tools.
             tools: None,
+            // A new project follows the app-wide prompt, which is what makes setting one
+            // app-wide take effect everywhere rather than everywhere-but-new-projects.
+            user_prompt_mode: UserPromptMode::default(),
+            user_prompt: String::new(),
         };
 
         self.state.grants.insert(project.id.clone(), Vec::new());

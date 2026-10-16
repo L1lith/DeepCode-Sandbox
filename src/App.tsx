@@ -276,6 +276,14 @@ export default function App() {
             <div class="brand">
               <h1>Deepsand</h1>
               <span>v{store.info?.version ?? "?"}</span>
+              {/* Which kind of build this is, beside the version, so a screenshot carries it too.
+                  A local build shares one data directory with the installed app, and nothing else
+                  on screen tells the two apart. */}
+              <Show when={store.info?.dev}>
+                <span class="dev-badge" title="A local build, not a released one">
+                  dev mode
+                </span>
+              </Show>
             </div>
             <p class="brand-tagline">
               DeepCode runs inside a container that can only see the project you choose.
@@ -336,6 +344,13 @@ export default function App() {
                       </Show>
                       <Show when={entry.pendingRequests > 0}>
                         <span class="badge badge-danger">{entry.pendingRequests} asking</span>
+                      </Show>
+                      {/* Held while a dialog is open: the sandbox is frozen, so "running" would
+                          otherwise be the only thing this row said about it. */}
+                      <Show when={entry.paused}>
+                        <span class="badge badge-warn">
+                          <span class="dot" /> held
+                        </span>
                       </Show>
                     </div>
                     <div class="path" title={entry.rootDir}>

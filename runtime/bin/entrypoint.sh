@@ -46,6 +46,10 @@ NETFILTER_OPTIONAL="${DEEPSAND_NETFILTER_OPTIONAL:-0}"
 HOME_DIR=/home/deepcode
 DEEPCODE_DIR="$HOME_DIR/.deepcode"
 REQUESTS_DIR=/deepsand/ipc/requests
+# The directory name of the generated skill below. Shared with
+# settings::OPERATOR_SKILL_NAME in deepsand-core, and a test compares the two, because a skill is
+# discovered by its directory and a mismatch would fail silently.
+OPERATOR_SKILL_NAME=deepsand-operator-instructions
 
 log()  { printf '[deepsand] %s\n' "$*" >&2; }
 warn() { printf '[deepsand] WARNING: %s\n' "$*" >&2; }
@@ -153,6 +157,29 @@ if [ -f /etc/deepsand/AGENTS.md ]; then
   fi
 else
   warn "/etc/deepsand/AGENTS.md is absent; DeepCode will not receive its standing instructions"
+fi
+
+# The same instructions again, as a skill, when the project ships an `AGENTS.md` of its own.
+#
+# That is not a duplicate: DeepCode reads `<project>/AGENTS.md` or `<project>/.deepcode/AGENTS.md`
+# when either exists and only falls back to the file installed above, so in a repository that has
+# one the file above is never read at all. A skill has no such precedence, and skills are matched
+# from their description on every prompt. The host writes this one only in exactly that case.
+#
+# It goes under $DEEPCODE_DIR rather than $HOME/.agents (where the image's own skills live) because
+# this is generated per project at start time and the rootfs is read-only: $DEEPCODE_DIR is the
+# writable volume. That volume survives the container, so the directory is *removed first* every
+# time -- otherwise a prompt the operator has since turned off would go on instructing the model,
+# out of a file nobody would think to look at.
+SKILL_DIR="$DEEPCODE_DIR/skills/$OPERATOR_SKILL_NAME"
+rm -rf "$SKILL_DIR" 2>/dev/null || true
+if [ -f "/etc/deepsand/skills/$OPERATOR_SKILL_NAME/SKILL.md" ]; then
+  if mkdir -p "$SKILL_DIR" &&
+    place_file "/etc/deepsand/skills/$OPERATOR_SKILL_NAME/SKILL.md" "$SKILL_DIR/SKILL.md" 0644; then
+    log "installed the $OPERATOR_SKILL_NAME skill"
+  else
+    warn "could not install the $OPERATOR_SKILL_NAME skill; the operator's own instructions may not reach the model"
+  fi
 fi
 
 # Hand the directory over to the sandbox user now that the writes are done.

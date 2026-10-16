@@ -782,6 +782,8 @@ mod tests {
             notes: String::new(),
             reasoning_effort: Default::default(),
             tools: None,
+            user_prompt_mode: Default::default(),
+            user_prompt: String::new(),
         };
         let sandbox = crate::settings::build_sandbox_snapshot(
             &project,
@@ -789,6 +791,7 @@ mod tests {
             &project.network,
             vec!["req_open_1".into()],
             vec!["note".into()],
+            &Default::default(),
         );
         let grants = crate::settings::build_grants_snapshot(&project, &[]);
         fixture.broker.write_snapshots(&sandbox, &grants).unwrap();
@@ -825,6 +828,8 @@ mod tests {
             notes: String::new(),
             reasoning_effort: Default::default(),
             tools: None,
+            user_prompt_mode: Default::default(),
+            user_prompt: String::new(),
         };
         let mut sandbox = crate::settings::build_sandbox_snapshot(
             &project,
@@ -832,6 +837,7 @@ mod tests {
             &project.network,
             vec!["req_open_1".into()],
             vec!["note".into()],
+            &Default::default(),
         );
         // Something only the running image knows, which a rebuilt snapshot would lose.
         sandbox.image = "deepsand/runtime:0.1.0-tabc-rev".into();

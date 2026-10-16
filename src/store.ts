@@ -389,6 +389,13 @@ export async function sessionOperation(
 
   try {
     await run();
+  } catch (error) {
+    // A session operation that failed is exactly when the daemon's health may have changed, and the
+    // only thing that shows the restart control is the status probe. Without this the window kept a
+    // stale "Docker is fine" and a start that failed because the runtime stopped answering left an
+    // error box with nothing to press beside it.
+    void refreshDockerStatus();
+    throw error;
   } finally {
     releaseSession(projectId);
   }

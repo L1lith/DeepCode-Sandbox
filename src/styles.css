@@ -110,6 +110,17 @@ pre,
   font-size: 0.75rem;
 }
 
+/* Beside the version, and quieter than it: a fact about the binary, not a warning. */
+.brand .dev-badge {
+  padding: 0.05rem 0.4rem;
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  border-radius: 999px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 0.68rem;
+  letter-spacing: 0.01em;
+}
+
 .brand-tagline {
   margin: 0.35rem 0 0.75rem;
   color: var(--text-dim);
@@ -566,6 +577,23 @@ th.folder-cell {
 .field .hint {
   font-size: 0.74rem;
   color: var(--text-faint);
+}
+
+/* What "Global" will send, shown rather than named. The operator has to be able to see that the
+   app-wide prompt is empty, because otherwise "Global" quietly means "nothing". */
+.prompt-preview {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 8rem;
+  overflow-y: auto;
+  padding: 0.4rem 0.55rem;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  line-height: 1.45;
 }
 
 input[type="text"],
@@ -1539,19 +1567,21 @@ div:has(> .mode-segment) {
   min-width: 0;
 }
 
-/* The selected state of the network control is one element that slides, not four buttons taking
-   turns looking pressed. Later rules win, so these override the first pass at this control. */
+/* The selected state of a segmented control is one element that slides, not N buttons taking turns
+   looking pressed. Later rules win, so these override the first pass at this control. */
 .mode-slider {
   position: relative;
   display: flex;
 }
 
+/* One segment wide, however many there are: the control carries its own count, so the network
+   modes (four) and the user-prompt modes (three) share this rule instead of a width each. */
 .mode-thumb {
   position: absolute;
   top: 0;
   bottom: 0;
   left: 0;
-  width: 25%;
+  width: calc(100% / var(--segments, 4));
   border-radius: 7px;
   background: var(--accent-soft);
   box-shadow: inset 0 -2px 0 var(--accent);

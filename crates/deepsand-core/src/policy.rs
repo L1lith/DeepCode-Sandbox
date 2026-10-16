@@ -791,6 +791,8 @@ mod tests {
                 notes: String::new(),
                 reasoning_effort: Default::default(),
                 tools: None,
+                user_prompt_mode: Default::default(),
+                user_prompt: String::new(),
             };
 
             Self {

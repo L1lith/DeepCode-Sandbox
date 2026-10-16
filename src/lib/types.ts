@@ -19,6 +19,14 @@ export type NetworkPolicy =
 
 export type DeepCodeMode = "allow_all" | "strict";
 
+/**
+ * Where a project's standing instructions come from.
+ *
+ * Three answers rather than a flag beside a string: "use the app-wide one", "use mine" and "send
+ * none" are three different intentions, and only `custom` needs a text box.
+ */
+export type UserPromptMode = "global" | "custom" | "off";
+
 export type CredentialSource = "inherit_host" | "project";
 
 export interface Credentials {
@@ -133,6 +141,12 @@ export interface ToolView {
   unavailableReason: string | null;
   /** Hosts the tool opens in the network filter while it is on. */
   hosts: string[];
+  /**
+   * What turning this on costs, when that is more than a moment: the browser is most of a
+   * gigabyte and a couple of minutes of building. Null for the tools whose cost is not worth a
+   * sentence, which is all but two of them.
+   */
+  costNote: string | null;
   /**
    * The base image the tool needs.
    *
@@ -269,6 +283,17 @@ export interface AppSettings {
   close_to_tray: boolean;
   /** Whether Deepsand may ask the registries about cached tools. On by default. */
   check_tool_updates: boolean;
+  /**
+   * Standing instructions for every project that has not overridden them.
+   *
+   * Sent to the model before anybody types anything, in each project whose own mode is `global`.
+   * Empty means nothing is sent.
+   *
+   * Optional, and that is not a detail: the backend skips it when it is empty, like every other
+   * empty string it stores, so a window that renders it directly shows the literal word
+   * "undefined" in the text box. Read it as `?? ""`.
+   */
+  user_prompt?: string;
 }
 
 export interface ProjectView {
@@ -285,10 +310,19 @@ export interface ProjectView {
   deepcodeMode: DeepCodeMode;
   allowedRoots: string[];
   notes: string;
+  /** Where this project's standing instructions come from. */
+  userPromptMode: UserPromptMode;
+  /** This project's own instructions, used when the mode is `custom`. */
+  userPrompt: string;
   /** Whether the sandbox may ask for permissions at all. On unless turned off. */
   requestsEnabled: boolean;
   containerName: string;
   running: boolean;
+  /**
+   * Whether Deepsand has this project's sandbox frozen, which it does while a permission dialog
+   * is open so the agent cannot work ahead of the decision.
+   */
+  paused: boolean;
   workspaceExists: boolean;
   grantCount: number;
   pendingRequests: number;
@@ -345,6 +379,8 @@ export interface DockerStatus {
 
 export interface AppInfo {
   version: string;
+  /** Whether this binary is a local build rather than a release. Shown beside the version. */
+  dev: boolean;
   dataDir: string;
   /**
    * `null` until the window has asked (`dockerStatus()`), which it does once it is up.

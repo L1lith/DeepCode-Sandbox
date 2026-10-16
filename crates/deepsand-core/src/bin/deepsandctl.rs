@@ -527,6 +527,7 @@ fn build_plan(store: &Store, project: &Project, resume: bool, offline: bool) -> 
         &project.network,
         broker.open_request_ids(),
         resolved.warnings.clone(),
+        store.settings(),
     );
     let grants_snapshot = container_settings::build_grants_snapshot(project, &grants);
 
@@ -537,9 +538,10 @@ fn build_plan(store: &Store, project: &Project, resume: bool, offline: bool) -> 
         &store.config_dir(&project.id),
         &store.state_dir(&project.id),
         &settings_json,
-        &container_settings::build_agents_md(project, &grants, &project.network, &resolved),
+        &container_settings::build_agents_md(project, &grants, &project.network, &resolved, store.settings()),
         &sandbox,
         &grants_snapshot,
+        container_settings::operator_skill(project, store.settings()).as_deref(),
     )?;
 
     let seccomp = seccomp_path(store);

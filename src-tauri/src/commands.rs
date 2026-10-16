@@ -88,6 +88,7 @@ pub fn app_info_impl(state: &AppState) -> CmdResult<AppInfo> {
     // and the status strip says so until then rather than claiming the daemon is down.
     Ok(AppInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
+        dev: cfg!(debug_assertions),
         data_dir: data_dir.display().to_string(),
         docker: None,
         host_config: credentials::describe_host_config(&credentials::read_host_config()),
@@ -109,10 +110,37 @@ pub async fn docker_status(app: AppHandle) -> CmdResult<DockerStatus> {
     .map_err(|err| format!("the docker check could not be completed: {err}"))?
 }
 
+/// What the window is told while a wedge is remembered.
+///
+/// The words matter twice over: this is the sentence in the callout, and `available: false` is what
+/// makes the callout appear at all. A start that found Docker unwell records the verdict here
+/// (`runtime_wedged`) rather than restarting anything itself, and this is how the operator ends up
+/// with a restart button instead of a dead end.
+pub const WEDGED_DETAIL: &str =
+    "Docker Desktop is running, but its container runtime is not answering. Restart Docker Desktop.";
+
+/// Lay the remembered verdict over whatever the daemon says.
+///
+/// Pure, and separate from the probing that fills `status` in, so the mapping the restart button
+/// depends on is testable without a daemon: `available: false` is the condition the window keys on,
+/// and `desktop` has to survive -- the button is only offered when Docker Desktop is what is
+/// running, which is exactly the case a remembered wedge is about.
+fn status_with_verdict(status: DockerStatus, wedged: bool) -> DockerStatus {
+    if wedged {
+        DockerStatus {
+            available: false,
+            detail: WEDGED_DETAIL.to_string(),
+            ..status
+        }
+    } else {
+        status
+    }
+}
+
 pub fn docker_status_impl(state: &AppState) -> CmdResult<DockerStatus> {
 
     let image = store(&state).settings().image.clone();
-    let mut status = match state.docker() {
+    let status = match state.docker() {
         Ok(docker) => docker.probe(&image),
         Err(err) => DockerStatus {
             available: false,
@@ -120,13 +148,10 @@ pub fn docker_status_impl(state: &AppState) -> CmdResult<DockerStatus> {
             ..DockerStatus::default()
         },
     };
-    if state.runtime_wedged.load(std::sync::atomic::Ordering::SeqCst) {
-        status.available = false;
-        status.detail =
-            "Docker Desktop is running, but its container runtime is not answering. Restart Docker Desktop."
-                .to_string();
-    }
-    Ok(status)
+    Ok(status_with_verdict(
+        status,
+        state.runtime_wedged.load(std::sync::atomic::Ordering::SeqCst),
+    ))
 }
 
 /// The status the watcher uses, which may be expensive where the window's may not.
@@ -166,7 +191,8 @@ fn project_view(state: &impl AsAppState, project: &Project) -> ProjectView {
         .into_iter()
         .filter(|request| request.project == project.id)
         .count();
-    ProjectView::new(project, running, grant_count, pending)
+    let paused = state.app_state().is_frozen(&project.id);
+    ProjectView::new(project, running, paused, grant_count, pending)
 }
 
 #[tauri::command]
@@ -322,7 +348,7 @@ pub fn import_git_project_impl(
 }
 
 #[tauri::command]
-pub fn update_project_settings(state: State<'_, AppState>, project_id: String, network: Option<NetworkPolicy>, limits: Option<ResourceLimits>, deepcode_mode: Option<DeepCodeMode>, notes: Option<String>, credentials: Option<Credentials>, resume_on_launch: Option<bool>) -> CmdResult<ProjectView> {
+pub fn update_project_settings(state: State<'_, AppState>, project_id: String, network: Option<NetworkPolicy>, limits: Option<ResourceLimits>, deepcode_mode: Option<DeepCodeMode>, notes: Option<String>, credentials: Option<Credentials>, resume_on_launch: Option<bool>, user_prompt_mode: Option<UserPromptMode>, user_prompt: Option<String>) -> CmdResult<ProjectView> {
     update_project_settings_impl(
         &state,
         project_id,
@@ -332,10 +358,12 @@ pub fn update_project_settings(state: State<'_, AppState>, project_id: String, n
         notes,
         credentials,
         resume_on_launch,
+        user_prompt_mode,
+        user_prompt,
     )
 }
 
-pub fn update_project_settings_impl(state: &AppState, project_id: String, network: Option<NetworkPolicy>, limits: Option<ResourceLimits>, deepcode_mode: Option<DeepCodeMode>, notes: Option<String>, credentials: Option<Credentials>, resume_on_launch: Option<bool>) -> CmdResult<ProjectView> {
+pub fn update_project_settings_impl(state: &AppState, project_id: String, network: Option<NetworkPolicy>, limits: Option<ResourceLimits>, deepcode_mode: Option<DeepCodeMode>, notes: Option<String>, credentials: Option<Credentials>, resume_on_launch: Option<bool>, user_prompt_mode: Option<UserPromptMode>, user_prompt: Option<String>) -> CmdResult<ProjectView> {
 
     let mut store = store(&state);
     {
@@ -357,6 +385,15 @@ pub fn update_project_settings_impl(state: &AppState, project_id: String, networ
         }
         if let Some(credentials) = credentials {
             project.credentials = credentials;
+        }
+        // Both or neither: the mode decides whether the text is sent, so the window sends them
+        // together when it moves the control. Stored even when the mode is not `Custom`, so a
+        // project's own text survives a trip through `Global`.
+        if let Some(mode) = user_prompt_mode {
+            project.user_prompt_mode = mode;
+        }
+        if let Some(prompt) = user_prompt {
+            project.user_prompt = prompt;
         }
     }
     store.save().map_err(fail)?;
@@ -740,6 +777,7 @@ fn prepare_plan(
         &project.network,
         broker.open_request_ids(),
         resolved.warnings.clone(),
+        &app_settings,
     );
 
     // The snapshot describes the *image*, not the settings that asked for it. Those can
@@ -804,9 +842,10 @@ fn prepare_plan(
         &config_dir,
         &state_dir,
         &settings_json,
-        &container_settings::build_agents_md(&project, &grants, &project.network, &resolved),
+        &container_settings::build_agents_md(&project, &grants, &project.network, &resolved, &app_settings),
         &sandbox,
         &grants_snapshot,
+        container_settings::operator_skill(&project, &app_settings).as_deref(),
     )
     .map_err(fail)?;
 
@@ -1202,10 +1241,17 @@ if !docker.image_present(&launch.image) {
         });
     }
 
-        // Can the container runtime start a container at all? `docker version` answers even while
+    // Can the container runtime start a container at all? `docker version` answers even while
     // `docker run` hangs, so this is the only honest test of the wedge -- and it belongs here,
     // after the image is known to exist, because a probe against a missing image would blame
     // the runtime for a missing image.
+    //
+    // The verdict is *remembered* rather than acted on: it is what makes `docker_status` say the
+    // runtime is not answering, which is what puts the window's restart control in front of the
+    // operator. Restarting Docker Desktop is the operator's call and not the app's -- it ends every
+    // container on the machine, including work that has nothing to do with Deepsand -- and the
+    // button that does it also retries this start. `docker_status_watched` clears the verdict by
+    // itself if the runtime recovers on its own.
     if let Err(reason) = docker.runtime_check(&launch.image) {
         state.app_state().runtime_wedged.store(true, std::sync::atomic::Ordering::SeqCst);
         return Err(format!(
@@ -1327,6 +1373,17 @@ let mut restricted_proxy: Option<(deepsand_core::policy::ProxyEndpoint, String)>
         let dir = std::path::PathBuf::from(&mount.source);
         let check = docker.check_host_sharing(&dir, &plan.image);
         if !check.ok {
+            // A probe nobody answered is the sticky unhealthy state, not a directory problem:
+            // recording it here is what makes the window show the restart control, instead of
+            // leaving the operator with a sentence about file sharing and nothing to press.
+            // `docker_status_watched` keeps re-checking, so it clears itself when Docker recovers,
+            // and the button retries this start once the operator has pressed it.
+            if check.unanswered {
+                state
+                    .app_state()
+                    .runtime_wedged
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             return Err(format!(
                 "The {:?} directory {} cannot be read by a container.\n\n{}",
                 mount.kind,
@@ -1554,6 +1611,23 @@ Session::spawn(
 impl AppState {
     /// Stop a session without going through the webview. Also idempotent.
     pub fn stop_session_internal(&self, project_id: &str) {
+        // Thaw before anything else. A frozen container refuses everything -- `docker exec` is
+        // refused outright, and the removal below is the one step that has to work whatever state
+        // the sandbox was left in. Done here rather than left to `remove_container` so the agent
+        // is running again for the moments between the thaw and the teardown, which is when a
+        // granted request's answer is still being delivered to it.
+        if self.clear_frozen(project_id) {
+            if let Ok(docker) = self.docker() {
+                let name = self
+                    .store
+                    .lock()
+                    .ok()
+                    .and_then(|store| store.project(project_id).ok().map(|p| p.container_name()));
+                if let Some(name) = name {
+                    docker.unpause_container(&name);
+                }
+            }
+        }
         if let Some(mut live) = self.sessions.lock().unwrap().remove(project_id) {
             live.session.kill();
         }
@@ -1674,10 +1748,14 @@ fn auto_refusal(
     project_id: &str,
     request: &PermissionRequest,
 ) -> Option<(String, &'static str)> {
-    let (project, grants) = {
+    let (project, grants, settings) = {
         let state = app.state::<AppState>();
         let store = state.store.lock().ok()?;
-        (store.project(project_id).ok()?.clone(), store.grants(project_id))
+        (
+            store.project(project_id).ok()?.clone(),
+            store.grants(project_id),
+            store.settings().clone(),
+        )
     };
 
     if !project.requests_enabled {
@@ -1693,6 +1771,7 @@ fn auto_refusal(
         &project.network,
         Vec::new(),
         Vec::new(),
+        &settings,
     );
     deepsand_core::covered::already_covered(request, Path::new(&project.root_dir), &snapshot)
         .map(|covered| (covered.message, "already covered"))
@@ -2203,6 +2282,61 @@ async fn restart_after_grant(app: AppHandle, project_id: String) {
     let _ = start_session(app.clone(), state, project_id, Some(true), None).await;
 }
 
+/// Freeze the project's sandbox while a permission dialog is open, and thaw it once there is
+/// nothing left to decide.
+///
+/// This is the whole point of the freeze: the agent cannot run, so it cannot work ahead on an
+/// answer the operator has not given. What bounds it is DeepCode's own MCP budget -- an MCP
+/// `tools/call` is capped at 60 s, and a `docker pause` freezes processes rather than the clock,
+/// so a decision that takes longer than that ends the tool call the agent was waiting on. The
+/// agent is not left in the dark by that: `deepsand_list_requests` collects the decision
+/// afterwards, which is the tool that exists for exactly this.
+///
+/// Edge-triggered from the pending set rather than run every tick. Docker costs 180-600 ms a call
+/// here and the watcher ticks every 400 ms, so pausing unconditionally would be a Docker
+/// invocation per tick; the `frozen` set is the memory of what Docker agreed to.
+fn sync_frozen_sandbox(app: &AppHandle, project_id: &str) {
+    let state = app.state::<AppState>();
+    let has_pending = state.pending_requests().iter().any(|request| request.project == project_id);
+    // The rule lives in the core, where it is tested: it is what keeps this from being a Docker
+    // invocation on every 400 ms tick of the watcher.
+    let Some(freeze) =
+        deepsand_core::docker::freeze_transition(has_pending, state.is_frozen(project_id))
+    else {
+        return;
+    };
+
+    let Ok(docker) = state.docker() else {
+        return;
+    };
+    let name = {
+        let store = store(&state);
+        match store.project(project_id) {
+            Ok(project) => project.container_name(),
+            Err(_) => return,
+        }
+    };
+
+    if freeze {
+        if docker.pause_container(&name) {
+            state.mark_frozen(project_id);
+            tracing::info!(project = %project_id, "sandbox frozen while the operator decides");
+        } else {
+            // Not fatal, and not retried in a loop: a container that is not running cannot be
+            // frozen, and the dialog is still the control either way.
+            tracing::warn!(project = %project_id, "could not freeze the sandbox for a decision");
+        }
+        return;
+    }
+
+    // Forgetting it even when Docker refuses is deliberate: keeping the memory would mean asking
+    // again on every tick, and the container is about to be stopped or recreated in the case
+    // where a grant changed what it can see -- `stop_session_internal` thaws before that.
+    if state.clear_frozen(project_id) && docker.unpause_container(&name) {
+        tracing::info!(project = %project_id, "sandbox resumed after a decision");
+    }
+}
+
 /// Background thread that surfaces requests from a running sandbox.
 fn start_broker(app: &AppHandle, state: &AppState, project_id: &str) {
     let stop = Arc::new(AtomicBool::new(false));
@@ -2284,6 +2418,11 @@ fn start_broker(app: &AppHandle, state: &AppState, project_id: &str) {
                         app.state::<AppState>().register_request(request);
                         let _ = app.emit(events::BROKER_REQUEST, &view);
                     }
+
+                    // Last thing in the tick, so it sees exactly what the operator can: a request
+                    // that was refused on the way in is not a decision anybody is making, and it
+                    // must not freeze anything.
+                    sync_frozen_sandbox(&app, &project_id);
                 }
 
                 // The proxy's refusals are surfaced so the operator can allow a
@@ -2755,6 +2894,7 @@ fn tool_view(tool: &deepsand_core::tools::Tool, selected: &[String]) -> ToolView
         available: reason.is_none(),
         unavailable_reason: reason,
         hosts: tool.hosts.iter().map(|host| (*host).to_string()).collect(),
+        cost_note: tool.cost.map(str::to_string),
         requires: tool.base.label().to_string(),
     }
 }
@@ -4847,4 +4987,47 @@ fn set_aside_list(data_dir: &std::path::Path) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod wedge_status_tests {
+    use super::*;
+    use deepsand_core::model::DockerStatus;
+
+    /// The chain the restart button hangs on, from the end that can be tested without a daemon.
+    ///
+    /// A start that finds the runtime (or the file-sharing layer) unwell records that in
+    /// `runtime_wedged` instead of restarting Docker Desktop itself, so the only way the operator
+    /// gets a button is if the remembered verdict reaches the window as `available: false` -- with
+    /// the sentence that says what to do, and with `desktop` intact, because the window offers
+    /// Docker Desktop's restart and nothing else.
+    #[test]
+    fn a_remembered_wedge_is_what_makes_the_window_offer_the_restart() {
+        let healthy = DockerStatus {
+            available: true,
+            desktop: true,
+            server_version: "29.8.2".to_string(),
+            ..DockerStatus::default()
+        };
+
+        let verdict = status_with_verdict(healthy.clone(), true);
+        assert!(!verdict.available, "this is the condition the callout keys on");
+        assert!(verdict.desktop, "the button restarts Docker Desktop, and only it");
+        assert_eq!(verdict.detail, WEDGED_DETAIL);
+        assert!(
+            verdict.detail.contains("Restart Docker Desktop"),
+            "and the sentence has to name the action: {}",
+            verdict.detail
+        );
+        assert_eq!(
+            verdict.server_version, "29.8.2",
+            "the daemon's version is still true, and the status strip shows it"
+        );
+
+        // With no wedge remembered, the daemon's own answer stands: a status function that always
+        // said "not answering" would leave the button up for ever.
+        let plain = status_with_verdict(healthy, false);
+        assert!(plain.available);
+        assert_ne!(plain.detail, WEDGED_DETAIL);
+    }
 }

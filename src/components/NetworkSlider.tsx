@@ -1,23 +1,22 @@
 /**
  * The four network modes as one control, with a thumb that slides between them.
  *
- * A row of joined segments rather than four separate buttons: they are one choice, and the old row
- * of buttons read as four independent actions. The selected state is a single element that moves,
- * so the control says "one of these" by construction rather than by lighting one button up and
- * hoping it reads that way.
- *
- * The order is the argument: `none` is the most restricted mode and `full` the least, so the thumb
- * runs from one end of that range to the other.
- *
- * `role="radio"` and `aria-checked` on the segments, so a screen reader is told the same single
- * choice the eye is.
+ * The sliding and the markup are `SegmentedSlider`'s; this file is only the network part of it:
+ * which modes exist, and what they are called. The order is the argument: `none` is the most
+ * restricted mode and `full` the least, so the thumb runs from one end of that range to the other.
  */
 
-import { createMemo, For } from "solid-js";
+import { createMemo } from "solid-js";
 import { networkLabel, policyMode, type NetworkPolicy } from "../lib/types";
+import { SegmentedSlider } from "./SegmentedSlider";
 
 /** Most restricted first: the order is the argument this control makes. */
 const MODES: NetworkPolicy["mode"][] = ["none", "allowlisted", "internet", "full"];
+
+/** The mode a policy is really in: `restricted` is the stored old name for `allowlisted`. */
+function asMode(value: NetworkPolicy["mode"]): NetworkPolicy["mode"] {
+  return policyMode({ mode: value, allow: [] } as NetworkPolicy);
+}
 
 export function NetworkSlider(props: {
   value: NetworkPolicy["mode"];
@@ -25,33 +24,18 @@ export function NetworkSlider(props: {
   disabled?: boolean;
 }) {
   /** Where the thumb sits. An unknown mode sits at the start rather than nowhere. */
-  const index = createMemo(() => {
-    const at = MODES.indexOf(policyMode({ mode: props.value, allow: [] } as NetworkPolicy));
-    return at < 0 ? 0 : at;
-  });
+  const current = createMemo(() => asMode(props.value));
 
   return (
-    <div class="mode-slider" role="radiogroup" aria-label="Network access">
-      {/* The only thing that moves, and the only thing that means "selected". */}
-      <span
-        class="mode-thumb"
-        style={{ transform: `translateX(${index() * 100}%)` }}
-        aria-hidden="true"
-      />
-      <For each={MODES}>
-        {(mode) => (
-          <button
-            type="button"
-            role="radio"
-            aria-checked={props.value === mode}
-            class="mode-segment"
-            disabled={props.disabled}
-            onClick={() => props.onChange(mode)}
-          >
-            {networkLabel({ mode, allow: [] } as NetworkPolicy)}
-          </button>
-        )}
-      </For>
-    </div>
+    <SegmentedSlider
+      ariaLabel="Network access"
+      value={current()}
+      disabled={props.disabled}
+      onChange={props.onChange}
+      options={MODES.map((mode) => ({
+        value: mode,
+        label: networkLabel({ mode, allow: [] } as NetworkPolicy),
+      }))}
+    />
   );
 }

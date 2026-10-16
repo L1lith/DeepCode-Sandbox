@@ -246,20 +246,30 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     # binaries in is the whole point: `cargo install` compiles for minutes, and this turns
     # that into a copy. The apt packages below are deliberately not cached -- the cache mounts
     # already cover their downloads, and moving installed system packages between images is
-    # the fiddliest thing here for the smallest gain. The app passes an empty directory when
-    # there is nothing cached for this key, which is the same as no cache at all.
+    # the fiddliest thing here for the smallest gain.
+    #
+    # Whether there *is* a cache is asked of the marker the app writes when it fills one, not of
+    # the two directories. The app creates those before every build, because a build context has
+    # to exist, so testing them is a test that is always true. That is how an image came to be
+    # labelled `htmlq,puppeteer,wrangler` with none of the three installed: this step said "using
+    # the cached tools", installed nothing, and the label written below is what
+    # `deepsand_sandbox_info` hands the agent as the truth -- so the agent went looking for a
+    # browser the image had told it it had. The app's own rule for using an entry is that same
+    # marker (`toolcache::FILLED_MARKER`), and the two answers have to agree.
     TOOLS_CACHED=0; \
-    if [ -d /toolcache/bin ] || [ -d /toolcache/node_modules ]; then \
+    if [ -f /toolcache/filled-at ]; then \
       echo "deepsand: using the cached tools"; \
       mkdir -p /usr/local/bin /usr/local/lib/node_modules; \
       cp -a /toolcache/bin/. /usr/local/bin/ 2>/dev/null || true; \
       cp -a /toolcache/node_modules/. /usr/local/lib/node_modules/ 2>/dev/null || true; \
       TOOLS_CACHED=1; \
+    else \
+      echo "deepsand: no tools cache for this key; the tools are installed below"; \
     fi; \
     if [ -z "$INSTALL_TOOLS" ]; then \
       echo "deepsand: no tools selected for this project"; \
     else \
-      echo "deepsand: installing $INSTALL_TOOLS"; \
+      echo "deepsand: tools for this image: $INSTALL_TOOLS"; \
     fi; \
     if [ "$WITH_NODE_REPO" = "1" ]; then \
       curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -; \
@@ -275,12 +285,82 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       apt-get update; \
       apt-get install -y --no-install-recommends golang-go; \
     fi; \
-    if [ "$TOOLS_CACHED" = "0" ] && [ -n "$NPM_GLOBALS" ]; then \
+    if [ -n "$NPM_GLOBALS" ]; then \
       for pkg in $NPM_GLOBALS; do \
-        echo "deepsand: npm install -g $pkg"; \
-        npm install -g --no-fund --no-audit --fetch-retries=2 --fetch-timeout=60000 --fetch-retry-maxtimeout=30000 "$pkg@latest"; \
+        # Asked one package at a time, and asked of npm, rather than taken from $TOOLS_CACHED:
+        # a cache entry can hold the marker and still be missing a package, and the listing a
+        # tool produces about itself is what says whether it is there. A cache is an
+        # accelerator, not an authority, so a partial entry heals itself here instead of
+        # becoming an image that claims to have a tool it does not have.
+        if npm ls -g --depth=0 "$pkg" >/dev/null 2>&1; then \
+          echo "deepsand: $pkg is already installed"; \
+        else \
+          echo "deepsand: npm install -g $pkg"; \
+          # The driver only, never the browser: a postinstall download here is a download before
+          # the libraries a browser needs are on the system, and when it fails partway it leaves
+          # a browser folder with no executable in it -- which then makes *every* later attempt
+          # refuse with "the browser folder exists but the executable does not". That is the state
+          # a real machine was found in: the package present, the cache directory present, and no
+          # browser in it. The browser is fetched deliberately below, after the libraries, and an
+          # image that cannot fetch one fails the build instead of shipping without it.
+          PUPPETEER_SKIP_DOWNLOAD=1 npm install -g --no-fund --no-audit --fetch-retries=2 --fetch-timeout=60000 --fetch-retry-maxtimeout=30000 "$pkg@latest"; \
+        fi; \
       done; \
     fi; \
+    # The browser half of the `puppeteer` tool, which is two things the base image does not have.
+    #
+    # The npm package is the driver, not the browser: it installs in seconds and leaves puppeteer
+    # pointing at a Chromium that was never fetched. And a browser links against a screenful of
+    # libraries -- libnss3, libgbm, libatk, libcups and the rest -- none of which are here. So the
+    # tool was described as "a browser controlled from Node, with its own copy of Chromium" while
+    # delivering neither half, and an agent asked for a screenshot spent the turn finding that out
+    # (measured here: it fetched Chrome by hand, could not run it for missing libraries, and gave
+    # up). This step is what makes that description true.
+    #
+    # Gated on the tool id rather than on the plan's apt list, because these libraries are needed
+    # by the browser rather than chosen by the operator: one is meaningless without the other.
+    case ",$INSTALL_TOOLS," in \
+      *,puppeteer*) \
+        echo "deepsand: installing the libraries a browser links against"; \
+        apt-get update; \
+        # `unzip` is in this list on purpose rather than borrowed from the `zip` tool: without it
+        # the browser *downloads* and then cannot be extracted -- "no zip archiver is available"
+        # -- and because the fetch that does this is a postinstall, the failure is swallowed and
+        # the image ends up claiming a browser it does not have. That is the failure this step
+        # exists to end, so it must not depend on another tool being switched on.
+        apt-get install -y --no-install-recommends \
+          libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libgbm1 \
+          libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libx11-xcb1 \
+          libpango-1.0-0 libcairo2 libasound2 libdbus-1-3 libgtk-3-0 \
+          fonts-liberation xdg-utils unzip; \
+        # Fetched now, into the directory the sandbox's own puppeteer looks in: HOME is
+        # /home/deepcode and the sandbox runs as uid 1000, so the cache has to be there and
+        # owned by them, not left in root's home where nothing will ever read it.
+        export PUPPETEER_CACHE_DIR=/home/deepcode/.cache/puppeteer; \
+        # Emptied first, because a browser folder with no executable in it is worse than none:
+        # puppeteer sees the folder and refuses to fetch, reporting "the browser folder exists but
+        # the executable does not" instead of repairing it. Nothing else lives in here.
+        rm -rf "$PUPPETEER_CACHE_DIR"; \
+        mkdir -p "$PUPPETEER_CACHE_DIR"; \
+        if ! node /usr/local/lib/node_modules/puppeteer/install.mjs; then \
+          # A future package may move that entry point; the documented way to fetch a browser is
+          # the package's own cli, which is already on PATH because the package is installed.
+          echo "deepsand: falling back to the puppeteer cli"; \
+          npx --no-install puppeteer browsers install chrome || true; \
+        fi; \
+        # Verified rather than assumed, and verified as the sandbox user: an image that says it
+        # has puppeteer and has no browser is the exact failure this step exists to remove, so a
+        # build that cannot produce one fails here instead of shipping.
+        if ! setpriv --reuid=1000 --regid=1000 --clear-groups \
+             env HOME=/home/deepcode PUPPETEER_CACHE_DIR="$PUPPETEER_CACHE_DIR" \
+             node -e 'const p=require("/usr/local/lib/node_modules/puppeteer"); p.executablePath().then((f)=>process.exit(require("fs").existsSync(f)?0:1),()=>process.exit(1))'; then \
+          echo "deepsand: the browser could not be fetched or is not where the sandbox user looks; the puppeteer tool is not usable without it" >&2; \
+          exit 1; \
+        fi; \
+        chown -R 1000:1000 "$PUPPETEER_CACHE_DIR"; \
+        echo "deepsand: browser ready at $PUPPETEER_CACHE_DIR"; \
+        ;; \
+    esac; \
     if [ "$WITH_RUSTUP" = "1" ]; then \
       export RUSTUP_HOME=/home/deepcode/.rustup CARGO_HOME=/home/deepcode/.cargo; \
       if ! command -v cargo >/dev/null 2>&1; then \
@@ -291,6 +371,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     fi; \
     if [ "$TOOLS_CACHED" = "0" ] && [ -n "$CARGO_INSTALLS" ]; then \
       echo "deepsand: cargo install $CARGO_INSTALLS"; \
+      # Skipped only for an entry the app marked as filled, which since the marker rule above
+      # means one built by a run of this step -- so the compiled binaries are in the tree that
+      # was just copied in. Unlike the npm globals there is no per-crate listing to ask here:
+      # the cache holds binaries, and a crate's binary is not always named after it.
       # A minimal C toolchain. `cargo install` links its output and fails with
       # "linker `cc` not found" without one, and the default tool set includes a
       # cargo-installed program -- so without this the default image could not be

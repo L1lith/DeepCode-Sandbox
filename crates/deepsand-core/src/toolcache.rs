@@ -56,18 +56,35 @@ pub fn cache_key(arch: &str, selection: &[String], tools_layer: &str) -> String 
 ///
 /// Extracted rather than hashing the whole file for the reason in the module comment: the image
 /// tag already changes on every runtime edit, and this must not.
+///
+/// The layer is identified by the `toolcache` bind mount, which is the one thing only that layer
+/// has. It used to be identified by its apt cache mount -- and the *base* image's apt layer has
+/// exactly that mount too, and comes first, so this fingerprinted the base layer and nothing else.
+/// The consequence was not theoretical: it meant a change to the install steps did not invalidate
+/// an entry, so a fix to those steps would be applied to a build that then reused the entry the
+/// broken version had filled. The fixture in the test below was the reason it went unnoticed --
+/// it had no base layer in front, so its first apt-mounting `RUN` really was the tools layer.
 pub fn tools_layer_fingerprint(dockerfile: &str) -> String {
-    let marker = "RUN --mount=type=cache,target=/var/cache/apt";
-    let Some(start) = dockerfile.find(marker) else {
+    let marker = "--mount=type=bind,from=toolcache";
+    let Some(found) = dockerfile.find(marker) else {
         return String::new();
     };
+    // Back up to the `RUN` this mount belongs to, so the digest covers the whole instruction
+    // rather than starting in the middle of its options.
+    let start = dockerfile[..found].rfind("RUN ").unwrap_or(found);
     let mut body = String::new();
     for line in dockerfile[start..].lines() {
+        let trimmed = line.trim_end();
+        // A comment inside a continued instruction does not end it -- that is Docker's own rule,
+        // and this layer is full of them. Stopping at the first one, as this did, meant the digest
+        // covered only the mount list at the top of the instruction: the gate and the installs
+        // below it were outside the fingerprint, so a change to them left the key alone.
+        let comment = trimmed.trim_start().starts_with('#');
         body.push_str(line.trim_end_matches('\r'));
         body.push('\n');
-        // A continued instruction is the whole instruction; the first line that does not end in
-        // a backslash ends it.
-        if !line.trim_end().ends_with('\\') {
+        // Otherwise a continued instruction is the whole instruction, and the first line that
+        // does not end in a backslash ends it.
+        if !comment && !trimmed.ends_with('\\') {
             break;
         }
     }
@@ -324,14 +341,27 @@ mod tool_cache_tests {
 
     /// The fingerprint follows the tools layer and nothing else -- the reason it is extracted
     /// rather than hashing the Dockerfile.
+    ///
+    /// The fixture is shaped like the real file, which this test's first version was not: it had
+    /// no base layer, so its first `RUN` carrying an apt cache mount really was the tools layer.
+    /// The real Dockerfile's base apt layer carries that same mount and comes first, so the
+    /// fingerprint covered the base layer -- and a change to the install steps left the key
+    /// alone, which is the one thing this function exists to prevent. A fix to those steps would
+    /// then have been applied by a build that reused the entry the broken version filled, which
+    /// is how this was found.
     #[test]
     fn the_fingerprint_follows_the_tools_layer_and_not_the_rest_of_the_file() {
         let dockerfile = "\
 FROM node:22-bookworm-slim
+RUN --mount=type=cache,target=/var/cache/apt \\\
+    --mount=type=cache,target=/var/lib/apt/lists \\\
+    set -eux; \\\
+    apt-get install -y ca-certificates iptables tini;
 COPY bin/ /usr/local/lib/deepsand/
-RUN --mount=type=cache,target=/var/cache/apt \\
-    --mount=type=cache,target=/root/.npm \\
-    set -eux; \\
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\
+    --mount=type=cache,target=/root/.npm,sharing=locked \\\
+    --mount=type=bind,from=toolcache,target=/toolcache \\\
+    set -eux; \\\
     apt-get install -y jq;
 COPY skills/ /home/deepcode/.agents/skills/
 RUN npm install -g something-else
@@ -343,11 +373,22 @@ RUN npm install -g something-else
         let edited = dockerfile.replace("something-else", "something-else-2");
         assert_eq!(before, tools_layer_fingerprint(&edited));
 
+        // So does editing the base layer in front of it: a different layer, a different concern.
+        let base = dockerfile.replace(
+            "apt-get install -y ca-certificates iptables tini",
+            "apt-get install -y ca-certificates iptables tini less",
+        );
+        assert_eq!(before, tools_layer_fingerprint(&base));
+
         // Editing the install steps does not.
         let changed = dockerfile.replace("apt-get install -y jq", "apt-get install -y jq zip");
         assert_ne!(before, tools_layer_fingerprint(&changed));
-    }
 
+        // Including the part that decides whether a cache entry is used at all: a fix to that
+        // logic has to produce a key that does not name an entry the broken version filled.
+        let gated = dockerfile.replace("apt-get install -y jq", "npm ls -g --depth=0 jq");
+        assert_ne!(before, tools_layer_fingerprint(&gated));
+    }
     #[test]
     fn a_dockerfile_with_no_tools_layer_has_no_fingerprint() {
         assert!(tools_layer_fingerprint("FROM scratch\n").is_empty());

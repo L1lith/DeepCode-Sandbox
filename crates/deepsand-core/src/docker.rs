@@ -34,6 +34,23 @@ pub const ENGINE_RECOVERY_DEADLINE: std::time::Duration = std::time::Duration::f
 /// The leash the status watcher uses to notice, on its own, that a wedge has cleared.
 pub const WEDGE_RECHECK_LEASH: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// The leash for one step of the host-sharing probe.
+///
+/// The probe is a *preflight*: the operator is staring at "Starting…" while it runs, so its cost has
+/// to be bounded by what a healthy answer needs, not by how long a sick daemon may take. Measured on
+/// this machine: a `docker cp` of one small file out of a bind mount answers in well under a second
+/// when the file-sharing layer is healthy, and took **three minutes** when it was not -- while
+/// `version`, `images` and `create` kept answering instantly. Fifteen seconds is two orders of
+/// magnitude more than a healthy answer needs, so a probe that has not answered by then is telling
+/// us about Docker Desktop rather than about the directory.
+pub const SHARING_PROBE_LEASH: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The leash for the cleanup that follows a failed probe step.
+///
+/// Short for the same reason: removing the probe container is not what is being measured, and a
+/// daemon that has just failed to answer would otherwise charge a second full timeout for it.
+const SHARING_PROBE_CLEANUP_LEASH: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// One step in the sequence that brings a wedged container runtime back.
 ///
 /// A value rather than a pile of `Command::new` calls, because the order is the part worth
@@ -79,6 +96,13 @@ pub fn engine_restart_plan(windows: bool) -> Vec<EngineRestartStep> {
 pub struct SharingCheck {
     pub ok: bool,
     pub detail: String,
+    /// True when the daemon accepted the probe's commands and then did not answer in time.
+    ///
+    /// That is a fact about Docker Desktop rather than about the directory, and it is answered
+    /// differently: this is what becomes the sticky "the container runtime is not answering" state,
+    /// whose callout carries the restart button. Reporting it as an unshared directory instead
+    /// leaves the operator holding a sentence about file sharing and nothing to do about it.
+    pub unanswered: bool,
 }
 
 impl SharingCheck {
@@ -86,12 +110,47 @@ impl SharingCheck {
         Self {
             ok: true,
             detail: "Files in this directory are readable inside a container.".to_string(),
+            unanswered: false,
         }
     }
 
     fn unavailable(detail: String) -> Self {
-        Self { ok: false, detail }
+        Self {
+            ok: false,
+            detail,
+            unanswered: false,
+        }
     }
+
+    /// The daemon did not answer. `detail` says what was being asked when it stopped answering.
+    fn no_answer(detail: String) -> Self {
+        Self {
+            ok: false,
+            detail,
+            unanswered: true,
+        }
+    }
+}
+
+/// What one bounded step of the sharing probe produced.
+enum ProbeStep {
+    /// Docker answered -- possibly by refusing, which is a fact about the arguments.
+    Answered(std::result::Result<String, String>),
+    /// Docker did not answer in time. A fact about Docker Desktop, and the end of the probe.
+    Silent,
+}
+
+/// What one candidate image produced for the sharing probe.
+///
+/// `Silent` is not folded into `Refused` because the two lead to different next steps: a refusal is
+/// worth trying on the other image, and silence is worth trying on nothing at all.
+enum ProbeAttempt {
+    /// The probe file, read back from the bind mount.
+    Read(String),
+    /// Docker answered, and what it said was a refusal.
+    Refused(String),
+    /// Docker did not answer in time.
+    Silent,
 }
 
 #[derive(Debug, Clone)]
@@ -990,25 +1049,44 @@ impl Docker {
         // reads the probe file back through the daemon's own view of the host -- the same
         // file-sharing layer the launch depends on -- so a genuinely unshared directory still
         // fails, and it fails carrying docker's own words instead of a timeout sentence of ours.
-        let attempt = |image: &str| -> crate::Result<String> {
+        // Each step is bounded by `SHARING_PROBE_LEASH` rather than by the full command timeout,
+        // and silence ends the probe at once: an unanswered `create` or `cp` says something about
+        // Docker Desktop, and trying the same thing again on another image would only spend the
+        // leash a second time. Docker answering "no" is the case worth a second candidate.
+        let attempt = |image: &str| -> ProbeAttempt {
+            // The name carries the millisecond it was made in, so it cannot collide with a
+            // container from an earlier run -- which is why there is no reclaiming `rm` before the
+            // create. That rm used to be here, and on a daemon that has stopped answering it was
+            // another command to wait out.
             let name = format!("deepsand-sharing-{}", crate::now_ms());
             let host = std::env::temp_dir().join(format!(
                 "deepsand-sharing-{}-{}",
                 std::process::id(),
                 crate::now_ms()
             ));
-            let _ = self.try_run(&self.fmt(&["rm", "-f", &name]));
-            let read = (|| -> crate::Result<String> {
-                self.run(&Self::sharing_probe_create_args(image, dir, &name))?;
+            let read = (|| -> ProbeAttempt {
+                match self.probe_step(&Self::sharing_probe_create_args(image, dir, &name)) {
+                    ProbeStep::Silent => return ProbeAttempt::Silent,
+                    ProbeStep::Answered(Err(why)) => return ProbeAttempt::Refused(why),
+                    ProbeStep::Answered(Ok(_)) => {}
+                }
                 let from = format!("{name}:/deepsand-probe/{token}");
-                self.run(&self.fmt(&["cp", &from, &host.display().to_string()]))?;
-                std::fs::read_to_string(&host).map_err(|err| {
-                    SandboxError::policy(format!(
+                match self.probe_step(&self.fmt(&["cp", &from, &host.display().to_string()])) {
+                    ProbeStep::Silent => return ProbeAttempt::Silent,
+                    ProbeStep::Answered(Err(why)) => return ProbeAttempt::Refused(why),
+                    ProbeStep::Answered(Ok(_)) => {}
+                }
+                match std::fs::read_to_string(&host) {
+                    Ok(text) => ProbeAttempt::Read(text),
+                    Err(err) => ProbeAttempt::Refused(format!(
                         "the probe file could be copied out of {image} but not read back: {err}"
-                    ))
-                })
+                    )),
+                }
             })();
-            let _ = self.try_run(&self.fmt(&["rm", "-f", &name]));
+            let _ = self.try_run_within(
+                &self.fmt(&["rm", "-f", &name]),
+                SHARING_PROBE_CLEANUP_LEASH,
+            );
             let _ = std::fs::remove_file(&host);
             read
         };
@@ -1025,34 +1103,61 @@ impl Docker {
         let mut last_detail = String::from("no image was available to run the probe");
         for candidate in &candidates {
             match attempt(candidate) {
-                Ok(out) if out.contains(&token) => {
+                ProbeAttempt::Read(out) if out.contains(&token) => {
                     let _ = std::fs::remove_file(&probe);
                     return SharingCheck::ok();
                 }
-                Ok(out) => {
+                ProbeAttempt::Read(out) => {
                     last_detail = format!(
                         "the probe ran on {candidate} but did not return its token ({out:?})"
                     )
                 }
-                Err(err) => {
-                    last_detail = format!("running the probe on {candidate} failed: {err}")
+                ProbeAttempt::Refused(why) => {
+                    last_detail = format!("running the probe on {candidate} failed: {why}")
+                }
+                ProbeAttempt::Silent => {
+                    let _ = std::fs::remove_file(&probe);
+                    return SharingCheck::no_answer(format!(
+                        "Docker accepted the probe for {} and then did not answer within {}s, so it \
+                         was killed. A probe that works answers in well under a second, so this is \
+                         Docker Desktop's file sharing not responding rather than anything about \
+                         the directory: restart Docker Desktop, then try again.",
+                        dir.display(),
+                        SHARING_PROBE_LEASH.as_secs()
+                    ));
                 }
             }
         }
         let _ = std::fs::remove_file(&probe);
 
-        let advice = if last_detail.contains("not answering") || last_detail.contains("not finish") {
-            "Docker's container runtime is not answering. Restart Docker Desktop, then try again."
-        } else {
-            "On Docker Desktop, add the drive that holds your projects under Settings -> Resources \
-             -> File Sharing, choose Apply & Restart, then try again. On Linux, check that the path \
-             is visible to the daemon."
-        };
         SharingCheck::unavailable(format!(
             "Docker could not read a probe file from {} inside a container, so a bind mount would \
-             look like an empty directory to DeepCode.\n\n{advice}\n\nDocker itself said: {last_detail}",
+             look like an empty directory to DeepCode.\n\nOn Docker Desktop, add the drive that \
+             holds your projects under Settings -> Resources -> File Sharing, choose Apply & \
+             Restart, then try again. On Linux, check that the path is visible to the daemon.\n\n\
+             Docker itself said: {last_detail}",
             dir.display()
         ))
+    }
+
+    /// One bounded step of the sharing probe.
+    ///
+    /// The leash is the probe's own, not the command timeout: this runs while the operator is
+    /// looking at a start that has not finished.
+    fn probe_step(&self, args: &[String]) -> ProbeStep {
+        let mut cmd = self.command();
+        cmd.args(args.iter().map(std::ffi::OsString::from));
+        match wait_bounded_typed(cmd, SHARING_PROBE_LEASH) {
+            Err(BoundedFailure::NoAnswer { .. }) => ProbeStep::Silent,
+            Err(BoundedFailure::Refused(why)) => ProbeStep::Answered(Err(why)),
+            Ok(output) if !output.status.success() => ProbeStep::Answered(Err(format!(
+                "it answered with an error: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))),
+            Ok(output) => ProbeStep::Answered(Ok(
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            )),
+        }
     }
 
     /// The `docker create` argv for the sharing probe.
@@ -1060,11 +1165,19 @@ impl Docker {
     /// It declares the bind mount and names the container so it can be removed afterwards, but it
     /// starts nothing. Kept as a pure function, and without `run`, so a test can assert that the
     /// sharing check never depends on the step a wedged runtime refuses.
+    ///
+    /// It carries the managed label so the startup sweep can remove one that a failed probe left
+    /// behind: the removal at the end of a probe is itself a bounded best-effort command, and a
+    /// daemon that has stopped answering is exactly what leaves a container nobody owns. Three of
+    /// these were found on this machine after one stalled probe, invisible to `prune_orphans`
+    /// because they carried no label to be found by.
     fn sharing_probe_create_args(image: &str, dir: &Path, name: &str) -> Vec<String> {
         vec![
             "create".to_string(),
             "--name".to_string(),
             name.to_string(),
+            "--label".to_string(),
+            LABEL_MANAGED.to_string(),
             "--network=none".to_string(),
             "-v".to_string(),
             format!("{}:/deepsand-probe:ro", dir.display()),
@@ -1181,8 +1294,34 @@ impl Docker {
     }
 
     /// Force-remove a container by name. Safe to call when it does not exist.
+    ///
+    /// Thaws first, always, including for a container this process never froze: a leftover from
+    /// a crash can be frozen too, and every removal path goes through here.
     pub fn remove_container(&self, name: &str) {
-        let _ = self.try_run(&self.fmt(&["rm", "-f", "-v", name]));
+        for args in container_teardown_args(name) {
+            let _ = self.try_run(&args);
+        }
+    }
+
+    /// Freeze every process in a container.
+    ///
+    /// This is how a sandbox is held while the operator has a permission dialog open: the agent
+    /// cannot run at all, so it cannot work ahead on an answer it has not been given. Returns
+    /// whether Docker accepted it -- a container that is not running cannot be paused, and that
+    /// is not worth failing over, because the fallback is simply that it was not frozen.
+    pub fn pause_container(&self, name: &str) -> bool {
+        self.try_run(&self.fmt(&["pause", name])).is_some()
+    }
+
+    /// Thaw a frozen container. Safe to call when it is not paused.
+    pub fn unpause_container(&self, name: &str) -> bool {
+        self.try_run(&self.fmt(&["unpause", name])).is_some()
+    }
+
+    /// Whether a container exists and is frozen.
+    pub fn container_paused(&self, name: &str) -> bool {
+        self.try_run(&self.fmt(&["inspect", "-f", "{{.State.Paused}}", name]))
+            .is_some_and(|out| out == "true")
     }
 
     pub fn container_running(&self, name: &str) -> bool {
@@ -1214,6 +1353,36 @@ impl Docker {
             }
         }
         removed
+    }
+}
+
+/// The commands that end a Deepsand container, in the order they run.
+///
+/// The thaw comes first because a frozen container refuses everything else: `docker exec` is
+/// refused outright ("unpause the container before exec"), and the polite way to stop one is a
+/// signal its tasks cannot receive while they are frozen. Removal itself was measured against a
+/// frozen container on Docker Desktop here -- `rm -f -v` took 0.29 s -- so this is not a race
+/// being won, it is what keeps "nothing this app starts outlives it" true for a sandbox that was
+/// frozen when the app went away.
+pub fn container_teardown_args(name: &str) -> Vec<Vec<String>> {
+    vec![
+        vec!["unpause".to_string(), name.to_string()],
+        vec!["rm".to_string(), "-f".to_string(), "-v".to_string(), name.to_string()],
+    ]
+}
+
+/// What to do about the freeze: freeze, thaw, or nothing.
+///
+/// `None` is the answer that matters. The broker that notices a request polls every 400 ms and
+/// a `docker` invocation costs 180-600 ms on this machine, so the reconciliation has to be
+/// edge-triggered on the answer changing rather than level-triggered on the question being
+/// asked -- otherwise a sandbox with a dialog open would spawn a Docker CLI four times a second
+/// to freeze what is already frozen.
+pub fn freeze_transition(has_pending: bool, currently_frozen: bool) -> Option<bool> {
+    match (has_pending, currently_frozen) {
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        _ => None,
     }
 }
 
@@ -1850,6 +2019,49 @@ mod probe_parsing_tests {
 /// than a side effect, so it is the part that can be asserted: silence, not elapsed time, is the
 /// signal, and the limit is generous because every slow step prints as it goes.
 #[cfg(test)]
+mod sandbox_freeze_tests {
+    use super::*;
+
+    /// A frozen container refuses everything, including the exec that would report it, so the
+    /// thaw has to come before the removal rather than after it. This is the order that keeps a
+    /// sandbox frozen when the app died from outliving it.
+    #[test]
+    fn a_container_is_thawed_before_it_is_removed() {
+        let args = container_teardown_args("deepsand-demo");
+        assert_eq!(args[0], vec!["unpause".to_string(), "deepsand-demo".to_string()]);
+        assert_eq!(
+            args[1],
+            vec!["rm".to_string(), "-f".to_string(), "-v".to_string(), "deepsand-demo".to_string()]
+        );
+        assert_eq!(args.len(), 2, "a teardown is a thaw and a removal, nothing else");
+    }
+
+    /// The pause and the thaw name one container and nothing else: no `--all`, no name that came
+    /// from anywhere but the project's own container.
+    #[test]
+    fn a_pause_and_a_thaw_name_exactly_one_container() {
+        let program = PathBuf::from("docker");
+        let docker = Docker { program };
+        assert_eq!(docker.fmt(&["pause", "deepsand-demo"]), vec!["pause", "deepsand-demo"]);
+        assert_eq!(docker.fmt(&["unpause", "deepsand-demo"]), vec!["unpause", "deepsand-demo"]);
+    }
+
+    /// The rule the broker reconciles against, and the reason it can run every 400 ms without
+    /// spawning a Docker CLI every 400 ms.
+    #[test]
+    fn a_sandbox_is_frozen_only_while_the_operator_has_something_to_decide() {
+        assert_eq!(freeze_transition(false, false), None, "nothing pending, nothing to do");
+        assert_eq!(freeze_transition(true, false), Some(true), "a dialog is open: freeze it");
+        assert_eq!(
+            freeze_transition(true, true),
+            None,
+            "already frozen: asking again would be a docker call per poll"
+        );
+        assert_eq!(freeze_transition(false, true), Some(false), "nothing left to decide: thaw");
+    }
+}
+
+#[cfg(test)]
 mod build_watchdog_tests {
     use super::*;
     use std::time::Duration;
@@ -2125,6 +2337,33 @@ mod probe_args_tests {
                 .any(|arg| arg == "C:/Users/05L1/Projects/WebSLC-Site:/deepsand-probe:ro"),
             "the host directory has to be bind-mounted: {argv:?}"
         );
+        // Labelled, so a probe container left behind by a stalled probe is something the startup
+        // sweep can find. Without it three of them sat in the daemon after one bad probe, and
+        // `prune_orphans` -- which asks for this label -- could not see them.
+        assert!(
+            argv.iter().any(|arg| arg == LABEL_MANAGED),
+            "the probe container has to carry the managed label: {argv:?}"
+        );
+    }
+
+    /// The probe runs while the operator is watching a start that has not finished, so its bound
+    /// belongs to a preflight: long enough for a healthy answer (measured here at 0.16 s), short
+    /// enough that a stalled one is a sentence rather than a wait. The command timeout is the wrong
+    /// leash for it, and cleanup must not pay it a second time either.
+    #[test]
+    fn the_sharing_probe_is_bounded_like_a_preflight() {
+        assert!(
+            SHARING_PROBE_LEASH <= std::time::Duration::from_secs(20),
+            "a probe the operator waits on cannot spend minutes: {SHARING_PROBE_LEASH:?}"
+        );
+        assert!(
+            SHARING_PROBE_LEASH < Docker::COMMAND_TIMEOUT,
+            "and it must be shorter than the leash that let one `docker cp` hang for two minutes"
+        );
+        assert!(
+            SHARING_PROBE_CLEANUP_LEASH < SHARING_PROBE_LEASH,
+            "cleanup is not what is being measured"
+        );
     }
 }
 
@@ -2313,21 +2552,59 @@ pub(crate) fn bare_command(program: &Path) -> Command {
     cmd
 }
 
+/// Why a bounded command did not produce anything usable.
+///
+/// The distinction is the point of the sharing probe: a command nobody answered is a fact about
+/// Docker Desktop, while a command that answered "no" is a fact about the thing it was asked about.
+/// Reported as a type rather than sniffed back out of a sentence, because the app reacts
+/// differently -- one of these is the sticky "the runtime is not answering" state, and the other is
+/// an explanation about a directory.
+#[derive(Debug)]
+pub(crate) enum BoundedFailure {
+    /// It never answered and was killed. Nothing about the command or its arguments is known.
+    NoAnswer { limit: std::time::Duration },
+    /// It could not be started, or it refused and said why: docker's own words.
+    Refused(String),
+}
+
+impl BoundedFailure {
+    /// The sentence a caller shows when it has nothing better to say.
+    pub(crate) fn sentence(&self) -> String {
+        match self {
+            BoundedFailure::NoAnswer { limit } => format!(
+                "it gave no answer within {}s, so it was killed. This command is not the problem: \
+                 something inside Docker is not answering, and restarting Docker Desktop is the usual \
+                 fix.",
+                limit.as_secs()
+            ),
+            BoundedFailure::Refused(detail) => detail.clone(),
+        }
+    }
+}
+
 /// Run a child with a deadline, killing it if it outlives one.
 ///
 /// `pub(crate)` so a git clone gets the same bound this gives every docker command: a GUI has
 /// no terminal to interrupt a child that has stopped answering, so the deadline is the only
 /// thing that ends one.
 pub(crate) fn wait_bounded(
-    mut cmd: Command,
+    cmd: Command,
     limit: std::time::Duration,
 ) -> std::result::Result<std::process::Output, String> {
+    wait_bounded_typed(cmd, limit).map_err(|err| err.sentence())
+}
+
+/// The same bound, keeping *why* it failed.
+pub(crate) fn wait_bounded_typed(
+    mut cmd: Command,
+    limit: std::time::Duration,
+) -> std::result::Result<std::process::Output, BoundedFailure> {
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     let mut child = cmd
         .spawn()
-        .map_err(|err| format!("could not start it: {err}"))?;
+        .map_err(|err| BoundedFailure::Refused(format!("could not start it: {err}")))?;
     let stdout = child.stdout.take().expect("the stdout pipe was requested");
     let stderr = child.stderr.take().expect("the stderr pipe was requested");
 
@@ -2350,17 +2627,14 @@ pub(crate) fn wait_bounded(
                 // output of a command that had to be killed is not worth reporting.
                 let _ = stdout_thread.join();
                 let _ = stderr_thread.join();
-                return Err(format!(
-                    "it gave no answer within {}s, so it was killed. This command is not the problem: \
-                     something inside Docker is not answering, and restarting Docker Desktop is the usual \
-                     fix.",
-                    limit.as_secs()
-                ));
+                return Err(BoundedFailure::NoAnswer { limit });
             }
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
             Err(err) => {
                 let _ = child.kill();
-                return Err(format!("could not be waited on: {err}"));
+                return Err(BoundedFailure::Refused(format!(
+                    "could not be waited on: {err}"
+                )));
             }
         }
     };
@@ -2425,5 +2699,44 @@ mod command_timeout_tests {
         cmd.stdout(Stdio::piped());
         let output = wait_bounded(cmd, std::time::Duration::from_secs(30)).expect("should run");
         assert!(String::from_utf8_lossy(&output.stdout).contains("hello"));
+    }
+
+    /// The sharing probe decides what to do next from *which* of these it got: silence means stop
+    /// and say the runtime is unwell, while a refusal is worth trying on the other image. That
+    /// distinction has to survive the bound, so it is a type rather than a sentence to be searched
+    /// for keywords in -- which is what the probe used to do, matching on wording.
+    #[test]
+    fn silence_is_told_apart_from_a_command_that_answers() {
+        let mut hangs = if cfg!(windows) {
+            let mut cmd = Command::new("ping");
+            cmd.args(["-n", "20", "127.0.0.1"]);
+            cmd
+        } else {
+            let mut cmd = Command::new("sleep");
+            cmd.arg("20");
+            cmd
+        };
+        hangs.stdout(Stdio::null());
+        match wait_bounded_typed(hangs, std::time::Duration::from_millis(400)) {
+            Err(BoundedFailure::NoAnswer { limit }) => {
+                assert_eq!(limit, std::time::Duration::from_millis(400));
+            }
+            other => panic!("a command nobody answered is the silent case: {other:?}"),
+        }
+
+        // A command that answers by refusing is not that: it comes back, carrying its status.
+        let mut refuses = if cfg!(windows) {
+            let mut cmd = Command::new("cmd");
+            cmd.args(["/c", "exit", "3"]);
+            cmd
+        } else {
+            let mut cmd = Command::new("false");
+            cmd.arg("");
+            cmd
+        };
+        refuses.stdout(Stdio::null());
+        let output = wait_bounded_typed(refuses, std::time::Duration::from_secs(30))
+            .expect("it answered, which is the point");
+        assert!(!output.status.success(), "and said no");
     }
 }

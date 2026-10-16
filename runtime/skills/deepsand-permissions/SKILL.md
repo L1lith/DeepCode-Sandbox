@@ -55,8 +55,14 @@ A request returns one of four things:
 DeepCode caps a tool call at 60 seconds, and a human may take longer than that. A `PENDING` result is normal and is **not** a failure:
 
 1. Do not file a second request for the same thing. That queues a duplicate and the operator has to dismiss it.
-2. Continue with any work that does not depend on the answer.
-3. Call **`deepsand_check_request`** with the `request_id` to collect it.
+2. Call **`deepsand_check_request`** with the `request_id` to collect it.
+
+While a request is waiting for an answer, Deepsand **holds this sandbox frozen**: nothing you run
+makes progress until the operator decides. That is deliberate, not a crash — do not treat a pause
+as a fault, and do not start work you would have to throw away. If the request call itself ends in
+a timeout, which is what a decision taking longer than the call's own budget looks like, the
+decision is still collectable: **`deepsand_list_requests`** lists every request this sandbox has on
+record and where each one stands, and `deepsand_check_request` reads the one you want.
 
 Poll no more than a few times, and keep doing useful work in between. When the operator approves, Deepsand recreates your container to attach the new mount and resumes this session, so your conversation is not lost — but your working directory listing may briefly change underneath you.
 

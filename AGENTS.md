@@ -177,6 +177,13 @@ These are load-bearing. Breaking one is how this project gets a CVE.
 * `src/lib/types.ts` mirrors the Rust payloads in `src-tauri/src/state.rs` by
   hand. Serde uses camelCase; the enums keep their own shape. Changing one side
   means changing the other.
+* **A field the backend skips is absent from the payload, and a bound input renders that absence
+  as the word "undefined".** Empty strings carry `skip_serializing_if`, so `AppSettings.user_prompt`
+  was not in the JSON while it was empty -- and the text area bound to it showed that literal word,
+  which the operator could then edit into their saved prompt. Mirror the skip as `?:` in
+  `types.ts`, and read such a field as `?? ""` where it is rendered. Two hand-written halves of one
+  contract will do this again: when a payload field is optional on one side, make it optional on
+  the other in the same commit.
 
 ## Platform quirks that will cost you an afternoon
 
@@ -242,6 +249,34 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   ids and names -- never a key, not even masked. The cache that keeps the list between projects
   digests the key rather than storing it, and a failure to list comes back as a `problem` string
   rather than an error, so the dropdown still offers the two choices that need no list at all.
+* **A project's own `AGENTS.md` replaces the file Deepsand installs, so anything that must always
+  reach the model cannot live only there.** `loadAgentInstructions` picks `<project>/AGENTS.md` or
+  `<project>/.deepcode/AGENTS.md` when either exists and *only* falls back to
+  `~/.deepcode/AGENTS.md` -- so the generated file is silently ignored in exactly the projects that
+  ship one, which is most real repositories (three of four on this machine). The per-task playbook
+  went into skills for this reason, and the operator's standing instructions go three ways at once,
+  all resolved by `resolve_user_prompt`: into the generated file; into
+  `SandboxSnapshot::user_prompt`, which the bridge puts in `deepsand_sandbox_info`'s description and
+  result, where no file in the project can shadow it and the mount is `:ro` so the sandbox cannot
+  forge it; and, when there *is* something to send and the project's own instructions shadow ours,
+  into a generated `deepsand-operator-instructions` skill. No prompt means no skill: it exists to
+  carry the operator's words, so `Off` -- or an empty box, wherever the text would have come from --
+  writes none, and the writer removes the one it wrote before. It is written by
+  `settings::operator_skill` into
+  the config mount and installed by the entrypoint into `$DEEPCODE_DIR/skills/` -- the user-level
+  root DeepCode scans that is also writable, since the rootfs is read-only -- and the entrypoint
+  **removes that directory before installing it**, because the home volume outlives the setting and
+  a skill left behind would go on instructing later sessions from a prompt that had been turned off.
+  If you add a fourth place these are read from, they will drift, and the symptom is an agent that
+  follows instructions in one repository and not in the next.
+* **A named build context is not an image, and every build path has to supply it.** The tools layer
+  mounts `from=toolcache`, which BuildKit resolves as a *stage* only because something passes
+  `--build-context toolcache=…`. The app passes its keyed cache. `runtime/scripts/build-image.mjs`
+  passed nothing, so a `npm run runtime:build` -- the command this file tells contributors to run --
+  tried to pull `docker.io/library/toolcache:latest` and died with "pull access denied ...
+  insufficient_scope: authorization failed": a registry message for a problem that was not the
+  registry's. It now passes an empty directory, which the layer reads as "no cache" and installs the
+  tools, and `every_build_path_supplies_the_toolcache_context` keeps both paths honest.
 * **The window is told when a file it read once changes.** The host's DeepCode settings decide
   what "Defer to Config" resolves to, and the backend reads that file fresh on every use, so
   only the *window* can go stale -- which it did, showing a model from startup until it was
@@ -268,6 +303,43 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   emptied *only* when a build that used it failed for a reason that is about the build -- a
   daemon that went away is neither the cache's fault nor the build's, and emptying on one of
   those would throw away minutes of compiling for nothing.
+  **"There is a cache" means the marker and only the marker.** The app creates the entry's `bin/`
+  and `node_modules/` before every build, because a build context has to exist, so a build that
+  tests for those directories is testing something that is always true. That is exactly what the
+  tools step did: it took the cached path on every build, installed nothing, and wrote a label
+  naming every tool that was *asked for*. Images here were labelled `htmlq,puppeteer,wrangler`
+  with none of the three in them -- confirmed against real images and reproduced with a build.
+  `htmlq` is on by default, so this was every project, and the feature's own promise that "a bad
+  entry heals itself" was false: an incomplete entry never failed, so nothing healed it. The
+  app's rule is `toolcache::cache_is_usable` -- marker present and recent -- and
+  `runtime_dockerfile.rs` now asserts that the build asks the same question. The npm globals are
+  additionally asked of npm one at a time (`npm ls -g --depth=0`), because a marker can be right
+  about the entry and wrong about one package, and a cache is an accelerator rather than an
+  authority: that is what lets a partial entry heal itself instead of becoming an image that lies.
+* **A label is a claim about the image, and a claim about the image has to be checkable.** The
+  tools step ends with `LABEL deepsand.tools="$INSTALL_TOOLS"`, and that label is what
+  `deepsand_sandbox_info` reports to the agent as the truth about what it has. So a build that
+  skips an install does not merely produce a thinner image, it produces a sandbox that tells the
+  agent it has a browser: the agent believes it, goes looking, and spends the turn finding out
+  otherwise. Anything the sandbox says about itself has to be derived from what the build
+  produced, or checked -- the way a claim about the *deployed* state belongs in a run rather than
+  in prose.
+* **A browser is four things, and three of them are silent when missing.** The `puppeteer` tool
+  promises "a browser controlled from Node, with its own copy of Chromium". Being able to take a
+  screenshot needs all of: the npm driver, the libraries a browser links against (`libnss3`,
+  `libgbm1`, `libatk1.0-0`, `libcups2`, `libpango-1.0-0`, `libgtk-3-0` and the rest -- none are in
+  the base image), an archiver to unpack the download (`unzip`: without it the browser downloads
+  and cannot be extracted, and because that happens inside the package's own postinstall the error
+  is *swallowed*), and the binary itself, in the cache of the user who will look for it
+  (`PUPPETEER_CACHE_DIR=/home/deepcode/.cache/puppeteer`, owned by 1000, not root's home).
+  Two traps worth remembering. The postinstall's half-finished download leaves a browser folder
+  with no executable in it, and puppeteer then *refuses* to repair it -- "the browser folder exists
+  but the executable does not" -- so the fetch starts by emptying the cache. And a browser keeps its
+  own sandbox with user namespaces, which this container does not allow, so it must be launched with
+  `--no-sandbox`; without it the failure is "Failed to launch the browser process" and nothing that
+  explains why. All of this is now in the tools layer, gated on the tool id, and the build *fails*
+  rather than shipping an image that claims a browser it does not have -- verified end to end here:
+  as uid 1000, under Xvfb, puppeteer rendered a page and wrote a 10 KB PNG.
 * **The tool check empties a cache entry; it never builds.** `tool_updates.rs` asks npm and
   crates.io what they offer for the versions a cache entry recorded when it was filled, and when
   something has moved it empties that entry -- the next *build* installs the tools again and
@@ -302,6 +374,33 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   which is precisely what the watchdog was written to prevent. A stop is the operator's to ask
   for as well: `cancel_build` finds the build by tag in `LIVE_BUILDS` and ends it, and the
   failure says it was stopped rather than broken.
+* **A preflight is bounded by a healthy answer, not by the command timeout.** The host-sharing probe
+  runs while the operator watches "Starting…", and it used to inherit `COMMAND_TIMEOUT` (120 s) for
+  every step -- `create`, `cp` and two `rm`s, on up to two candidate images, per mount. On a machine
+  whose file-sharing layer had stalled that was minutes of nothing: measured here, a `docker cp` of
+  one small file out of a bind mount answers in **0.16 s** when the layer is healthy and took **three
+  minutes** when it was not, with `version`, `images` and `create` answering instantly throughout. It
+  now runs on `SHARING_PROBE_LEASH` (15 s, ~90x a healthy answer), stops at the first silence instead
+  of spending the leash again on the other image, and cleans up on its own short leash. The verdict
+  is typed -- `ProbeStep::Silent` versus `Answered(Err(..))` -- rather than read back out of a
+  sentence, because the two lead to different next steps: a refusal is worth the other image, silence
+  is worth nothing at all. Silence sets `runtime_wedged`, so the window offers the restart instead of
+  showing a directory problem with nothing to press; `docker_status_watched` clears it when Docker
+  recovers. Two smaller things from the same afternoon: the probe container now carries
+  `LABEL_MANAGED`, without which `prune_orphans` could not see the three left behind by one stalled
+  probe, and `sessionOperation` re-reads the docker status when an operation fails, because a start
+  that failed is exactly when the answer may have changed.
+* **When Docker Desktop is unwell, Deepsand says so and offers the restart -- it does not restart it
+  itself.** Restarting it ends *every* container on the machine, including work that has nothing to
+  do with Deepsand, so the decision is the operator's; an automatic restart was built and removed for
+  that reason. What the app owes the operator instead is that the control is actually *in front of
+  them*: the start records the verdict in `runtime_wedged`, `docker_status_impl` turns that into
+  `available: false` with the "its container runtime is not answering" detail, and the window's
+  callout then shows `RestartDockerControl` -- which restarts Docker Desktop *and* retries the start
+  (`restartDockerAndRetry`). The two things that used to break that chain were both silent: the
+  sharing probe did not set the flag at all, so the runtime looked fine and no button appeared, and
+  the window did not re-read the status after a failed operation, so it went on showing the stale
+  "Docker is fine". Any new failure that means "Docker, not this project" has to do both.
 * **Nothing this app starts outlives it.** Windows does not end a child when its parent exits,
   and `std::process::exit` in the shutdown path abandons whatever is still running: a hung
   `docker build` was found an hour and a half after the app had gone, still holding the image
@@ -374,6 +473,17 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   The startup sweeps (orphan cleanup, the availability poll) wait two seconds so they do not
   race the window for the same CLI. If you add a startup path, ask whether the first paint
   needs the answer; if it does not, do not ask the question there.
+* **A terminal resize is not a no-op, so never send one twice.** A window-change makes a
+  full-screen TUI inside the sandbox paint everything it has, so a window that re-fits on every
+  layout pass and tells the sandbox each time turns a layout pass into a repaint of the whole
+  session. That is the failure where the terminal appears to scroll itself over and over, far too
+  fast to read, and will not stay still long enough to scroll up in. Both halves are guarded:
+  `TerminalPane`'s `safeFit` measures with `proposeDimensions` and does nothing when the size is
+  what xterm already has (coalesced to one fit per frame, because a fit inside a `ResizeObserver`
+  callback is a layout change reported back to that observer), and `Session::resize` drops a size
+  the PTY already has via `resize_is_needed`, which also floors a zero-sized pane at 1×1 rather
+  than resizing to nothing. Guarding only the window is not enough: the leak that matters is the
+  one you did not think of.
 * **An egress-proxy test must not read the connection to the end.** The proxy answers a
   tunnel with `200 Connection Established` and then relays, so the connection closes when
   the *far end* closes it: measured here, GitHub at 91 s and Cloudflare at 15 s, which is
@@ -383,6 +493,19 @@ These are load-bearing. Breaking one is how this project gets a CVE.
 * **MCP `tools/call` is capped at 60 s.** The bridge waits ~45 s and then replies
   `PENDING` with a request id; the model collects the answer later with
   `deepsand_check_request`. Do not make the bridge block indefinitely.
+* **A permission dialog freezes the sandbox, and freezing does not stop the clock.** While the
+  operator has a request in front of them the container is `docker pause`d, so the agent cannot
+  work ahead of a decision it has not been given; the broker watcher reconciles that against the
+  pending set every 400 ms through `docker::freeze_transition`, which answers `None` unless the
+  answer changed (a `docker` call is 180-600 ms, so a level-triggered version would spawn one per
+  tick). DeepCode's 60 s budget is a `setTimeout` inside the *frozen* process, and a timer counts
+  down in real time whatever its process is doing: a decision that takes longer than that ends
+  the tool call the agent was waiting on, which is why `deepsand_list_requests` exists -- it names
+  each request and what it was for, so a model that never saw the id can still collect the
+  decision. Two rules come with it. Every removal thaws first (`container_teardown_args`), because
+  a frozen container refuses `exec` and cannot take a signal; and nothing may be left frozen when
+  the app goes away, so `stop_session_internal` thaws and clears, and an orphan sweep at startup
+  removes whatever a crash left behind.
 * **Bind mounts cannot be added to a running container.** An approval recreates
   the container and resumes the session from the named volume. DeepCode's
   `--last` calls `process.exit(1)` when there is no session, so the session index

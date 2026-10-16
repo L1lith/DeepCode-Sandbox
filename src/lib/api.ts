@@ -38,6 +38,7 @@ import type {
   ToolCatalogView,
   UpdateCheck,
   UpdateProgress,
+  UserPromptMode,
 } from "./types";
 
 export const EVENTS = {
@@ -228,6 +229,9 @@ export interface ProjectUpdate {
   deepcodeMode?: DeepCodeMode | null;
   notes?: string | null;
   credentials?: Credentials | null;
+  /** Where this project's standing instructions come from, and its own text when custom. */
+  userPromptMode?: UserPromptMode | null;
+  userPrompt?: string | null;
 }
 
 export const updateProjectSettings = (update: ProjectUpdate) =>

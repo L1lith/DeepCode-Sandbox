@@ -146,6 +146,14 @@ pub struct Tool {
     pub default_on: bool,
     /// Hosts the tool needs to reach while it is enabled.
     pub hosts: &'static [&'static str],
+    /// What switching this on costs, when that is more than a moment.
+    ///
+    /// The operator turns these on with a switch, next to a description and a category, and sees
+    /// no bill: the browser is about 850 MB and a couple of minutes of building, and `cargo
+    /// install` compiles for minutes, and neither is visible from the row that causes it. This is
+    /// for those. `None` everywhere else -- a note on every row is noise, and the point of this
+    /// one is that it appears only where somebody would have wanted to know first.
+    pub cost: Option<&'static str>,
     pub base: Base,
 }
 
@@ -164,6 +172,7 @@ pub const CATALOG: &[Tool] = &[
         package: "jq",
         default_on: true,
         hosts: &[],
+        cost: None,
         base: Base::Debian,
     },
     Tool {
@@ -175,6 +184,7 @@ pub const CATALOG: &[Tool] = &[
         package: "ripgrep",
         default_on: true,
         hosts: &[],
+        cost: None,
         base: Base::Debian,
     },
     Tool {
@@ -186,6 +196,7 @@ pub const CATALOG: &[Tool] = &[
         package: "curl",
         default_on: true,
         hosts: &[],
+        cost: None,
         base: Base::Debian,
     },
     Tool {
@@ -197,6 +208,7 @@ pub const CATALOG: &[Tool] = &[
         package: "zip unzip",
         default_on: true,
         hosts: &[],
+        cost: None,
         base: Base::Debian,
     },
     Tool {
@@ -208,6 +220,7 @@ pub const CATALOG: &[Tool] = &[
         package: "htmlq",
         default_on: true,
         hosts: &[],
+        cost: None,
         base: Base::Debian,
     },
     Tool {
@@ -220,6 +233,7 @@ pub const CATALOG: &[Tool] = &[
         package: "git",
         default_on: true,
         hosts: &[],
+        cost: None,
         base: Base::Debian,
     },
     /* --- capabilities ----------------------------------------------------- */
@@ -240,6 +254,7 @@ pub const CATALOG: &[Tool] = &[
             "www.deepcodeplus.com",
             "chat.deepcodeplus.com",
         ],
+        cost: None,
         base: Base::Any,
     },
     /* --- languages -------------------------------------------------------- */
@@ -252,6 +267,7 @@ pub const CATALOG: &[Tool] = &[
         package: "nodejs",
         default_on: false,
         hosts: &["deb.nodesource.com"],
+        cost: None,
         base: Base::Debian,
     },
     Tool {
@@ -263,6 +279,7 @@ pub const CATALOG: &[Tool] = &[
         package: "npm",
         default_on: false,
         hosts: &["registry.npmjs.org"],
+        cost: None,
         base: Base::Debian,
     },
     Tool {
@@ -274,6 +291,7 @@ pub const CATALOG: &[Tool] = &[
         package: "xvfb x11-utils x11-apps",
         default_on: false,
         hosts: &[],
+        cost: None,
         base: Base::Debian,
     },
     Tool {
@@ -285,6 +303,7 @@ pub const CATALOG: &[Tool] = &[
         package: "puppeteer",
         default_on: false,
         hosts: &["registry.npmjs.org", "storage.googleapis.com"],
+        cost: Some("Adds about 850 MB to this project's image, and a couple of minutes to the next build: a browser, unpacked, plus the libraries it links against."),
         base: Base::Debian,
     },
     Tool {
@@ -296,6 +315,7 @@ pub const CATALOG: &[Tool] = &[
         package: "wrangler",
         default_on: false,
         hosts: &["registry.npmjs.org", "api.cloudflare.com"],
+        cost: None,
         base: Base::Debian,
     },
     Tool {
@@ -307,6 +327,7 @@ pub const CATALOG: &[Tool] = &[
         package: "python3 python3-pip python3-venv",
         default_on: false,
         hosts: &["pypi.org", "files.pythonhosted.org"],
+        cost: None,
         base: Base::Debian,
     },
     Tool {
@@ -318,6 +339,7 @@ pub const CATALOG: &[Tool] = &[
         package: "cargo",
         default_on: false,
         hosts: &["sh.rustup.rs", "static.rust-lang.org", "crates.io", "static.crates.io"],
+        cost: Some("Minutes of compiling the first time this image is built, plus the Rust toolchain."),
         base: Base::Debian,
     },
     Tool {
@@ -329,6 +351,7 @@ pub const CATALOG: &[Tool] = &[
         package: "golang-go",
         default_on: false,
         hosts: &["go.dev", "proxy.golang.org", "sum.golang.org"],
+        cost: None,
         base: Base::Debian,
     },
     /* --- package managers ------------------------------------------------- */
@@ -343,6 +366,7 @@ pub const CATALOG: &[Tool] = &[
         package: "",
         default_on: false,
         hosts: &["deb.debian.org", "security.debian.org"],
+        cost: None,
         base: Base::Debian,
     },
     Tool {
@@ -354,6 +378,7 @@ pub const CATALOG: &[Tool] = &[
         package: "",
         default_on: false,
         hosts: &["dl-cdn.alpinelinux.org"],
+        cost: None,
         base: Base::Alpine,
     },
     Tool {
@@ -365,6 +390,7 @@ pub const CATALOG: &[Tool] = &[
         package: "",
         default_on: false,
         hosts: &["brew.sh", "github.com", "*.githubusercontent.com"],
+        cost: None,
         base: Base::Debian,
     },
     Tool {
@@ -378,6 +404,7 @@ pub const CATALOG: &[Tool] = &[
         package: "",
         default_on: false,
         hosts: &["nixos.org", "cache.nixos.org", "releases.nixos.org"],
+        cost: None,
         base: Base::Debian,
     },
 ];
@@ -602,6 +629,45 @@ mod tests {
                 !tool.description.trim().is_empty(),
                 "{} has no description, so the GUI cannot explain it",
                 tool.id
+            );
+        }
+    }
+
+    /// The one tool that adds most of a gigabyte says so, before it is switched on.
+    ///
+    /// Measured, not estimated: the same image built with and without this tool is 489 MB and
+    /// 1.32 GB, and 669 MB of that difference is the browser sitting in the sandbox user's cache.
+    /// An operator choosing tools sees a switch and a one-line description, so without this note
+    /// the first news of the cost is the next build.
+    #[test]
+    fn the_browser_tool_says_what_it_costs() {
+        let tool = find("puppeteer").expect("the puppeteer tool is in the catalogue");
+        let cost = tool.cost.expect("puppeteer has to say what it costs");
+        assert!(
+            cost.contains("MB") || cost.contains("GB"),
+            "the note has to give a size, because that is the part nobody can guess: {cost}"
+        );
+        assert!(
+            cost.to_lowercase().contains("build") || cost.to_lowercase().contains("minute"),
+            "and it has to say that the build gets slower, which is the other half: {cost}"
+        );
+    }
+
+    /// A cost note is shown on a row, so it stays a sentence rather than becoming a paragraph.
+    #[test]
+    fn every_cost_note_is_a_sentence_short_enough_to_render() {
+        for tool in CATALOG {
+            let Some(cost) = tool.cost else { continue };
+            assert!(
+                cost.trim().ends_with('.'),
+                "{}'s cost note is not a sentence: {cost}",
+                tool.id
+            );
+            assert!(
+                cost.len() <= 160,
+                "{}'s cost note is {} characters, which is a paragraph on a tool row",
+                tool.id,
+                cost.len()
             );
         }
     }

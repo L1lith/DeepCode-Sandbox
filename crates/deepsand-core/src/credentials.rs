@@ -366,6 +366,8 @@ mod tests {
             resume_on_launch: false,
             was_running: false,
             notes: String::new(),
+            user_prompt_mode: Default::default(),
+            user_prompt: String::new(),
         }
     }
 

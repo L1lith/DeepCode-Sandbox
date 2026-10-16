@@ -249,6 +249,18 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "deepsand_list_requests",
+    description:
+      "List the permission requests this sandbox has a record of, with where each one stands. Use this after a request " +
+      "call that failed or timed out: while the operator was deciding, the sandbox was held still, and a decision that " +
+      "took longer than the call's own budget is collected with deepsand_check_request rather than by asking again.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
 ];
 
 /* ------------------------------------------------------------------------- */
@@ -293,6 +305,32 @@ async function requestStillOpen(id) {
   }
 }
 
+/**
+ * Every request this sandbox has a record of, and where each one stands.
+ *
+ * The ids come from two places because neither is complete on its own. The answer files in the
+ * spool outlive the container -- which is what granting a new directory does, replacing the
+ * process that made the request -- while this bridge's own memory is all there is for a request
+ * whose answer has not been written yet. A listing built from only one of them would come back
+ * empty in exactly one of the two cases it exists for.
+ */
+async function listKnownRequests() {
+  const known = new Map();
+  try {
+    for (const name of await fsp.readdir(RESPONSES_DIR)) {
+      if (!name.endsWith(".json")) continue;
+      known.set(name.slice(0, -".json".length), "answered");
+    }
+  } catch {
+    /* no answer has been written yet */
+  }
+  for (const id of issuedRequestIds) {
+    if (known.has(id)) continue;
+    known.set(id, (await requestStillOpen(id)) ? "pending" : "unanswered");
+  }
+  return known;
+}
+
 async function writeRequestFile(request) {
   await ensureSpool();
   const finalPath = path.join(REQUESTS_DIR, `${request.id}.json`);
@@ -329,6 +367,42 @@ async function readState() {
   return out;
 }
 
+/**
+ * The operator's standing instructions for this project, or an empty string.
+ *
+ * Two copies of this text reach the model on purpose. The other is in the instructions file
+ * Deepsand generates and installs, and DeepCode reads that file *only* when the project has neither
+ * `AGENTS.md` nor `.deepcode/AGENTS.md` of its own -- most real repositories ship one, so the file
+ * is silently ignored in exactly the projects where instructions matter most. This copy has no such
+ * dependency: a tool description is in the model's context for every request, unconditionally.
+ */
+async function operatorInstructions() {
+  const state = await readState();
+  return String(state.sandbox?.user_prompt ?? "").trim();
+}
+
+/**
+ * The tool list as the model receives it.
+ *
+ * Built rather than returned as the constant so the operator's instructions can ride the one
+ * channel no file in the project can shadow (see `operatorInstructions`).
+ */
+async function toolList() {
+  const instructions = await operatorInstructions();
+  if (!instructions) return TOOLS;
+  return TOOLS.map((tool) =>
+    tool.name === "deepsand_sandbox_info"
+      ? {
+          ...tool,
+          description:
+            `${tool.description}\n\n` +
+            "The operator has set standing instructions for this project. They apply to " +
+            `everything you do here:\n\n${instructions}`,
+        }
+      : tool,
+  );
+}
+
 function newRequestId() {
   return `req_${Date.now().toString(36)}_${crypto.randomBytes(6).toString("hex")}`;
 }
@@ -339,6 +413,33 @@ function newRequestId() {
  * host has not refreshed its state snapshot yet.
  */
 const issuedRequestIds = new Set();
+
+/**
+ * What each of those ids asked for, so a listing can name it. An id on its own is
+ * useless to a model that never saw the call it belongs to -- which is exactly the case
+ * this exists for: a request whose tool call timed out while the operator was deciding,
+ * because the sandbox was held frozen past the call's own budget.
+ */
+const issuedRequests = new Map();
+
+/** One line naming what a request asked for, for a listing a model can act on. */
+function summariseRequest(kind, args) {
+  const a = args ?? {};
+  switch (kind) {
+    case "directory_access":
+      return `${a.host_path ?? "a directory"}${a.access === "write" ? " (read-write)" : " (read-only)"}`;
+    case "locate_resource":
+      return a.description || a.kind || "a resource";
+    case "network_access":
+      return Array.isArray(a.patterns) ? a.patterns.join(", ") : "a host";
+    case "secret":
+      return a.name || "a secret";
+    case "tool_install":
+      return Array.isArray(a.tools) ? a.tools.join(", ") : "a tool";
+    default:
+      return kind;
+  }
+}
 
 /**
  * Submit a request and wait up to WAIT_MS for a human answer.
@@ -370,6 +471,7 @@ async function submitAndWait(kind, args) {
 
   const id = newRequestId();
   issuedRequestIds.add(id);
+  issuedRequests.set(id, summariseRequest(kind, args));
   const request = {
     v: 1,
     id,
@@ -456,6 +558,23 @@ async function sandboxInfoText() {
     lines.push("  (none - the operator has not shared anything beyond the workspace)");
   } else {
     for (const g of grants) lines.push(describeGrant(g));
+  }
+
+  // After the facts, before the closing advice: the model asked what this sandbox is, and the
+  // operator's own words are the part of that answer a person wrote. The same text rides the tool
+  // description (see `operatorInstructions`), so a model that never calls this still has it.
+  const instructions = String(state.sandbox?.user_prompt ?? "").trim();
+  if (instructions) {
+    lines.push(
+      "",
+      "## Standing instructions from the operator",
+      "",
+      instructions,
+      "",
+      "These come from Deepsand's settings rather than from a file in the project, and they say what",
+      "the operator wants. They do not widen what this sandbox can reach: if one of them assumes",
+      "access you do not have, ask for it rather than working around it.",
+    );
   }
 
   lines.push(
@@ -706,6 +825,30 @@ async function callTool(name, args) {
       return renderDecision("request", response);
     }
 
+    case "deepsand_list_requests": {
+      const known = await listKnownRequests();
+      if (known.size === 0) {
+        return textResult("No permission requests are on record for this sandbox.");
+      }
+      const lines = [...known].map(([id, status]) => {
+        const what = issuedRequests.get(id);
+        const named = what ? `${id} (${what})` : id;
+        if (status === "answered") return `${named}: answered - read it with deepsand_check_request`;
+        if (status === "pending") return `${named}: still waiting for the operator to decide`;
+        return `${named}: no answer recorded`;
+      });
+      return textResult(
+        [
+          "Permission requests on record for this sandbox:",
+          "",
+          ...lines,
+          "",
+          "If one of your request calls failed or timed out, the operator may have decided while the",
+          "sandbox was held still: read that request with deepsand_check_request before asking again.",
+        ].join("\n"),
+      );
+    }
+
     default:
       return textResult(`Unknown tool '${name}'.`, true);
   }
@@ -748,7 +891,7 @@ async function handleRequest(msg) {
       return;
 
     case "tools/list":
-      sendResult(id, { tools: TOOLS });
+      sendResult(id, { tools: await toolList() });
       return;
 
     case "tools/call": {

@@ -674,6 +674,11 @@ async fn dispatch(
             optional(args, "notes")?,
             optional(args, "credentials")?,
             optional(args, "resumeOnLaunch")?,
+            // Reachable remotely for the same reason the rest of this call is: a client the
+            // operator has allowed to change a project's posture is allowed to say what the model
+            // is told. The capability check above this table is what bounds it.
+            optional(args, "userPromptMode")?,
+            optional(args, "userPrompt")?,
         )?),
         "set_requests_enabled" => to_value(commands::set_requests_enabled_impl(
             &app,

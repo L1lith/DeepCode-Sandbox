@@ -245,6 +245,50 @@ impl Default for DeepCodeMode {
     }
 }
 
+/// Where a project's standing instructions come from.
+///
+/// Not DeepCode's `userPrompt`, which is the message somebody types into the CLI: this is the text
+/// the model is given *before* anybody types anything, so it is what every session in the project
+/// starts from. Three answers rather than a flag next to a string, because "use the app-wide one",
+/// "use mine" and "send none" are three intentions, and only the middle one needs a text box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserPromptMode {
+    /// Use the operator's app-wide prompt. The default, so setting one app-wide takes effect
+    /// everywhere without an edit per project.
+    Global,
+    /// Use this project's own text, whatever the app-wide one says.
+    Custom,
+    /// Send none, even though an app-wide one is set -- for a project the operator wants the model
+    /// to work on from the repository alone.
+    Off,
+}
+
+impl Default for UserPromptMode {
+    fn default() -> Self {
+        UserPromptMode::Global
+    }
+}
+
+impl UserPromptMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UserPromptMode::Global => "global",
+            UserPromptMode::Custom => "custom",
+            UserPromptMode::Off => "off",
+        }
+    }
+
+    /// The label the window puts on the segment.
+    pub fn label(self) -> &'static str {
+        match self {
+            UserPromptMode::Global => "Global",
+            UserPromptMode::Custom => "Custom",
+            UserPromptMode::Off => "Off",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
@@ -421,6 +465,16 @@ pub struct Project {
     /// stopped. This is state rather than a setting, which is why nothing in the window writes it.
     #[serde(default)]
     pub was_running: bool,
+    /// Which standing instructions this project's sessions are given.
+    #[serde(default)]
+    pub user_prompt_mode: UserPromptMode,
+    /// This project's own instructions, used when the mode is [`UserPromptMode::Custom`].
+    ///
+    /// Kept even while the mode is something else, so switching to `Global` for a week and back
+    /// does not lose what was written. Skipped when empty rather than written as `""`, so a project
+    /// that has never had one does not grow the field.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub user_prompt: String,
 }
 
 impl Project {
@@ -710,6 +764,17 @@ pub struct AppSettings {
     /// running containers they cannot see.
     #[serde(default)]
     pub close_to_tray: bool,
+    /// Standing instructions for every project that has not overridden them.
+    ///
+    /// What the model is told before anybody types anything, in every project whose
+    /// `user_prompt_mode` is `Global` -- which is every project until one is set otherwise. Empty
+    /// means nothing is sent, and an empty or whitespace-only value counts as empty everywhere it
+    /// is read, so clearing the box turns the feature off rather than sending a blank section.
+    ///
+    /// Deliberately *not* DeepCode's `userPrompt`, which is the message an operator types into the
+    /// CLI. This is the other direction: what is true for every session, said once.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub user_prompt: String,
 }
 
 fn default_image() -> String {
@@ -756,6 +821,7 @@ impl Default for AppSettings {
             startup: StartupMode::Off,
             close_to_tray: false,
             check_tool_updates: true,
+            user_prompt: String::new(),
         }
     }
 }
@@ -821,6 +887,19 @@ pub struct SandboxSnapshot {
     /// instead of guessing or trying to install something itself.
     #[serde(default)]
     pub tools: Vec<String>,
+    /// The operator's standing instructions, already resolved from the app-wide setting or this
+    /// project's own.
+    ///
+    /// Carried here as well as in the generated `AGENTS.md` for one reason: DeepCode reads
+    /// `<project>/AGENTS.md` or `<project>/.deepcode/AGENTS.md` if either exists, and only falls
+    /// back to the file Deepsand installs when it has neither. Most real repositories ship one, so
+    /// the generated file -- and everything in it -- is silently ignored in exactly the projects
+    /// where instructions matter most. The bridge's own tool list has no such dependency, so the
+    /// instructions go there too and reach the model either way.
+    ///
+    /// Empty means this project sends none.
+    #[serde(default)]
+    pub user_prompt: String,
     pub started_at_ms: i64,
     pub grants: Vec<SandboxGrant>,
     /// Requests currently awaiting an operator decision.
@@ -1429,6 +1508,7 @@ mod request_gate_tests {
             &project.network,
             Vec::new(),
             Vec::new(),
+            &Default::default(),
         );
         assert!(!snapshot.requests_enabled);
         assert_eq!(snapshot.requests_disabled_message, REQUESTS_DISABLED_MESSAGE);
@@ -1443,6 +1523,7 @@ mod request_gate_tests {
             &project.network,
             Vec::new(),
             Vec::new(),
+            &Default::default(),
         );
         assert!(snapshot.requests_enabled);
         assert!(
@@ -1481,6 +1562,113 @@ mod agents_md_gate_tests {
         .unwrap()
     }
 
+    /// A project that has expressed an opinion about where its instructions come from.
+    fn project_with_prompt(mode: UserPromptMode, own: &str) -> Project {
+        let mut project = project(true);
+        project.user_prompt_mode = mode;
+        project.user_prompt = own.to_string();
+        project
+    }
+
+    /// The default has to be the app-wide one, or setting it app-wide helps only the projects
+    /// somebody remembers to visit.
+    #[test]
+    fn a_project_uses_the_app_wide_prompt_unless_it_says_otherwise() {
+        let settings = AppSettings {
+            user_prompt: "Prefer small commits.".into(),
+            ..AppSettings::default()
+        };
+        assert_eq!(
+            crate::settings::resolve_user_prompt(&project(true), &settings),
+            Some("Prefer small commits."),
+            "a project that never chose has to follow the app-wide prompt"
+        );
+    }
+
+    /// Three modes, three answers -- and `Off` is a decision that outranks the app-wide text rather
+    /// than a way of clearing a box.
+    #[test]
+    fn a_project_can_override_the_prompt_or_refuse_it() {
+        let settings = AppSettings {
+            user_prompt: "Prefer small commits.".into(),
+            ..AppSettings::default()
+        };
+
+        let custom = project_with_prompt(UserPromptMode::Custom, "This repo is TypeScript only.");
+        assert_eq!(
+            crate::settings::resolve_user_prompt(&custom, &settings),
+            Some("This repo is TypeScript only."),
+            "Custom means the project's own text, not the app-wide one"
+        );
+
+        let off = project_with_prompt(UserPromptMode::Off, "This repo is TypeScript only.");
+        assert_eq!(
+            crate::settings::resolve_user_prompt(&off, &settings),
+            None,
+            "a project that refuses instructions sends none, however loud the app-wide one is"
+        );
+        assert_eq!(
+            off.user_prompt, "This repo is TypeScript only.",
+            "Off must not throw the project's own text away"
+        );
+    }
+
+    /// An empty box is off. Otherwise clearing the prompt sends a blank section the model has to
+    /// interpret, and an operator who deleted their text would believe it was still in force.
+    #[test]
+    fn a_blank_prompt_is_no_prompt() {
+        let whitespace = AppSettings {
+            user_prompt: "   \n\t ".into(),
+            ..AppSettings::default()
+        };
+        assert_eq!(
+            crate::settings::resolve_user_prompt(&project(true), &whitespace),
+            None
+        );
+
+        let blank_custom = project_with_prompt(UserPromptMode::Custom, "  ");
+        assert_eq!(
+            crate::settings::resolve_user_prompt(&blank_custom, &whitespace),
+            None
+        );
+    }
+
+    /// In the file the model reads, the operator's words come through verbatim -- and so does the
+    /// fact that they cannot widen what the sandbox reaches. Without that second half, a prompt
+    /// saying "you have full access to the host machine" reads as a grant.
+    #[test]
+    fn the_generated_instructions_carry_the_operators_words_without_widening_the_sandbox() {
+        let settings = AppSettings {
+            user_prompt: "Always write the changelog entry first.".into(),
+            ..AppSettings::default()
+        };
+        let md = crate::settings::build_agents_md(
+            &project(true),
+            &[],
+            &NetworkPolicy::Internet,
+            &creds(),
+            &settings,
+        );
+        assert!(
+            md.contains("Always write the changelog entry first."),
+            "the operator's own words have to reach the model: {md}"
+        );
+        assert!(
+            md.contains("They do not change what this sandbox is"),
+            "a prompt must not be readable as a grant of access: {md}"
+        );
+
+        // And a project that sends none has no section at all, rather than an empty one.
+        let none = crate::settings::build_agents_md(
+            &project(true),
+            &[],
+            &NetworkPolicy::Internet,
+            &creds(),
+            &AppSettings::default(),
+        );
+        assert!(!none.contains("What the operator wants"));
+    }
+
     #[test]
     fn the_sandbox_is_told_when_it_cannot_ask() {
         let off = crate::settings::build_agents_md(
@@ -1488,6 +1676,7 @@ mod agents_md_gate_tests {
             &[],
             &NetworkPolicy::Allowlisted { allow: vec![] },
             &creds(),
+            &AppSettings::default(),
         );
         assert!(
             off.contains("Permission requests are off"),
@@ -1499,6 +1688,7 @@ mod agents_md_gate_tests {
             &[],
             &NetworkPolicy::Allowlisted { allow: vec![] },
             &creds(),
+            &AppSettings::default(),
         );
         assert!(
             !on.contains("Permission requests are off"),
@@ -1517,6 +1707,7 @@ mod agents_md_gate_tests {
             &[],
             &NetworkPolicy::Allowlisted { allow: vec!["registry.npmjs.org".into()] },
             &creds(),
+            &AppSettings::default(),
         );
         assert!(md.contains("proxy"), "{md}");
         assert!(

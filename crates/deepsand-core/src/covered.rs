@@ -200,6 +200,7 @@ mod tests {
             network_mode: "allowlisted".into(),
             egress_allowlist: allow.iter().map(|s| (*s).to_string()).collect(),
             tools: tools.iter().map(|s| (*s).to_string()).collect(),
+            user_prompt: String::new(),
             started_at_ms: 0,
             grants: vec![SandboxGrant {
                 host_path: "/home/me/brand-assets".into(),

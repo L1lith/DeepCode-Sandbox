@@ -409,6 +409,12 @@ function ToolRow(props: {
 
         <p class="tool-desc">{props.tool.description}</p>
 
+        {/* Before the switch, not after it: this is the only warning about a cost the operator
+            would otherwise discover on the next build. */}
+        <Show when={props.tool.costNote}>
+          {(note) => <p class="tool-note tool-note-warn">{note()}</p>}
+        </Show>
+
         <Show when={locked()}>
           <p class="tool-note tool-note-warn">{props.tool.unavailableReason}</p>
         </Show>

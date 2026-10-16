@@ -78,19 +78,37 @@ pub struct ProjectView {
     pub notes: String,
     /// Whether this project starts itself when Deepsand starts.
     pub resume_on_launch: bool,
+    /// Where this project's standing instructions come from. The window shows it as a three-way
+    /// control; what the model is actually told is decided once, in the core, by
+    /// `settings::resolve_user_prompt`.
+    pub user_prompt_mode: UserPromptMode,
+    /// This project's own instructions, shown when the mode is `Custom`. Sent to nobody while the
+    /// mode is something else, but kept so switching back finds it where it was left.
+    pub user_prompt: String,
     /// Whether the sandbox may ask for permissions at all. Surfaced so the Permissions
     /// tab can show and change it, and so a request dialog can offer to turn it off.
     pub requests_enabled: bool,
     /// Derived, for the sidebar and header.
     pub container_name: String,
     pub running: bool,
+    /// Whether this process has this project's sandbox frozen, which it does while a permission
+    /// dialog is open so the agent cannot work ahead of the decision. From memory rather than
+    /// from Docker: this is on the path of every project list, and an inspect per project there
+    /// would cost more than the whole rest of the list.
+    pub paused: bool,
     pub workspace_exists: bool,
     pub grant_count: usize,
     pub pending_requests: usize,
 }
 
 impl ProjectView {
-    pub fn new(project: &Project, running: bool, grant_count: usize, pending_requests: usize) -> Self {
+    pub fn new(
+        project: &Project,
+        running: bool,
+        paused: bool,
+        grant_count: usize,
+        pending_requests: usize,
+    ) -> Self {
         Self {
             id: project.id.clone(),
             name: project.name.clone(),
@@ -103,10 +121,13 @@ impl ProjectView {
             deepcode_mode: project.deepcode_mode,
             allowed_roots: project.allowed_roots.clone(),
             resume_on_launch: project.resume_on_launch,
+            user_prompt_mode: project.user_prompt_mode,
+            user_prompt: project.user_prompt.clone(),
             notes: project.notes.clone(),
             requests_enabled: project.requests_enabled,
             container_name: project.container_name(),
             running,
+            paused,
             workspace_exists: std::path::Path::new(&project.root_dir).is_dir(),
             grant_count,
             pending_requests,
@@ -202,6 +223,14 @@ pub struct BlockedEgressView {
 #[serde(rename_all = "camelCase")]
 pub struct AppInfo {
     pub version: String,
+    /// Whether this binary was built for development rather than release.
+    ///
+    /// From the backend rather than the frontend, because the two can disagree and the backend is
+    /// the one that knows: a release build runs against the same window, and a debug build
+    /// (`app:build:debug`) is a local build even though it is served as built assets rather than by
+    /// the dev server. The window shows it beside the version, so a bug reported from a screenshot
+    /// says which kind of build produced it.
+    pub dev: bool,
     pub data_dir: String,
     /// `None` until the window has asked (`docker_status`). Probing here would put three
     /// Docker CLI calls in front of the first paint, and nothing the first paint draws needs
@@ -263,6 +292,10 @@ pub struct ToolView {
     pub unavailable_reason: Option<String>,
     /// Hosts the tool opens in the network filter while it is enabled.
     pub hosts: Vec<String>,
+    /// What switching this on costs, when that is worth knowing before it is switched on: the
+    /// browser adds most of a gigabyte to the image and a couple of minutes to the build, and a
+    /// switch sitting next to a one-line description does not say so.
+    pub cost_note: Option<String>,
     /// The base image the tool needs, so a disabled row can say what it needs rather
     /// than just being greyed out.
     pub requires: String,
@@ -516,6 +549,14 @@ pub struct AppState {
     pub pending_order: Mutex<Vec<String>>,
     pub brokers: Mutex<HashMap<String, BrokerControl>>,
     pub proxies: Mutex<HashMap<String, Arc<EgressProxy>>>,
+    /// Projects whose sandbox this process has frozen.
+    ///
+    /// Only ever the answer Docker gave, never the intent: a pause that failed (a container that
+    /// is not running cannot be frozen) must not make the window say the sandbox is held when it
+    /// is not. `start_broker` freezes on a request that reaches the dialog and thaws when there
+    /// is nothing left to decide; `stop_session_internal` clears it, so a stopped project is
+    /// never remembered as frozen.
+    pub frozen: Mutex<std::collections::HashSet<String>>,
     /// Running HTTP servers, keyed by server id, so the UI can report what is
     /// listening and stop it again.
     pub remote_servers: Mutex<HashMap<String, crate::remote_server::RunningServer>>,
@@ -579,6 +620,7 @@ impl AppState {
             proxies: Mutex::new(HashMap::new()),
             remote_servers: Mutex::new(HashMap::new()),
             starting: Mutex::new(std::collections::HashSet::new()),
+            frozen: Mutex::new(std::collections::HashSet::new()),
         runtime_wedged: std::sync::atomic::AtomicBool::new(false),
             building: Mutex::new(std::collections::HashSet::new()),
             verified_seccomp: Mutex::new(None),
@@ -625,6 +667,21 @@ impl AppState {
             .values()
             .map(|live| live.container_name.clone())
             .collect()
+    }
+
+    /// Whether this process has the project's sandbox frozen.
+    pub fn is_frozen(&self, project_id: &str) -> bool {
+        self.frozen.lock().unwrap_or_else(|p| p.into_inner()).contains(project_id)
+    }
+
+    /// Record that the project's sandbox is frozen now.
+    pub fn mark_frozen(&self, project_id: &str) {
+        self.frozen.lock().unwrap_or_else(|p| p.into_inner()).insert(project_id.to_string());
+    }
+
+    /// Forget that the project's sandbox is frozen, returning whether it was.
+    pub fn clear_frozen(&self, project_id: &str) -> bool {
+        self.frozen.lock().unwrap_or_else(|p| p.into_inner()).remove(project_id)
     }
 
     pub fn is_running(&self, project_id: &str) -> bool {

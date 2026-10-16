@@ -45,6 +45,30 @@ pub struct Session {
     writer: std::sync::Arc<std::sync::Mutex<Box<dyn Write + Send>>>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     description: String,
+    /// The size the terminal was last given, or `None` before anything asked.
+    ///
+    /// Kept so the same size is never sent twice: see `resize_is_needed`.
+    size: std::sync::Mutex<Option<(u16, u16)>>,
+}
+
+/// The size a resize would actually apply.
+///
+/// A pane hidden mid-layout measures zero, and a zero-sized terminal is one that has to be
+/// corrected afterwards, so the floor is one row and one column rather than zero.
+pub fn applied_size(rows: u16, cols: u16) -> (u16, u16) {
+    (rows.max(1), cols.max(1))
+}
+
+/// Whether the terminal needs to hear about a size at all.
+///
+/// A window-change is not a no-op to what is running inside it: a full-screen TUI redraws
+/// everything it has when the terminal changes size. So telling it the size it already has turns
+/// somebody else's layout pass into a repaint of the whole session -- and a window that re-fits
+/// on every layout pass, in that state, is a redraw loop. That is what an endless fast scroll of
+/// the entire session is: too quick to read, and impossible to scroll up in, because the output
+/// never stops arriving long enough for the viewport to stay where it was put.
+pub fn resize_is_needed(current: Option<(u16, u16)>, rows: u16, cols: u16) -> bool {
+    current != Some(applied_size(rows, cols))
 }
 
 /// Create the terminal and spawn the docker client in it, returning the master and the child.
@@ -186,6 +210,7 @@ impl Session {
             writer,
             killer,
             description,
+            size: std::sync::Mutex::new(Some(applied_size(options.rows, options.cols))),
         })
     }
 
@@ -196,15 +221,37 @@ impl Session {
         Ok(())
     }
 
+    /// Resize the terminal, once per size.
+    ///
+    /// A repeat is dropped rather than sent: see `resize_is_needed`. The window also stops asking
+    /// (see `safeFit` in the terminal pane), and this is the half that holds even when something
+    /// else starts asking -- a layout pass, an observer, or a future caller that has not read this.
     pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+        let wanted = applied_size(rows, cols);
+        {
+            let last = self.size.lock().unwrap_or_else(|p| p.into_inner());
+            if !resize_is_needed(*last, rows, cols) {
+                return Ok(());
+            }
+        }
         self.master
             .resize(PtySize {
-                rows: rows.max(1),
-                cols: cols.max(1),
+                rows: wanted.0,
+                cols: wanted.1,
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|err| SandboxError::Broker(format!("could not resize the terminal: {err}")))
+            .map_err(|err| SandboxError::Broker(format!("could not resize the terminal: {err}")))?;
+        // Recorded only once the terminal took it, so a failed resize is retried by the next
+        // request rather than being remembered as applied.
+        let mut last = self.size.lock().unwrap_or_else(|p| p.into_inner());
+        *last = Some(wanted);
+        // Debug rather than info: dragging a window legitimately resizes once a frame for a
+        // moment, and this line is only interesting when the sizes churn on their own.
+        // `RUST_LOG=deepsand=debug` is what turns it on, and that is the first thing to reach for
+        // if a terminal ever starts repainting itself again.
+        tracing::debug!(rows = wanted.0, cols = wanted.1, "terminal resized");
+        Ok(())
     }
 
     pub fn command_line(&self) -> &str {
@@ -477,5 +524,28 @@ mod terminal_query_tests {
         assert_eq!(terminal_replies(b"hello", 24, 80), None);
         assert_eq!(terminal_replies(b"\x1b[2J\x1b[H", 24, 80), None);
         assert_eq!(terminal_replies(b"", 24, 80), None);
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+
+    /// The claim the fix rests on: a size the terminal already has is not sent to it again.
+    #[test]
+    fn a_size_the_terminal_already_has_is_not_sent_again() {
+        assert!(!resize_is_needed(Some((40, 120)), 40, 120), "the same size is not a resize");
+        assert!(resize_is_needed(Some((40, 120)), 41, 120), "a row more is");
+        assert!(resize_is_needed(Some((40, 120)), 40, 119), "a column fewer is");
+    }
+
+    /// A terminal that has never been sized needs sizing, and a pane that measures zero is never
+    /// left as a zero-sized terminal -- so a hidden pane's layout pass asks for nothing once it
+    /// has been sized properly, which is what stops a layout pass becoming a resize.
+    #[test]
+    fn a_terminal_is_sized_once_and_never_to_zero() {
+        assert!(resize_is_needed(None, 24, 80), "nothing has asked yet");
+        assert_eq!(applied_size(0, 0), (1, 1));
+        assert!(!resize_is_needed(Some((1, 1)), 0, 0));
     }
 }

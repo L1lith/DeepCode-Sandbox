@@ -28,6 +28,7 @@ import {
   type RemoteServerConfig,
   type UpdateCheck,
   type UpdateProgress,
+  type UserPromptMode,
 } from "../lib/types";
 import {
   describeError,
@@ -87,6 +88,16 @@ export function PermissionDialog(props: { request: PermissionRequestView; queued
   const [note, setNote] = createSignal("");
     const [busy, setBusy] = createSignal(false);
   const [check, setCheck] = createSignal<{ ok: boolean; text: string } | null>(null);
+
+  /**
+   * Whether the sandbox that made this request is being held still.
+   *
+   * It is, while a dialog like this one is open -- that is the point of the freeze: the agent
+   * cannot work ahead of a decision it has not been given. Read from the project list rather
+   * than asked for separately, because the list already carries it.
+   */
+  const heldSandbox = () =>
+    store.projects.some((project) => project.id === request().projectId && project.paused);
 
   // A new request may arrive while this one is open; re-seed the form.
   createEffect(() => {
@@ -235,6 +246,13 @@ export function PermissionDialog(props: { request: PermissionRequestView; queued
       }
     >
       <div class="stack">
+        <Show when={heldSandbox()}>
+          <div class="callout callout-warn">
+            Nothing is running in the sandbox while this is open, so the agent cannot work ahead of
+            your decision. If you take more than a minute, the call it was waiting on ends in a
+            timeout — it collects your decision afterwards rather than guessing.
+          </div>
+        </Show>
         <Show when={request().purpose}>
           {(purpose) => (
             <div class="callout callout-info">
@@ -656,6 +674,19 @@ export function ProjectSettingsDialog(props: { project: ProjectView; onClose: ()
   const [baseUrl, setBaseUrl] = createSignal(props.project.credentials.base_url ?? "");
   const [apiKey, setApiKey] = createSignal("");
   const [inherit, setInherit] = createSignal(props.project.credentials.source !== "project");
+  // Both halves of the instruction choice, so saving moves the mode and the text together: the
+  // mode decides whether the text is sent, and a save that carried one without the other would
+  // either send the old text under the new mode or drop the new text on the floor.
+  const [promptMode, setPromptMode] = createSignal<UserPromptMode>(props.project.userPromptMode);
+  const [prompt, setPrompt] = createSignal(props.project.userPrompt);
+  /**
+   * What "Global" will actually send.
+   *
+   * Shown rather than named, because the alternative is a segment that says "Global" and leaves the
+   * operator to remember what that is -- and to notice that it is empty, which is the difference
+   * between an instruction and nothing at all.
+   */
+  const globalPrompt = () => (store.settings?.user_prompt ?? "").trim();
   const [busy, setBusy] = createSignal(false);
 
   async function save() {
@@ -665,6 +696,8 @@ export function ProjectSettingsDialog(props: { project: ProjectView; onClose: ()
         projectId: props.project.id,
         deepcodeMode: mode(),
         limits: limits(),
+        userPromptMode: promptMode(),
+        userPrompt: prompt(),
         credentials: inherit()
           ? { source: "inherit_host" }
           : {
@@ -750,6 +783,50 @@ export function ProjectSettingsDialog(props: { project: ProjectView; onClose: ()
           <span class="hint">
             The container is the real boundary. Strict mode additionally makes DeepCode prompt for network, MCP and
             out-of-workspace access, with the prompts appearing in the terminal.
+          </span>
+        </div>
+
+        <div class="field">
+          <label>Instructions for the agent (user prompt)</label>
+          <SegmentedSlider
+            ariaLabel="User prompt"
+            value={promptMode()}
+            onChange={setPromptMode}
+            options={[
+              { value: "global", label: "Global", title: "The app-wide prompt, from Settings." },
+              { value: "custom", label: "Custom", title: "This project's own prompt, typed below." },
+              { value: "off", label: "Off", title: "Send no standing instructions in this project." },
+            ]}
+          />
+          <Show when={promptMode() === "global"}>
+            <Show
+              when={globalPrompt()}
+              fallback={
+                <span class="hint">
+                  No app-wide prompt is set, so nothing is sent. Write one in Settings and it applies here and in every
+                  other project that is on Global.
+                </span>
+              }
+            >
+              {(text) => (
+                <div class="prompt-preview" title="The app-wide prompt, from Settings">
+                  {text()}
+                </div>
+              )}
+            </Show>
+          </Show>
+          <Show when={promptMode() === "custom"}>
+            <textarea
+                            rows="6"
+              placeholder="For example: this repository is TypeScript only, and nothing is finished until npm test passes."
+              value={prompt()}
+              onInput={(event) => setPrompt(event.currentTarget.value)}
+            />
+          </Show>
+          <span class="hint">
+            The model is given this before anybody types anything, in every session of this project. It cannot widen
+            what the sandbox reaches — an instruction that assumes more access is a reason to ask for it, not a
+            permission — and it arrives whether or not your project has an AGENTS.md of its own.
           </span>
         </div>
 
@@ -1590,6 +1667,25 @@ export function SettingsDialog(props: { settings: AppSettings; onClose: () => vo
         </div>
 
         <div class="field">
+          <label for="set-user-prompt">User prompt</label>
+          <textarea
+            id="set-user-prompt"
+            rows="6"
+            placeholder="For example: explain the reasoning before the change, and never commit anything without asking."
+            /* `?? ""`: the backend omits this field while it is empty, and a text area bound to
+               `undefined` renders the word "undefined" -- which the operator would then edit. */
+            value={draft().user_prompt ?? ""}
+            onInput={(event) => setDraft({ ...draft(), user_prompt: event.currentTarget.value })}
+          />
+          <span class="hint">
+            Standing instructions the model is given before anybody types anything, in every project
+            that has not set its own. Each project chooses between this, its own prompt, and none,
+            in its settings. Saved as you type; a sandbox that is already running keeps the prompt it
+            started with.
+          </span>
+        </div>
+
+        <div class="field">
           <label>Network for new projects</label>
           <NetworkSlider
             value={draft().default_network.mode}
@@ -1968,3 +2064,4 @@ export function Toasts() {
 }
 
 import { NetworkSlider } from "./NetworkSlider";
+import { SegmentedSlider } from "./SegmentedSlider";

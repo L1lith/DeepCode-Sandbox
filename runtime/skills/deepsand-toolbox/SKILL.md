@@ -41,6 +41,15 @@ These are the ids. Anything not in this list does not exist as far as Deepsand i
 | `zip` | `zip` and `unzip` |
 | `htmlq` | CSS-selector queries over HTML |
 
+**Capabilities** — not a language or a utility, but something this sandbox can be given:
+
+| id | what it is | notes |
+|---|---|---|
+| `xvfb` | a virtual display | a screen that exists only inside this container; nothing appears on the operator's screen. Provides `Xvfb`, `x11-utils` and `x11-apps` |
+| `puppeteer` | a browser driven from Node | bundles a browser as well as the Node package: about 850 MB of image and a couple of minutes of building, which is worth telling the operator when you ask for it. See below before promising a screenshot |
+| `web-search` | DeepCode's own web search | needs the vendor's API, so it also opens that API in the network filter while it is on |
+| `wrangler` | Cloudflare's CLI | Workers, Pages, KV, R2 and D1 |
+
 **Available on request:**
 
 | id | what it is | notes |
@@ -55,6 +64,49 @@ These are the ids. Anything not in this list does not exist as far as Deepsand i
 | `nix` | Nix with flakes | large |
 
 **Not available here:** `apk`. It is Alpine's package manager and this image is Debian, so it could never install anything. If you see it greyed out, that is why.
+
+## A screen, and a browser
+
+`xvfb` and `puppeteer` are two different things and a browser on Linux wants both: one is the
+screen, the other is the program that draws into it. Neither tells you about the other, so use the
+checks below rather than assuming in either direction.
+
+- The screen: `deepsand-display` reports it, starts or restarts it at a size, and stops it —
+  `deepsand-display 1440x900`. Nothing appears on the operator's screen; you take screenshots of
+  the display itself. Restarting it at a new size drops whatever was drawing into it.
+- The browser: when `puppeteer` is on, this image carries a browser as well as the Node package.
+  It is fetched while the image is built, into this user's cache, so nothing has to be downloaded
+  while you work. `node -e "console.log(require('puppeteer').executablePath())"` prints where it is.
+
+### Launch it with `--no-sandbox`
+
+A browser keeps its own sandbox using user namespaces, and this container does not allow those:
+
+```
+const browser = await puppeteer.launch({ args: ["--no-sandbox"] });
+```
+
+Without that flag the launch fails with "Failed to launch the browser process" and nothing that
+explains why. It is a property of this sandbox, not of the browser or of your code.
+
+Write screenshots into the workspace — `/workspace/shot.png` — and not into `/tmp`, which is
+mounted no-exec here. A screenshot the operator cannot open is not a visual check.
+
+**Check before you promise.** Both checks are cheap:
+
+```
+node -e "console.log(require('puppeteer').executablePath())"   # is there a browser, and where
+```
+
+```
+deepsand-display                                               # is there a screen, and at what size
+```
+
+If the binary the first command names is missing, or it is there and will not start, that is a real
+gap in the image rather than a fact about the machine: say which check failed and what it said, and
+ask the operator for it. What is not acceptable is reporting "this sandbox has no browser" when
+`puppeteer` is in the list above, or describing a screenshot you could not take as though you had
+seen the page.
 
 ## Secrets in the environment
 

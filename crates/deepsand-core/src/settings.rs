@@ -1,6 +1,6 @@
 //! Generates everything Deepsand hands to the sandbox at start time.
 //!
-//! Three artefacts, all derived from host state so that the sandbox never has
+//! Four artefacts, all derived from host state so that the sandbox never has
 //! to be trusted about its own configuration:
 //!
 //! * `config/settings.json` — mounted read-only at `/etc/deepsand/settings.json`
@@ -8,6 +8,9 @@
 //! * `config/AGENTS.md` — the standing instructions that teach the contained
 //!   DeepCode how its sandbox behaves. Mounted read-only and copied to
 //!   `$HOME/.deepcode/AGENTS.md`, which the CLI loads automatically.
+//! * `config/skills/deepsand-operator-instructions/SKILL.md` — the same standing
+//!   instructions, for a project whose own `AGENTS.md` would shadow that file.
+//!   Present only then; see `operator_skill`.
 //! * `state/sandbox.json` + `state/grants.json` — mounted read-only and read by
 //!   the in-container MCP bridge when the model asks what it can reach.
 
@@ -169,6 +172,98 @@ pub fn build_deepcode_settings(
     serde_json::Value::Object(root)
 }
 
+/// The standing instructions a project's sessions are given, or `None` when it sends none.
+///
+/// The whole rule, in one place, because two callers need the same answer: the generated
+/// instructions file, and the sandbox snapshot the bridge reads. `Global` takes the app-wide text,
+/// `Custom` takes the project's own, `Off` sends nothing however loud the app-wide one is. A blank
+/// or whitespace-only value counts as nothing wherever it comes from, so emptying the box turns
+/// the feature off rather than sending a section the model has to interpret.
+pub fn resolve_user_prompt<'a>(
+    project: &'a Project,
+    settings: &'a AppSettings,
+) -> Option<&'a str> {
+    let chosen = match project.user_prompt_mode {
+        UserPromptMode::Global => &settings.user_prompt,
+        UserPromptMode::Custom => &project.user_prompt,
+        UserPromptMode::Off => return None,
+    };
+    let trimmed = chosen.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// The name of the skill that carries a project's instructions when its own file shadows ours.
+///
+/// Shared with `runtime/bin/entrypoint.sh`, which installs it: the two have to agree on one
+/// directory name, and a test reads the shell script to see that they do.
+pub const OPERATOR_SKILL_NAME: &str = "deepsand-operator-instructions";
+
+/// The container path of a repository's own instructions, or `None` when it has none.
+///
+/// DeepCode's own precedence, in its own order: `.deepcode/AGENTS.md` wins over `AGENTS.md`, and
+/// either of them wins over the `~/.deepcode/AGENTS.md` Deepsand installs. Returns a container
+/// path rather than a host one because the only use for it is telling the model where to look.
+pub fn shadowing_instructions(project_root: &Path) -> Option<String> {
+    for (host_relative, container) in [
+        (".deepcode/AGENTS.md", "/workspace/.deepcode/AGENTS.md"),
+        ("AGENTS.md", "/workspace/AGENTS.md"),
+    ] {
+        if project_root.join(host_relative).is_file() {
+            return Some(container.to_string());
+        }
+    }
+    None
+}
+
+/// The instructions as a skill, for a project whose own `AGENTS.md` would shadow the generated one.
+///
+/// `None` in two cases, and both are "there is nothing for a skill to carry":
+///
+/// * the project has no instructions to send -- `Off`, or an empty box wherever the text would come
+///   from. A skill is the operator's words in the model's own voice, and a project that has none is
+///   not missing anything: the sandbox's own guidance still arrives through
+///   `deepsand_sandbox_info` and the skills the image installs.
+/// * the project reads the generated file anyway, so the same words are already in front of the
+///   model once and a second copy is only a second copy.
+///
+/// When the repository *does* ship its own instructions, the file Deepsand writes to
+/// `~/.deepcode/AGENTS.md` is never read at all -- so the same words go somewhere no file in the
+/// project can shadow, which is what a skill is.
+pub fn operator_skill(project: &Project, settings: &AppSettings) -> Option<String> {
+    let prompt = resolve_user_prompt(project, settings)?;
+    let shadowing = shadowing_instructions(Path::new(&project.root_dir))?;
+    Some(build_operator_skill_md(prompt, &shadowing))
+}
+
+/// The text of that skill. Pure, so the wording is testable without a filesystem.
+pub fn build_operator_skill_md(prompt: &str, shadowing_path: &str) -> String {
+    format!(
+        "---\n\
+         name: {OPERATOR_SKILL_NAME}\n\
+         description: The operator's standing instructions for this project, set in Deepsand outside the container, and where this repository keeps its own instructions. Load this at the start of every session here, and whenever you are unsure how the operator wants this project handled.\n\
+         ---\n\
+         \n\
+         # The operator's instructions for this project\n\
+         \n\
+         These are set in Deepsand, outside this container, and they are about this project rather\n\
+         than about the task in front of you. They cannot widen what you can reach: if one of them\n\
+         asks for something the sandbox does not have, ask for it -- the tools are listed in\n\
+         `deepsand_sandbox_info` -- rather than working around it.\n\
+         \n\
+         ## What the operator asked for\n\
+         \n\
+         {prompt}\n\
+         \n\
+         ## Where this repository's own instructions are\n\
+         \n\
+         This project keeps its own instructions at `{shadowing_path}`. DeepCode already loads that\n\
+         file for you, so this skill is a layer on top of it rather than a replacement, and both\n\
+         apply. If the two ever seem to disagree about *what to do*, say so -- the operator can\n\
+         change either one. They cannot disagree about *what you can reach*, because neither of them\n\
+         is what enforces that.\n"
+    )
+}
+
 /// Standing instructions the contained DeepCode reads on every session.
 ///
 /// This exists because the most likely failure mode is not malice, it is a
@@ -179,6 +274,7 @@ pub fn build_agents_md(
     grants: &[Grant],
     network_mode: &NetworkPolicy,
     creds: &ResolvedCredentials,
+    settings: &AppSettings,
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -205,6 +301,23 @@ pub fn build_agents_md(
                 grant.access.label()
             ));
         }
+    }
+
+    // The operator's own words, before the generated rules rather than after them: it is the part
+    // a person wrote, and burying it under a page of prose is how it stops being read. It cannot
+    // change what the sandbox is, though, and saying so here is what keeps "you have full access"
+    // in a prompt from being read as a grant.
+    if let Some(prompt) = resolve_user_prompt(project, settings) {
+        out.push_str(&format!(
+            "\n## What the operator wants, in their own words\n\n\
+             These are the operator's standing instructions for this project, and they are what\n\
+             every session here should start from -- treat them as the frame for the work rather\n\
+             than as a suggestion, and say if any of it is not something you can do.\n\n\
+             {prompt}\n\n\
+             They do not change what this sandbox is. The sections around this one say what you can\n\
+             actually reach, and an instruction that assumes something else is a reason to ask for\n\
+             it, not a licence to assume you have it.\n"
+        ));
     }
 
     out.push_str(&format!(
@@ -255,7 +368,14 @@ pub fn build_agents_md(
            example `C:\\\\Users\\\\me\\\\Documents\\\\brand`). The operator sees a dialog naming that exact path.\n\
          * `deepsand_request_resource` - you know what you need but not where it lives (\"the\n  \
            my-website repo\"). The operator gets a folder picker so they can locate it for you.\n\
-         * `deepsand_check_request` - collect the answer if the operator was slow to respond.\n\n\
+         * `deepsand_check_request` - collect the answer if the operator was slow to respond.\n\
+         * `deepsand_list_requests` - list the requests this sandbox has on record and where each\n  \
+           one stands. Use it after a request call that failed or timed out.\n\n\
+         While a request is waiting for an answer, Deepsand holds this sandbox frozen: nothing you\n\
+         run makes progress until the operator decides. That is deliberate, not a fault, so do not\n\
+         treat a pause as a crash and do not ask for the same thing twice. A decision that took\n\
+         longer than one call's own budget is still there to collect: `deepsand_list_requests`\n\
+         finds the request and `deepsand_check_request` reads it.\n\n\
          When the operator approves new access, Deepsand recreates your container to attach the new\n\
          mount and resumes this session. The approved directory appears under `/grants/<name>`.\n\n\
          A refusal is final. Do not retry it, and do not look for another route - there genuinely is\n\
@@ -287,6 +407,7 @@ pub fn build_sandbox_snapshot(
     network_mode: &NetworkPolicy,
     open_requests: Vec<String>,
     notes: Vec<String>,
+    settings: &AppSettings,
 ) -> SandboxSnapshot {
     SandboxSnapshot {
         project_id: project.id.clone(),
@@ -309,6 +430,9 @@ pub fn build_sandbox_snapshot(
             .iter()
             .map(|tool| tool.id.to_string())
             .collect(),
+        // Resolved here rather than passed in, so the generated file and the sandbox's own copy of
+        // these instructions can never disagree about which one applies.
+        user_prompt: resolve_user_prompt(project, settings).unwrap_or_default().to_string(),
         started_at_ms: crate::now_ms(),
         grants: grants.iter().map(SandboxGrant::from).collect(),
         open_requests,
@@ -335,6 +459,7 @@ pub fn write_project_config(
     agents_md: &str,
     sandbox: &SandboxSnapshot,
     grants: &GrantsSnapshot,
+    operator_skill: Option<&str>,
 ) -> Result<()> {
     std::fs::create_dir_all(config_dir)?;
     std::fs::create_dir_all(state_dir)?;
@@ -343,6 +468,21 @@ pub fn write_project_config(
     std::fs::write(config_dir.join("AGENTS.md"), agents_md)?;
     write_json(&state_dir.join("sandbox.json"), sandbox)?;
     write_json(&state_dir.join("grants.json"), grants)?;
+
+    // The skill, when the project's own instructions shadow the file above. Removal is part of the
+    // write and not a nicety: the entrypoint copies this into the sandbox's home volume, which
+    // outlives the setting, so a skill left behind here would go on instructing every later session
+    // with a prompt the operator has since turned off. This directory is Deepsand's own output.
+    let skill_dir = config_dir.join("skills").join(OPERATOR_SKILL_NAME);
+    match operator_skill {
+        Some(md) => {
+            std::fs::create_dir_all(&skill_dir)?;
+            std::fs::write(skill_dir.join("SKILL.md"), md)?;
+        }
+        None => {
+            let _ = std::fs::remove_dir_all(&skill_dir);
+        }
+    }
 
     // settings.json holds the operator's API key in the clear, exactly as their
     // own ~/.deepcode/settings.json does. It lives in Deepsand's private data
@@ -404,6 +544,232 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     std::fs::write(&tmp, serde_json::to_string_pretty(value)?)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod operator_skill_tests {
+    use super::*;
+
+    /// A project as the store would hold it: the fields that matter here, and nothing invented.
+    fn project(root_dir: &str, mode: UserPromptMode, own: &str) -> Project {
+        let mut project: Project = serde_json::from_str(&format!(
+            r#"{{"id":"p1","name":"n","slug":"s","root_dir":"{}","created_at_ms":0}}"#,
+            root_dir.replace('\\', "\\\\")
+        ))
+        .unwrap();
+        project.user_prompt_mode = mode;
+        project.user_prompt = own.to_string();
+        project
+    }
+
+    /// DeepCode's order, which is not the obvious one: the `.deepcode` file wins over the
+    /// repository's, because that is what the CLI reads first.
+    #[test]
+    fn the_deepcode_file_wins_over_the_repositorys_own_instructions() {
+        let dir = std::env::temp_dir().join(format!("deepsand-shadow-{}", std::process::id()));
+        let deepcode = dir.join(".deepcode");
+        std::fs::create_dir_all(&deepcode).unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "the repository's").unwrap();
+        std::fs::write(deepcode.join("AGENTS.md"), "the deepcode one").unwrap();
+
+        assert_eq!(
+            shadowing_instructions(&dir).as_deref(),
+            Some("/workspace/.deepcode/AGENTS.md")
+        );
+
+        std::fs::remove_file(deepcode.join("AGENTS.md")).unwrap();
+        assert_eq!(
+            shadowing_instructions(&dir).as_deref(),
+            Some("/workspace/AGENTS.md"),
+            "with no .deepcode file, the repository's own is the one that shadows ours"
+        );
+
+        std::fs::remove_file(dir.join("AGENTS.md")).unwrap();
+        assert_eq!(
+            shadowing_instructions(&dir),
+            None,
+            "a repository with neither file reads the generated one"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The whole reason the skill exists: a repository that ships its own instructions makes the
+    /// generated file unreadable to the model, so the same words have to go somewhere else.
+    #[test]
+    fn a_shadowed_project_gets_a_skill_and_the_rest_do_not() {
+        let dir = std::env::temp_dir().join(format!("deepsand-shadow2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = AppSettings {
+            user_prompt: "Prefer small commits.".into(),
+            ..AppSettings::default()
+        };
+        let root = dir.to_string_lossy().to_string();
+
+        assert_eq!(
+            operator_skill(&project(&root, UserPromptMode::Global, ""), &settings),
+            None,
+            "nothing shadows the generated file here, so a second copy would only be a second copy"
+        );
+
+        std::fs::write(dir.join("AGENTS.md"), "the repository's").unwrap();
+        let skill = operator_skill(&project(&root, UserPromptMode::Global, ""), &settings)
+            .expect("a shadowed project gets the skill");
+        assert!(
+            skill.contains("Prefer small commits."),
+            "the operator's words have to be in it: {skill}"
+        );
+        assert!(
+            skill.contains("/workspace/AGENTS.md"),
+            "and the model has to be told where the repository keeps its own: {skill}"
+        );
+
+        // `Off` is a decision to send nothing, and a skill is the way these words are sent: with
+        // nothing to carry there is no skill at all, rather than one announcing that the operator
+        // had nothing to say. The text is still kept, so turning it back on finds it.
+        let off = project(&root, UserPromptMode::Off, "kept but unused");
+        assert_eq!(
+            operator_skill(&off, &settings),
+            None,
+            "a project with the prompt turned off must not get the skill"
+        );
+        assert_eq!(off.user_prompt, "kept but unused", "the text is kept, not deleted");
+
+        // And a blank box is the same answer as `Off`, wherever the blank is.
+        let blank = AppSettings {
+            user_prompt: "   \n ".into(),
+            ..settings.clone()
+        };
+        assert_eq!(operator_skill(&project(&root, UserPromptMode::Global, ""), &blank), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The writer's half of the contract: the skill lands where the entrypoint looks for it, and
+    /// when the reason for it goes away the file goes too. That second half is the one that matters
+    /// long after this code is written -- the container copies it into a volume that outlives the
+    /// setting, so anything left behind here instructs sessions nobody would think to check.
+    #[test]
+    fn the_skill_is_written_into_the_config_directory_and_removed_when_it_is_not_needed() {
+        let dir = std::env::temp_dir().join(format!("deepsand-skillwrite-{}", std::process::id()));
+        let repo = dir.join("repo");
+        let config = dir.join("config");
+        let state = dir.join("state");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("AGENTS.md"), "the repository's own").unwrap();
+
+        let this_project = project(&repo.to_string_lossy(), UserPromptMode::Global, "");
+        let settings = AppSettings {
+            user_prompt: "Name the failing test before changing anything.".into(),
+            ..AppSettings::default()
+        };
+        let sandbox = build_sandbox_snapshot(
+            &this_project,
+            &[],
+            &NetworkPolicy::Internet,
+            Vec::new(),
+            Vec::new(),
+            &settings,
+        );
+        let grants = build_grants_snapshot(&this_project, &[]);
+        let wrote = |skill: Option<&str>| {
+            write_project_config(
+                &config,
+                &state,
+                &serde_json::json!({}),
+                "the generated instructions",
+                &sandbox,
+                &grants,
+                skill,
+            )
+            .unwrap()
+        };
+        let skill_path = config.join("skills").join(OPERATOR_SKILL_NAME).join("SKILL.md");
+
+        wrote(operator_skill(&this_project, &settings).as_deref());
+        assert!(
+            skill_path.is_file(),
+            "the entrypoint reads /etc/deepsand/skills/{OPERATOR_SKILL_NAME}/SKILL.md, which is this file"
+        );
+        assert!(std::fs::read_to_string(&skill_path)
+            .unwrap()
+            .contains("Name the failing test before changing anything."));
+
+        // Turning the prompt off takes the skill with it. This is the case the operator is most
+        // likely to hit: the repository keeps its own instructions, so the skill is there, and then
+        // the prompt is switched off -- and a file left behind would go on giving orders.
+        let off = project(&repo.to_string_lossy(), UserPromptMode::Off, "");
+        wrote(operator_skill(&off, &settings).as_deref());
+        assert!(
+            !skill_path.exists(),
+            "a project with the prompt turned off must not keep the skill about it"
+        );
+
+        // It comes back when the prompt does.
+        wrote(operator_skill(&this_project, &settings).as_deref());
+        assert!(skill_path.is_file(), "and back when the prompt is turned on again");
+
+        // The repository stops shadowing the generated file, so the skill has no reason to exist.
+        std::fs::remove_file(repo.join("AGENTS.md")).unwrap();
+        wrote(operator_skill(&this_project, &settings).as_deref());
+        assert!(
+            !skill_path.exists(),
+            "a stale skill would keep instructing the model with a prompt that no longer applies"
+        );
+        // The rest of the config is untouched by that: this is a writer, not a reset.
+        assert!(config.join("AGENTS.md").is_file());
+        assert!(config.join("settings.json").is_file());
+        assert!(state.join("sandbox.json").is_file());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A skill is discovered by its directory and matched by its frontmatter, so both have to be
+    /// right -- and a CR inside either would corrupt the file the CLI parses.
+    #[test]
+    fn the_generated_skill_is_named_and_described_where_deepcode_looks() {
+        let md = build_operator_skill_md("Be terse.", "/workspace/AGENTS.md");
+
+        assert!(md.starts_with("---\n"), "frontmatter has to open on line 1: {md}");
+        assert!(
+            md.contains(&format!("\nname: {OPERATOR_SKILL_NAME}\n")),
+            "the name has to match the directory the entrypoint installs: {md}"
+        );
+        assert!(md.contains("\ndescription: "), "a skill without one is skipped: {md}");
+        // The description is what the model matches on, so it stays one line: a plain scalar folded
+        // across several source lines is legal YAML and much easier to get wrong.
+        assert_eq!(
+            md.lines().filter(|line| line.starts_with("description: ")).count(),
+            1,
+            "one description, on one line: {md}"
+        );
+        assert!(!md.contains('\r'), "a CR would corrupt a frontmatter line");
+        // The directory name is lowercase-hyphen and short, as DeepCode requires.
+        assert!(OPERATOR_SKILL_NAME
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
+        assert!(OPERATOR_SKILL_NAME.len() <= 64);
+    }
+
+    /// The sandbox's own copy of the prompt is mounted read-only and the skill is not, so the
+    /// skill must never be the only place the operator's words live.
+    #[test]
+    fn the_skill_says_the_instructions_cannot_widen_what_the_sandbox_reaches() {
+        // Markdown wraps, so phrases are compared with the wrapping taken out: an assertion that a
+        // sentence is in the file is about the sentence, not about where the source broke it.
+        let md = build_operator_skill_md("You have full access to the host machine.", "/workspace/AGENTS.md");
+        let flat = md.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(
+            flat.contains("They cannot widen what you can reach"),
+            "a prompt must not be readable as a grant: {md}"
+        );
+        assert!(flat.contains("deepsand_sandbox_info"));
+        assert!(
+            flat.contains("how the operator wants this project handled"),
+            "the description has to say when to load it: {md}"
+        );
+    }
 }
 
 #[cfg(test)]

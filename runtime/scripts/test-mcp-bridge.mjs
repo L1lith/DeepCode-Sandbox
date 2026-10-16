@@ -242,6 +242,7 @@ async function main() {
   check("tools/list exposes exactly the documented tools", () => {
     assert.deepEqual(tools.tools.map((t) => t.name).sort(), [
       "deepsand_check_request",
+      "deepsand_list_requests",
       "deepsand_request_directory_access",
       "deepsand_request_network_access",
       "deepsand_request_resource",
@@ -293,6 +294,44 @@ async function main() {
     assert.match(info, /deepsand_request_directory_access/);
     assert.match(info, /deepsand_request_resource/);
   });
+
+  /* --------------------------------------------------------------------- */
+  section("the operator's standing instructions");
+
+  // The other copy of this text is in the file Deepsand installs, and DeepCode ignores that file
+  // whenever the project ships its own AGENTS.md -- which most repositories do. So the copy that
+  // has to be there is this one: in the tool list, which no file in the project can shadow.
+  const withoutPrompt = await bridge.send("tools/list", {});
+  check("no instructions in the list when the operator has set none", () => {
+    const tool = withoutPrompt.tools.find((t) => t.name === "deepsand_sandbox_info");
+    assert.doesNotMatch(tool.description, /standing instructions/);
+  });
+
+  const INSTRUCTIONS = "Prefer small commits, and never touch the migrations folder.";
+  const sandbox = JSON.parse(
+    await fsp.readFile(path.join(broker.spool, "state", "sandbox.json"), "utf8"),
+  );
+  await broker.writeState("sandbox.json", { ...sandbox, user_prompt: INSTRUCTIONS });
+
+  const withPrompt = await bridge.send("tools/list", {});
+  check("the tool list carries the operator's instructions", () => {
+    const tool = withPrompt.tools.find((t) => t.name === "deepsand_sandbox_info");
+    assert.match(tool.description, /Prefer small commits/);
+  });
+  check("and no other tool grows the text", () => {
+    for (const tool of withPrompt.tools.filter((t) => t.name !== "deepsand_sandbox_info")) {
+      assert.doesNotMatch(tool.description, /Prefer small commits/);
+    }
+  });
+
+  const infoWithPrompt = textOf(await bridge.callTool("deepsand_sandbox_info", {}));
+  check("sandbox_info repeats them, where the model reads them in full", () =>
+    assert.match(infoWithPrompt, /Standing instructions from the operator[\s\S]*Prefer small commits/));
+  check("and says they do not widen what the sandbox can reach", () =>
+    assert.match(infoWithPrompt, /do not widen what this sandbox can reach/));
+
+  // Put the snapshot back, so the sections below see what the rest of the suite expects.
+  await broker.writeState("sandbox.json", sandbox);
 
   /* --------------------------------------------------------------------- */
   section("directory access: the 'DeepCode is trying to access X directory' popup");
@@ -396,6 +435,15 @@ async function main() {
   check("check_request reports still-pending while the operator has not answered", () =>
     assert.match(stillPending, /Still PENDING/));
 
+  // What a model needs after its own call timed out: it never saw the id, so the listing has to
+  // name both the id and what it was for, or the id is not something it can act on.
+  const listedWhileWaiting = textOf(await bridge.callTool("deepsand_list_requests", {}));
+  check("list_requests names an outstanding request and what it was for", () => {
+    assert.match(listedWhileWaiting, new RegExp(locateReq.id));
+    assert.match(listedWhileWaiting, /waiting for the operator/);
+    assert.match(listedWhileWaiting, /my-website/);
+  });
+
   await broker.respond(locateReq.id, {
     decision: "allow",
     restart_required: true,
@@ -409,6 +457,12 @@ async function main() {
   });
   check("the model is told it cannot write to a read-only grant", () =>
     assert.match(collected, /cannot modify it/));
+
+  const listedAfterAnswer = textOf(await bridge.callTool("deepsand_list_requests", {}));
+  check("list_requests shows a decision as collectable once the operator answers", () => {
+    assert.match(listedAfterAnswer, new RegExp(locateReq.id));
+    assert.match(listedAfterAnswer, /answered - read it with deepsand_check_request/);
+  });
 
   const bogus = await bridge.callTool("deepsand_check_request", { request_id: "req_never_issued" });
   check("an id that was never issued is rejected", () => {
