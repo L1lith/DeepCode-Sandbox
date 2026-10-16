@@ -236,6 +236,20 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   was kept forever: the probe runs once, after the window is ready, which is routinely while
   Docker Desktop is still starting. It is retried while the answer is no, and re-asked when the
   window takes focus. If you move a field out of a command, grep the frontend for it.
+* **A debounce is a courtesy to the disk, never a licence to drop an edit.** The settings dialog
+  saves as you type behind a 700 ms timer, and its cleanup used to do `clearTimeout(timer)` --
+  cancelling the pending write when the dialog closed, which is precisely what somebody does with
+  the last sentence they typed. The user prompt went missing every time that way, and the report was
+  "it doesn't save when I shut down the program", which sent me looking at the state file (which was
+  fine) and the backend round-trip (also fine) before the frontend. `flush()` now writes a pending
+  edit on unmount, on `blur`, and on `pagehide`/`beforeunload`, and the write itself (`persist`) is
+  split from the screen's signals so it can run while the dialog is being torn down. The same timer
+  guarded the egress allowlist, so a typed host was lost the same way. Two things made this hard to
+  see: nothing *failed* (there is no error in the log, because no request was ever made), and the
+  state file is written by the backend, so it looked like a Rust problem. Reproduce UI-level
+  behaviour through the running app instead of reading the JSX: `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=
+  --remote-debugging-port=9222 npm run app:dev`, then drive the DOM over CDP -- a JS `click()` and a
+  dispatched `input` event are delivered where synthetic mouse input is not.
 * **One piece of in-flight state, and it always lets go.** Whether a session operation is
   running lives in the store (`sessionBusy`), not in each component: the header's Run and the
   terminal's Run each had their own signal, so one could be left greyed out for the rest of the

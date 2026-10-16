@@ -1586,15 +1586,51 @@ export function SettingsDialog(props: { settings: AppSettings; onClose: () => vo
     timer = window.setTimeout(() => void autosave(settings, text), 700);
   });
 
-  onCleanup(() => window.clearTimeout(timer));
+  /**
+   * Write a pending edit now instead of dropping it.
+   *
+   * This used to be `onCleanup(() => clearTimeout(timer))`, and cancelling a pending debounce is
+   * silently throwing away what the operator typed: a user prompt typed into this dialog and then
+   * closed inside the debounce window never reached the backend at all, which is exactly what
+   * somebody does after typing the last thing they wanted to say. It also runs on the way out of
+   * the page, because the window is the app's lifetime and the last edit is the one at risk.
+   */
+  function flush() {
+    if (timer === undefined) return;
+    window.clearTimeout(timer);
+    timer = undefined;
+    // The dialog may be going away, so this says nothing to the screen: only the api calls run.
+    void persist(draft(), allowlist()).catch((error) => {
+      toast("error", "Could not save settings", describeError(error));
+    });
+  }
+
+  onCleanup(flush);
+  onMount(() => {
+    // Belt and braces for the shutdown path: nothing here can await a save during teardown, but
+    // the write is sent before the page goes, and `Store::save` is atomic on the other side.
+    const onHide = () => flush();
+    window.addEventListener("pagehide", onHide);
+    window.addEventListener("beforeunload", onHide);
+    onCleanup(() => {
+      window.removeEventListener("pagehide", onHide);
+      window.removeEventListener("beforeunload", onHide);
+    });
+  });
+
+  /** The write itself, without the screen's signals: it also runs while the dialog is closing. */
+  async function persist(settings: AppSettings, text: string) {
+    const { hosts, dropped } = validHosts(text);
+    const cleaned = await api.setEgressAllowlist(hosts);
+    await api.setSettings({ ...settings, egress_allowlist: cleaned });
+    await refreshSettings();
+    return dropped;
+  }
 
   async function autosave(settings: AppSettings, text: string) {
     setSaving(true);
     try {
-      const { hosts, dropped } = validHosts(text);
-      const cleaned = await api.setEgressAllowlist(hosts);
-      await api.setSettings({ ...settings, egress_allowlist: cleaned });
-      await refreshSettings();
+      const dropped = await persist(settings, text);
       setIgnored(dropped);
       setSaved(true);
     } catch (error) {
@@ -1676,6 +1712,9 @@ export function SettingsDialog(props: { settings: AppSettings; onClose: () => vo
                `undefined` renders the word "undefined" -- which the operator would then edit. */
             value={draft().user_prompt ?? ""}
             onInput={(event) => setDraft({ ...draft(), user_prompt: event.currentTarget.value })}
+            /* Leaving the field is finishing the edit: the debounce below is a courtesy to the
+               state file, not a reason to lose the last sentence somebody typed. */
+            onBlur={flush}
           />
           <span class="hint">
             Standing instructions the model is given before anybody types anything, in every project
@@ -1744,6 +1783,9 @@ export function SettingsDialog(props: { settings: AppSettings; onClose: () => vo
             id="set-allow"
             value={allowlist()}
             onInput={(event) => setAllowlist(event.currentTarget.value)}
+            /* The same rule as the prompt above: closing the dialog is not a reason to lose the
+               last line somebody typed into it. */
+            onBlur={flush}
           />
           <span class="hint">
             Only used by the allowlisted network mode. A blanket <span class="mono">*</span> is ignored: use{" "}
