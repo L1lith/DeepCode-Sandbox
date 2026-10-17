@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 type CmdResult<T> = Result<T, String>;
@@ -215,6 +215,40 @@ pub fn get_project_impl(state: &AppState, project_id: String) -> CmdResult<Proje
 
     let project = store(&state).project(&project_id).cloned().map_err(fail)?;
     Ok(project_view(&state, &project))
+}
+
+/// Measure the selected project's folder, off the UI thread.
+///
+/// The path comes from the store, never from the caller: this command walks a directory, and a
+/// path supplied by the webview would turn a display into a way to enumerate the host.
+#[tauri::command]
+pub async fn project_disk_usage(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<ProjectDiskUsage> {
+    project_disk_usage_impl(&state, project_id).await
+}
+
+pub async fn project_disk_usage_impl(
+    state: &AppState,
+    project_id: String,
+) -> CmdResult<ProjectDiskUsage> {
+    let root = store(&state)
+        .project(&project_id)
+        .map_err(fail)?
+        .root_dir
+        .clone();
+    // Walking a large folder is the slow part; it must not hold a runtime worker while it runs.
+    let usage = tauri::async_runtime::spawn_blocking(move || {
+        deepsand_core::disk::directory_size(Path::new(&root))
+    })
+    .await
+    .map_err(|err| format!("the project folder could not be measured: {err}"))?;
+    Ok(ProjectDiskUsage {
+        project_id,
+        bytes: usage.bytes,
+        complete: usage.complete,
+    })
 }
 
 #[tauri::command]
@@ -492,6 +526,84 @@ pub fn delete_project_impl(state: &AppState, project_id: String) -> CmdResult<()
     store.delete_project(&project_id).map_err(fail)
 }
 
+/// Delete only the sandbox's DeepCode data, never the project folder.
+///
+/// The state volume is mounted at `/home/deepcode/.deepcode` and holds DeepCode's sessions,
+/// conversation history, attachments, skills and its generated settings. The host project is a
+/// bind mount (`root_dir`) and is not touched: this command never passes it to Docker.
+#[tauri::command]
+pub async fn wipe_project_deepcode_data(
+    app: AppHandle,
+    project_id: String,
+) -> CmdResult<()> {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = tauri::Manager::state::<AppState>(&handle);
+        wipe_project_deepcode_data_impl(&handle, &state, &project_id)
+    })
+    .await
+    .map_err(|err| format!("the DeepCode data could not be wiped: {err}"))?
+}
+
+pub fn wipe_project_deepcode_data_impl(
+    app: &AppHandle,
+    state: &AppState,
+    project_id: &str,
+) -> CmdResult<()> {
+    // Resolve the volume from the store, never from the caller. The caller names a project;
+    // the store decides where its data lives.
+    let project = store(state).project(project_id).cloned().map_err(fail)?;
+    let volume = project.state_volume();
+    if !is_deepsand_state_volume(&volume) {
+        return Err(format!(
+            "refusing to remove '{volume}': it is not a Deepsand state volume"
+        ));
+    }
+
+    // The same lock a start takes. A start waiting for a tools build has dropped it, so the
+    // wipe can take over; stopping bumps the stop clock, which tells that waiting start to
+    // abandon instead of starting on the volume that is about to be removed.
+    let Some(_guard) = state.begin_start(project_id) else {
+        return Err(
+            "this project is already starting or being wiped. Give it a moment and try again."
+                .to_string(),
+        );
+    };
+    state.stop_session_internal(project_id);
+    // Tell the window now, not after the volume removal: the sandbox is already stopped even
+    // if Docker then refuses to remove the volume, and a button that still says "running"
+    // would have nothing left to press.
+    let _ = app.emit(
+        events::SESSION_STATUS,
+        serde_json::json!({ "projectId": project_id, "status": "stopped" }),
+    );
+
+    let docker = state.docker().map_err(fail)?;
+    if docker.volume_exists(&volume) {
+        docker.volume_remove(&volume).map_err(|err| {
+            format!(
+                "the sandbox is stopped, but its DeepCode data volume '{volume}' could not be \
+                 removed: {err}"
+            )
+        })?;
+    }
+    // `docker volume rm` can answer success and still leave the volume when something else
+    // holds it. Ask again, because the whole point of this command is that the data is gone.
+    if docker.volume_exists(&volume) {
+        return Err(format!(
+            "the sandbox is stopped, but its DeepCode data volume '{volume}' is still present. \
+             Another container may still be using it; restart Docker Desktop and try again."
+        ));
+    }
+    Ok(())
+}
+
+/// Only a name this app produces for a session volume may be removed by the wipe command.
+fn is_deepsand_state_volume(name: &str) -> bool {
+    name.strip_prefix("deepsand-state-")
+        .is_some_and(|rest| !rest.is_empty())
+}
+
 #[tauri::command]
 pub fn path_check(state: State<'_, AppState>, path: String) -> CmdResult<PathCheck> {
     path_check_impl(&state, path)
@@ -711,6 +823,66 @@ async fn await_image(
     .await
     .map_err(|err| format!("waiting for the image failed: {err}"))?
 }
+
+/// What a start that is waiting for an image should do next.
+enum ImageWaitOutcome {
+    Ready,
+    Superseded,
+    Failed(String),
+}
+
+/// Wait for `image` while its build runs, but abandon the wait if a newer start or a stop
+/// supersedes this attempt.
+///
+/// `await_image` waits on the build alone. A Run that is waiting for a tools build is
+/// different: the operator may press "Start now without tools" or Stop, and both mean this
+/// attempt must not start a container when the build finally lands. The clocks are checked
+/// on the same beat as the image, so the answer arrives within a second rather than after
+/// the build.
+async fn await_image_or_superseded(
+    docker: deepsand_core::docker::Docker,
+    image: String,
+    app: AppHandle,
+    project_id: String,
+    attempt: u64,
+    stop_before: u64,
+) -> ImageWaitOutcome {
+    use deepsand_core::docker::{image_wait_step, ImageWait};
+
+    if docker.image_present(&image) {
+        return ImageWaitOutcome::Ready;
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = tauri::Manager::state::<AppState>(&app);
+        let mut grace = 5;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30 * 60);
+        loop {
+            if state.start_epoch(&project_id) != attempt
+                || state.stop_epoch(&project_id) != stop_before
+            {
+                return ImageWaitOutcome::Superseded;
+            }
+            let building = deepsand_core::docker::builds_in_flight()
+                .iter()
+                .any(|tag| tag == &image);
+            match image_wait_step(docker.image_present(&image), building, grace, &image) {
+                ImageWait::Ready => return ImageWaitOutcome::Ready,
+                ImageWait::GiveUp(message) => return ImageWaitOutcome::Failed(message),
+                ImageWait::Wait => {}
+            }
+            if std::time::Instant::now() >= deadline {
+                return ImageWaitOutcome::Failed(format!(
+                    "{image} was still being built after thirty minutes"
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            grace = grace.saturating_sub(1);
+        }
+    })
+    .await
+    .unwrap_or_else(|err| ImageWaitOutcome::Failed(format!("waiting for the image failed: {err}")))
+}
+
 
 fn prepare_plan(
     state: &impl AsAppState,
@@ -1084,6 +1256,64 @@ pub fn session_status_impl(state: &AppState, project_id: String) -> CmdResult<Se
     })
 }
 
+/// How long to wait before bringing back a sandbox whose process exited on its own.
+///
+/// Long enough for the container name and the PTY to be released, and long enough that a
+/// crash loop is a few seconds apart rather than a container start per millisecond.
+const AUTO_RESTART_DELAY: Duration = Duration::from_millis(750);
+
+/// A session that stayed up at least this long counts as healthy.
+///
+/// Its exit is not evidence of a crash loop, so the next restart starts with a fresh budget.
+const AUTO_RESTART_HEALTHY_AFTER: Duration = Duration::from_secs(30);
+
+/// Consecutive short-lived sessions before automatic restart gives up.
+///
+/// Three starts rides out a transient Docker hiccup and is few enough that a sandbox which
+/// cannot stay up does not rebuild a container (or an image) for ever.
+const AUTO_RESTART_MAX_EARLY_EXITS: u32 = 3;
+
+/// Whether an unexpected exit is worth another start.
+///
+/// Its own function so the bound can be tested without a daemon; the answer depends only on
+/// how many short-lived sessions have already been tried.
+fn should_auto_restart(consecutive_early_exits: u32) -> bool {
+    consecutive_early_exits <= AUTO_RESTART_MAX_EARLY_EXITS
+}
+
+/// Bring back a sandbox whose process exited on its own.
+///
+/// The wait is not politeness: the container name and the PTY are released by the exit, and a
+/// start that races that release fails on the name. `epoch` is the stop clock read *before* the
+/// dead session was claimed; if it has moved by the time the wait is over, an explicit stop
+/// arrived and it wins. `shutting_down` stops a container being started while the app exits.
+fn schedule_auto_restart(app: AppHandle, project_id: String, epoch: u64) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(AUTO_RESTART_DELAY).await;
+        let state = app.state::<AppState>();
+        if state.shutting_down.load(Ordering::SeqCst)
+            || state.stop_epoch(&project_id) != epoch
+            || state.is_running(&project_id)
+        {
+            tracing::info!(
+                project = %project_id,
+                "automatic restart abandoned: the project was stopped or started by hand"
+            );
+            return;
+        }
+        tracing::info!(project = %project_id, "restarting the sandbox after an unexpected exit");
+        match start_session_impl(&app, &state, project_id.clone(), Some(true), false).await {
+            Ok(_) => tracing::info!(project = %project_id, "the sandbox is running again"),
+            Err(err) => {
+                // Not retried here: a start that fails before a session exists produces no
+                // exit event to retry on. The window shows the error, and an explicit start
+                // clears the crash-loop budget.
+                tracing::warn!(project = %project_id, %err, "the automatic restart failed");
+            }
+        }
+    });
+}
+
 /// Everything needed to start a session, gathered without holding a lock.
 struct Launch {
     project: Project,
@@ -1120,7 +1350,30 @@ pub async fn start_session(
     // Start now, with the tools built behind the session instead of in front of it.
     without_tools: Option<bool>,
 ) -> CmdResult<SessionStatus> {
-    start_session_impl(&app, &state, project_id, resume, without_tools.unwrap_or(false)).await
+    start_session_requested(
+        &app,
+        &state,
+        project_id,
+        resume,
+        without_tools.unwrap_or(false),
+    )
+    .await
+}
+
+/// Start a session because a person or a remote client asked for it.
+///
+/// The only difference from `start_session_impl` is the crash-loop budget: an explicit start
+/// resets it, while the automatic restart must not -- otherwise a sandbox that cannot stay up
+/// would be retried for ever.
+pub async fn start_session_requested(
+    app: &AppHandle,
+    state: &AppState,
+    project_id: String,
+    resume: Option<bool>,
+    without_tools: bool,
+) -> CmdResult<SessionStatus> {
+    state.clear_early_exits(&project_id);
+    start_session_impl(app, state, project_id, resume, without_tools).await
 }
 
 pub async fn start_session_impl(
@@ -1133,16 +1386,43 @@ pub async fn start_session_impl(
 
     // Serialise starts. Two overlapping ones would each stop the other's half-built
     // container and then both run, and the second would fail on the container name.
-    let Some(_start_guard) = state.begin_start(&project_id) else {
-        return Err(
-            "this project is already starting. Give the sandbox a moment to come up before starting it \
-             again."
-                .to_string(),
-        );
+    let mut _start_guard = if without_tools {
+        // The skip button can arrive a hair before the Run it replaces lets go of the lock:
+        // that Run emits its "building" line after dropping it, but the window may already
+        // show the button from an earlier event. Give it a moment rather than refusing the
+        // button the operator just pressed.
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(guard) = state.begin_start(&project_id) {
+                break guard;
+            }
+            if started.elapsed() >= std::time::Duration::from_secs(5) {
+                return Err(
+                    "this project is already starting. Give the sandbox a moment to come up \
+                     before starting it again."
+                        .to_string(),
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    } else {
+        let Some(guard) = state.begin_start(&project_id) else {
+            return Err(
+                "this project is already starting. Give the sandbox a moment to come up before \
+                 starting it again."
+                    .to_string(),
+            );
+        };
+        guard
     };
+    // Every start gets a clock of its own. A start that is waiting for a build re-acquires
+    // the lock below and checks this value: a newer start (the skip button, or another Run)
+    // means this one must return instead of starting a container the operator replaced.
+    let attempt = state.bump_start_epoch(&project_id);
 
     // A session may already be live; stop it first so start is idempotent.
     state.stop_session_internal(&project_id);
+    let stop_before = state.stop_epoch(&project_id);
 
     let mut launch = gather_launch(&state, &project_id)?;
     tracing::info!(image = %launch.image, "start: launch gathered");
@@ -1170,36 +1450,77 @@ if without_tools {
     // should not have to discover a separate build button first.
         tracing::info!("start: checking the image");
 if !docker.image_present(&launch.image) {
-        // `spawn_blocking`, because a build takes minutes and `start_session` is async:
-        // blocking a runtime worker for that long would stall unrelated commands.
-        let handle = app.clone();
-        let for_build = project_id.clone();
+        // `build_runtime_image_impl` starts the build on its own thread and returns at once.
+        // Treating that return as the build's outcome is what made a first Run look finished
+        // while the image it was about to start did not exist yet: the runtime check below ran
+        // against a missing image and refused. The build thread owns `BUILD_DONE`; this path
+        // must not emit one.
+        //
+        // Letting go of the start lock while waiting is deliberate. Waiting for a build is not
+        // starting a container, and the "Start now without tools" button has to be able to take
+        // over. The re-acquire below is what protects the container start.
+        drop(_start_guard);
         let image = launch.image.clone();
         let _ = app.emit(
             events::BUILD_LOG,
             serde_json::json!({ "line": format!("Building {image} for the first time. This happens once per tool selection.") }),
         );
-        let built = tauri::async_runtime::spawn_blocking(move || {
-            let state = tauri::Manager::state::<AppState>(&handle);
-            build_runtime_image_impl(&handle, &state, Some(for_build), None, without_tools)
-        })
-        .await;
-        match built {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
+        if let Err(err) =
+            build_runtime_image_impl(app, state, Some(project_id.clone()), None, without_tools)
+        {
+            // A synchronous failure means no build thread was started. If another build is
+            // already running, its own `BUILD_DONE` is the one that reports the outcome.
+            let still_building = state
+                .building
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains(&image);
+            if !still_building {
                 let _ = app.emit(
                     events::BUILD_DONE,
                     serde_json::json!({ "ok": false, "detail": err.clone() }),
                 );
+            }
+            return Err(format!(
+                "the runtime image for this project could not be built, so the sandbox cannot start: {err}"
+            ));
+        }
+
+        // Wait for the image itself, not for the function that asked for the build. The
+        // clocks make this wait abandonable: "Start now without tools" or Stop supersedes it.
+        match await_image_or_superseded(
+            docker.clone(),
+            image,
+            app.clone(),
+            project_id.clone(),
+            attempt,
+            stop_before,
+        )
+        .await
+        {
+            ImageWaitOutcome::Ready => {}
+            ImageWaitOutcome::Superseded => {
+                return session_status_impl(state, project_id.clone());
+            }
+            ImageWaitOutcome::Failed(err) => {
                 return Err(format!(
-                    "the runtime image for this project could not be built, so the sandbox cannot start: {err}"
+                    "the runtime image for this project was not built, so the sandbox cannot start: {err}"
                 ));
             }
-            Err(err) => {
-                return Err(format!("the image build could not be completed: {err}"));
-            }
         }
-        let _ = app.emit(events::BUILD_DONE, serde_json::json!({ "ok": true, "detail": "" }));
+
+        // Re-acquire the start lock now that a container is actually about to run, and check
+        // the clocks again after acquiring: a skip start may have come and gone while this
+        // attempt was waiting.
+        let Some(guard) = state.begin_start(&project_id) else {
+            return session_status_impl(state, project_id.clone());
+        };
+        _start_guard = guard;
+        if state.start_epoch(&project_id) != attempt
+            || state.stop_epoch(&project_id) != stop_before
+        {
+            return session_status_impl(state, project_id.clone());
+        }
     }
 
     if without_tools {
@@ -1439,18 +1760,69 @@ if resolved.api_key.is_none() {
         let _ = app.emit(events::BUILD_WAIT, serde_json::json!({ "image": null }));
     }
     waited?;
-    let session = start_container(&app, &project_id, &docker, &launch, plan.args.clone(), warnings.clone())?;
+    let life = Arc::new(SessionLife::default());
+    let started_at = Instant::now();
+    let session = start_container(
+        &app,
+        &project_id,
+        &docker,
+        &launch,
+        plan.args.clone(),
+        warnings.clone(),
+        life.clone(),
+    )?;
 
-    state.sessions.lock().unwrap().insert(
-        project_id.clone(),
-        LiveSession {
-            session,
-            container_name: launch.container_name.clone(),
+    state
+        .sessions
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(
+            project_id.clone(),
+            LiveSession {
+                session,
+                container_name: launch.container_name.clone(),
+                network_mode: launch.project.network.mode_str().to_string(),
+                warnings: warnings.clone(),
+                command_line: command_line.clone(),
+                life: life.clone(),
+                started_at,
+            },
+        );
+
+    // The process can be gone before its session is registered: the waiter runs as soon as
+    // the PTY exists, and `start_container` only returns after that. If it is already dead,
+    // take it back out -- a dead session left in the map is a terminal that looks live and
+    // answers nothing -- and make the restart decision the waiter would have made. Whichever
+    // side claims the session schedules at most one restart.
+    if life.exited.load(Ordering::SeqCst) {
+        // Read the stop clock before claiming: a Stop that lands after the claim still bumps
+        // it, and the scheduled restart then abandons itself.
+        let epoch = state.stop_epoch(&project_id);
+        if state.take_session_if_current(&project_id, &life).is_some() {
+            let healthy = started_at.elapsed() >= AUTO_RESTART_HEALTHY_AFTER;
+            if should_auto_restart(state.note_early_exit(&project_id, healthy)) {
+                schedule_auto_restart(app.clone(), project_id.clone(), epoch);
+            } else {
+                tracing::error!(
+                    project = %project_id,
+                    "the sandbox exits before it can start; not restarting it again"
+                );
+                state.stop_session_internal(&project_id);
+            }
+        }
+        let _ = app.emit(
+            events::SESSION_STATUS,
+            serde_json::json!({ "projectId": project_id, "status": "stopped" }),
+        );
+        return Ok(SessionStatus {
+            project_id,
+            running: false,
+            command_line: Some(command_line),
+            container_name: launch.container_name,
             network_mode: launch.project.network.mode_str().to_string(),
-            warnings: warnings.clone(),
-            command_line: command_line.clone(),
-        },
-    );
+            warnings,
+        });
+    }
 
     start_broker(app, state, &project_id);
 
@@ -1501,8 +1873,9 @@ fn start_container(
     launch: &Launch,
     args: Vec<String>,
     warnings: Vec<String>,
+    life: Arc<SessionLife>,
 ) -> CmdResult<Session> {
-    spawn_session(app, project_id, docker, launch, args, warnings)
+    spawn_session(app, project_id, docker, launch, args, warnings, life)
         .map_err(|err| explain_run_failure(&launch.container_name, err))
 }
 
@@ -1524,12 +1897,14 @@ fn spawn_session(
     launch: &Launch,
     args: Vec<String>,
     warnings: Vec<String>,
+    life: Arc<SessionLife>,
 ) -> CmdResult<Session> {
     let _ = warnings;
     let output_app = app.clone();
     let output_project = project_id.to_string();
     let exit_app = app.clone();
     let exit_project = project_id.to_string();
+    let exit_life = life.clone();
 
     // One producer, two consumers: the desktop webview listens on Tauri's event
     // channel, and any remote SSE subscriber reads the broadcast channel. Both get
@@ -1597,7 +1972,58 @@ Session::spawn(
             });
         },
         move |code| {
-            let payload = serde_json::json!({ "projectId": exit_project, "code": code });
+            // The waiter is the only place that learns the PTY is gone. Record it before
+            // deciding anything, so the start path -- which may not have registered this
+            // session yet -- can see it too.
+            exit_life.exited.store(true, Ordering::SeqCst);
+            let expected = exit_life.expected.load(Ordering::SeqCst);
+            let mut restarting = false;
+            let mut gave_up = false;
+
+            if !expected {
+                let state = tauri::Manager::state::<AppState>(&exit_app);
+                // Read the stop clock before claiming: a Stop that lands after the claim still
+                // bumps it, and the scheduled restart then abandons itself.
+                let epoch = state.stop_epoch(&exit_project);
+                // Claim the session. If a Stop already removed it this is `None` and the stop
+                // path is cleaning up; if it was never registered, the start path sees
+                // `exited` and makes the same decision. Exactly one side gets a `Some`, so a
+                // restart is scheduled at most once.
+                if let Some(live) = state.take_session_if_current(&exit_project, &exit_life) {
+                    let healthy = live.started_at.elapsed() >= AUTO_RESTART_HEALTHY_AFTER;
+                    let attempts = state.note_early_exit(&exit_project, healthy);
+                    drop(live);
+                    if should_auto_restart(attempts) {
+                        restarting = true;
+                        schedule_auto_restart(exit_app.clone(), exit_project.clone(), epoch);
+                    } else {
+                        gave_up = true;
+                        tracing::error!(
+                            project = %exit_project,
+                            attempts,
+                            "the sandbox keeps exiting; leaving it stopped"
+                        );
+                        // Clean up the dead session's broker, proxy and container. This does
+                        // not schedule anything: the point is to stop trying.
+                        state.stop_session_internal(&exit_project);
+                    }
+                    // Whether or not a restart is coming, the window has to stop saying the
+                    // session is live: a dead session left in the map is a terminal that
+                    // looks live and answers nothing.
+                    let _ = exit_app.emit(
+                        events::SESSION_STATUS,
+                        serde_json::json!({ "projectId": exit_project, "status": "stopped" }),
+                    );
+                }
+            }
+
+            let payload = serde_json::json!({
+                "projectId": exit_project,
+                "code": code,
+                "expected": expected,
+                "restarting": restarting,
+                "gaveUp": gave_up,
+            });
             let _ = exit_app.emit(events::TERMINAL_EXIT, payload.clone());
             let _ = exit_tx.send(crate::remote_server::RemoteEvent {
                 event: events::TERMINAL_EXIT.to_string(),
@@ -1628,11 +2054,40 @@ impl AppState {
                 }
             }
         }
-        if let Some(mut live) = self.sessions.lock().unwrap().remove(project_id) {
+        // Mark the session expected *before* the PTY is killed: the waiter reads this flag to
+        // tell a stop from a crash, and an automatic restart must never undo the operator's
+        // answer. Setting it while the map lock is held also orders it against a waiter that
+        // is claiming the same session.
+        let live = {
+            let mut sessions = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            sessions.remove(project_id).map(|live| {
+                live.life.expected.store(true, Ordering::SeqCst);
+                live
+            })
+        };
+        if let Some(mut live) = live {
             live.session.kill();
         }
+        self.cleanup_session(project_id);
+        // A restart already sleeping on this project has to abandon itself.
+        self.bump_stop_epoch(project_id);
+    }
+
+    /// The teardown a deliberate stop and an unexpected exit share.
+    ///
+    /// The caller has already removed the session -- or is the waiter that removed its own --
+    /// so this cannot reach a successor a later start may have registered.
+    fn cleanup_session(&self, project_id: &str) {
+        // Nothing is frozen once its container is gone. A stale memory would make the window
+        // describe a sandbox that no longer exists.
+        self.clear_frozen(project_id);
         self.stop_broker(project_id);
-        if let Some(proxy) = self.proxies.lock().unwrap().remove(project_id) {
+        if let Some(proxy) = self
+            .proxies
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(project_id)
+        {
             proxy.shutdown();
         }
         if let Ok(docker) = self.docker() {
@@ -1680,7 +2135,8 @@ pub async fn restart_session(app: AppHandle, state: State<'_, AppState>, project
 pub async fn restart_session_impl(app: &AppHandle, state: &AppState, project_id: String) -> CmdResult<SessionStatus> {
 
     state.stop_session_internal(&project_id);
-    start_session_impl(app, state, project_id, Some(true), false).await
+    // A restart is an explicit start, so it clears the crash-loop verdict.
+    start_session_requested(app, state, project_id, Some(true), false).await
 }
 
 #[tauri::command]
@@ -4740,6 +5196,9 @@ pub async fn cleanup_orphans(app: AppHandle) -> CmdResult<Vec<String>> {
 /// safe to run twice: every step is idempotent, and every step is best-effort. Failing
 /// to clean up must never be the reason the app will not close.
 pub fn shutdown_cleanup(state: &AppState) {
+    // Set before anything else: a restart that is already sleeping must not wake up and start
+    // a container while the app is on its way out.
+    state.shutting_down.store(true, Ordering::SeqCst);
     // Anything the polite shutdown could not finish is ended here, before this function
     // returns: the app is about to exit, and on Windows nothing else will. This is what stops a
     // `docker build` that has stopped answering from outliving the app that started it and
@@ -5029,5 +5488,97 @@ mod wedge_status_tests {
         let plain = status_with_verdict(healthy, false);
         assert!(plain.available);
         assert_ne!(plain.detail, WEDGED_DETAIL);
+    }
+}
+
+#[cfg(test)]
+mod auto_restart_tests {
+    use super::*;
+
+    /// The bound that keeps a sandbox which cannot stay up from being rebuilt for ever.
+    ///
+    /// One early exit is worth another try -- that is the whole feature -- and a few in a row
+    /// are worth riding out. Past the budget, starting again is a loop, not a recovery.
+    #[test]
+    fn automatic_restart_gives_up_after_a_few_short_lived_sessions() {
+        assert!(
+            should_auto_restart(0),
+            "a first failure is always worth a retry"
+        );
+        assert!(should_auto_restart(1));
+        assert!(
+            should_auto_restart(AUTO_RESTART_MAX_EARLY_EXITS),
+            "the last retry in the budget is still allowed"
+        );
+        assert!(
+            !should_auto_restart(AUTO_RESTART_MAX_EARLY_EXITS + 1),
+            "one past the budget must leave the sandbox stopped"
+        );
+    }
+
+    /// The budget counts a run of failures, and a session that did real work breaks the run.
+    ///
+    /// Without the reset, a sandbox that crashed twice last month and once today would be one
+    /// failure from being abandoned; with it, only consecutive crashes count.
+    #[test]
+    fn a_healthy_session_and_an_explicit_start_both_reset_the_budget() {
+        let state = AppState::new(
+            Store::fallback(std::env::temp_dir().join("deepsand-auto-restart-test")),
+            None,
+        );
+
+        assert_eq!(state.note_early_exit("project", false), 1);
+        assert_eq!(state.note_early_exit("project", false), 2);
+        assert_eq!(
+            state.note_early_exit("project", true),
+            0,
+            "a session that stayed up is not part of a crash loop"
+        );
+
+        assert_eq!(state.note_early_exit("project", false), 1);
+        state.clear_early_exits("project");
+        assert_eq!(
+            state.note_early_exit("project", false),
+            1,
+            "an explicit start wipes the verdict"
+        );
+    }
+
+    /// The skip button and a second Run are answered by the newest start, not by whichever
+    /// build happens to finish last.
+    ///
+    /// A Run that is waiting for a tools build compares this clock before it starts a
+    /// container. If it did not, the sandbox the operator skipped would appear minutes later
+    /// on top of the one they asked for.
+    #[test]
+    fn a_newer_start_clock_supersedes_the_older_one() {
+        let state = AppState::new(
+            Store::fallback(std::env::temp_dir().join("deepsand-start-clock-test")),
+            None,
+        );
+
+        let first = state.bump_start_epoch("project");
+        assert_eq!(state.start_epoch("project"), first);
+        let second = state.bump_start_epoch("project");
+        assert_ne!(first, second);
+        assert_eq!(
+            state.start_epoch("project"),
+            second,
+            "the newest start owns the project"
+        );
+    }
+
+    /// The wipe command may only name a volume this app created. The host project directory
+    /// is a bind mount and must never be mistaken for one.
+    #[test]
+    fn the_wipe_only_accepts_a_deepsand_state_volume() {
+        assert!(is_deepsand_state_volume(
+            "deepsand-state-deepsand-development"
+        ));
+        assert!(!is_deepsand_state_volume("deepsand-state-"));
+        assert!(!is_deepsand_state_volume(
+            "C:\\Users\\me\\Projects\\Deepsand"
+        ));
+        assert!(!is_deepsand_state_volume("some-other-volume"));
     }
 }

@@ -7,10 +7,10 @@
  * own tool-call timeout.
  */
 
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import * as api from "./lib/api";
-import { baseName } from "./lib/format";
-import { networkLabel } from "./lib/types";
+import { baseName, formatBytes } from "./lib/format";
+import { networkLabel, type ProjectDiskUsage } from "./lib/types";
 import {
   bootstrap,
   cancelBuild,
@@ -43,6 +43,46 @@ import {
 
 type Tab = "terminal" | "permissions" | "tools" | "secrets" | "activity";
 
+/**
+ * The sidebar's hidden state, remembered per window.
+ *
+ * A UI preference rather than a project setting: it belongs to this window, and putting it in
+ * the state file would make every launch wait on the backend to know where to put the sidebar.
+ * Storage can be denied; the answer is then simply "shown".
+ */
+const SIDEBAR_HIDDEN_KEY = "deepsand.sidebar.hidden";
+
+function sidebarStartsHidden(): boolean {
+  try {
+    return window.localStorage.getItem(SIDEBAR_HIDDEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The one sidebar control, in the two places it is needed.
+ *
+ * In the project header it is a flex item beside the title, so the two share a line and a
+ * vertical centre and neither can drift when the header wraps. With no project there is no
+ * header, so it floats in the same corner of the main area instead.
+ */
+function SidebarToggle(props: { hidden: boolean; floating?: boolean; onToggle: () => void }) {
+  return (
+    <button
+      class="btn btn-ghost btn-sm sidebar-toggle"
+      classList={{ "sidebar-toggle-floating": props.floating }}
+      aria-label={props.hidden ? "Show project sidebar" : "Hide project sidebar"}
+      aria-expanded={!props.hidden}
+      aria-controls="project-sidebar"
+      title={props.hidden ? "Show the project sidebar" : "Hide the project sidebar"}
+      onClick={props.onToggle}
+    >
+      <span aria-hidden="true">☰</span>
+    </button>
+  );
+}
+
 export default function App() {
   const [tab, setTab] = createSignal<Tab>("terminal");
   const [showNewProject, setShowNewProject] = createSignal(false);
@@ -54,11 +94,78 @@ export default function App() {
   const [over, setOver] = createSignal<{ id: string; below: boolean } | null>(null);
   /** The right-click menu: which project it is about, and where the pointer opened it. */
   const [menu, setMenu] = createSignal<{ projectId: string; x: number; y: number } | null>(null);
+  /** Whether the project sidebar is slid out of the way. */
+  const [sidebarHidden, setSidebarHidden] = createSignal(sidebarStartsHidden());
+
+  function toggleSidebar() {
+    const hidden = !sidebarHidden();
+    setSidebarHidden(hidden);
+    try {
+      window.localStorage.setItem(SIDEBAR_HIDDEN_KEY, hidden ? "1" : "0");
+    } catch {
+      // The preference still applies to this session; it just will not be remembered.
+    }
+  }
 
   const project = () => selectedProject();
   // The same state the terminal's button reads, so the two cannot disagree about whether a
   // run is in flight -- which they did, and that is why one of them could be left greyed out.
   const busy = () => store.sessionBusy === project()?.id;
+
+  /**
+   * The selected project's folder size.
+   *
+   * `undefined` means a walk is in flight, `null` means there is nothing honest to show, and
+   * the object is the answer. It is not part of `ProjectView`: that list is refreshed often,
+   * and walking every project on every refresh would be absurd.
+   */
+  const [disk, setDisk] = createSignal<ProjectDiskUsage | null | undefined>(undefined);
+
+  // Re-measure when the selection changes, and when the sandbox starts or stops -- the moments
+  // a build or a cleanup is most likely to have changed the folder. A string dependency means a
+  // routine project-list refresh does not re-walk it.
+  createEffect(
+    on(
+      () => `${project()?.id ?? ""}:${project()?.running ? "running" : "stopped"}`,
+      () => {
+        const current = project();
+        if (!current || !current.workspaceExists) {
+          setDisk(null);
+          return;
+        }
+        setDisk(undefined);
+        const measuredFor = current.id;
+        void api
+          .projectDiskUsage(measuredFor)
+          .then((usage) => {
+            // The operator may have switched projects while the walk was running; a late answer
+            // for the old one must not replace the new one's number.
+            if (project()?.id === measuredFor) setDisk(usage);
+          })
+          .catch(() => {
+            // Not a reason to break the header; the command already logged the failure.
+            if (project()?.id === measuredFor) setDisk(null);
+          });
+      },
+    ),
+  );
+
+  /** What the disk badge says; empty when there is nothing honest to show. */
+  const diskLabel = () => {
+    const usage = disk();
+    if (usage === undefined) return "measuring disk…";
+    if (usage === null) return "";
+    return `${usage.complete ? "" : "≥ "}${formatBytes(usage.bytes)} on disk`;
+  };
+
+  const diskTitle = () => {
+    const usage = disk();
+    if (usage === undefined) return "Measuring this project's folder…";
+    if (usage && !usage.complete) {
+      return "Some files could not be read, so this is a lower bound on the project folder's size. Build output such as target/ and node_modules/ is included; a physical file with more than one hard link is counted once.";
+    }
+    return "Total size of this project's folder on disk, including build output such as target/ and node_modules/. A physical file with more than one hard link is counted once.";
+  };
 
   /**
    * A Docker restart started from the status strip.
@@ -112,9 +219,13 @@ export default function App() {
     if (!current) return;
     await sessionOperation(current.id, async () => {
       try {
-        await api.startSession(current.id, true);
-        toast("ok", `Started ${current.name}`);
-        setTab("terminal");
+        const status = await api.startSession(current.id, true);
+        // A start waiting for a build returns the current status when a newer start
+        // supersedes it; it did not start a sandbox, so it must not say that it did.
+        if (status.running) {
+          toast("ok", `Started ${current.name}`);
+          setTab("terminal");
+        }
       } catch (error) {
         toast("error", "Could not start the sandbox", describeError(error));
       }
@@ -269,9 +380,9 @@ export default function App() {
         </div>
       }
     >
-      <div class="shell">
+      <div class="shell" classList={{ "sidebar-hidden": sidebarHidden() }}>
         {/* ------------------------------------------------------------ */}
-        <aside class="sidebar">
+        <aside class="sidebar" id="project-sidebar">
           <div class="sidebar-head">
             <div class="brand">
               <h1>Deepsand</h1>
@@ -415,19 +526,29 @@ export default function App() {
           <Show
             when={project()}
             fallback={
-              <div class="empty" style={{ "margin-top": "30vh" }}>
-                <h3>No project selected</h3>
-                <p class="muted">
-                  Create a project, give it a working directory, and run DeepCode inside a container that can only
-                  see that directory.
-                </p>
-              </div>
+              <>
+                <SidebarToggle
+                  floating
+                  hidden={sidebarHidden()}
+                  onToggle={toggleSidebar}
+                />
+                <div class="empty" style={{ "margin-top": "30vh" }}>
+                  <h3>No project selected</h3>
+                  <p class="muted">
+                    Create a project, give it a working directory, and run DeepCode inside a container that can only
+                    see that directory.
+                  </p>
+                </div>
+              </>
             }
           >
             {(current) => (
               <>
                 <header class="header">
                   <div class="header-top">
+                    {/* A flex sibling of the title, so the two are centred on the same line
+                        and stay that way when the header wraps at a different width. */}
+                    <SidebarToggle hidden={sidebarHidden()} onToggle={toggleSidebar} />
                     <h2>{current().name}</h2>
                     <span class={current().running ? "badge badge-ok" : "badge"}>
                       <span class="dot" />
@@ -437,43 +558,56 @@ export default function App() {
                       {networkLabel(current().network)}
                     </span>
                     <span class="badge">{current().grantCount} shared</span>
+                    {/* The folder's real size, not a guess from the project list: it is
+                        measured when the selection changes and when the sandbox stops or
+                        starts, which is when a build or a cleanup has changed it. */}
+                    <Show when={diskLabel()}>
+                      <span class="badge badge-disk" title={diskTitle()}>
+                        {diskLabel()}
+                      </span>
+                    </Show>
                     <Show when={store.requests.length > 0}>
                       <span class="badge badge-danger">
                         {store.requests.length} permission request
                         {store.requests.length === 1 ? "" : "s"}
                       </span>
                     </Show>
-                    <div class="header-actions">
-                      {/* While tools are being installed there is no session to stop, but there
-                          is a build to stop, and this is where an operator looks for it. */}
-                      <Show when={store.building}>
-                        <button class="btn" onClick={() => void cancelBuild()}>
-                          Stop build
-                        </button>
-                      </Show>
-                      {/* The model comes before the thinking intensity: it decides what is
-                          doing the thinking. */}
-                      <ModelSelect />
-                      <EffortSwitch />
-                      <Show
-                        when={current().running}
-                        fallback={
-                          <button class="btn btn-primary" disabled={busy()} onClick={() => void run()}>
-                            {busy() ? "Starting…" : "Run"}
-                          </button>
-                        }
-                      >
-                        <button class="btn" disabled={busy()} onClick={() => void restart()}>
-                          Restart
-                        </button>
-                        <button class="btn" disabled={busy()} onClick={() => void stop()}>
-                          Stop
-                        </button>
-                      </Show>
-                      <button class="btn btn-ghost" onClick={() => setShowProjectSettings(true)}>
-                        Project settings
+                  </div>
+                  {/* Its own row rather than a flex item that shares the title's line. At the
+                      wider width the whole block used to fit beside the title, and because it
+                      wraps internally it made that line 74px tall -- which centred the 32px
+                      title halfway down it. A separate row keeps the first line exactly one
+                      title high in both sidebar states. */}
+                  <div class="header-actions">
+                    {/* While tools are being installed there is no session to stop, but there
+                        is a build to stop, and this is where an operator looks for it. */}
+                    <Show when={store.building}>
+                      <button class="btn" onClick={() => void cancelBuild()}>
+                        Stop build
                       </button>
-                    </div>
+                    </Show>
+                    {/* The model comes before the thinking intensity: it decides what is
+                        doing the thinking. */}
+                    <ModelSelect />
+                    <EffortSwitch />
+                    <Show
+                      when={current().running}
+                      fallback={
+                        <button class="btn btn-primary" disabled={busy()} onClick={() => void run()}>
+                          {busy() ? "Starting…" : "Run"}
+                        </button>
+                      }
+                    >
+                      <button class="btn" disabled={busy()} onClick={() => void restart()}>
+                        Restart
+                      </button>
+                      <button class="btn" disabled={busy()} onClick={() => void stop()}>
+                        Stop
+                      </button>
+                    </Show>
+                    <button class="btn btn-ghost" onClick={() => setShowProjectSettings(true)}>
+                      Project settings
+                    </button>
                   </div>
                   <div class="header-sub" title={current().rootDir}>
                     {current().rootDir} → /workspace

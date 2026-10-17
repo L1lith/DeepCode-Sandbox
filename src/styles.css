@@ -78,14 +78,60 @@ pre,
   display: grid;
   grid-template-columns: 17rem 1fr;
   height: 100vh;
+  /* The column is the animation: the main area grows as the sidebar's track shrinks. */
+  transition: grid-template-columns 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.shell.sidebar-hidden {
+  /* `0px` rather than `0`: a unitless zero interpolates with the track length in some
+     engines but not all, and this is the one property the whole animation rides on. */
+  grid-template-columns: 0px 1fr;
 }
 
 .sidebar {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* A grid item's default min-width is its content's; without this the track cannot reach 0. */
+  min-width: 0;
+  overflow: hidden;
   background: var(--bg-raised);
   border-right: 1px solid var(--border);
+  transition:
+    opacity 160ms ease,
+    transform 240ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    border-color 240ms ease,
+    visibility 0s linear 0s;
+}
+
+.shell.sidebar-hidden .sidebar {
+  opacity: 0;
+  transform: translateX(-1.5rem);
+  border-right-color: transparent;
+  pointer-events: none;
+  /* Focus and screen-reader access end with the slide, not before it. */
+  visibility: hidden;
+  transition:
+    opacity 120ms ease,
+    transform 240ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    border-color 240ms ease,
+    visibility 0s linear 240ms;
+}
+
+/* Keep the contents at their full width while the column collapses, so text does not
+   reflow on every frame; the sidebar's own overflow clips it. */
+.sidebar > * {
+  min-width: 17rem;
+}
+
+/* A slide is decoration. Someone who asked the system not to animate gets the two layouts
+   without the motion, and with no delay before the hidden sidebar leaves the focus order. */
+@media (prefers-reduced-motion: reduce) {
+  .shell,
+  .sidebar,
+  .shell.sidebar-hidden .sidebar {
+    transition: none;
+  }
 }
 
 .sidebar-head {
@@ -265,6 +311,30 @@ th.folder-cell {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  /* The toggle is positioned against this, so it stays in the same corner of the main area
+     whether the sidebar's column is 17rem or 0. */
+  position: relative;
+}
+
+/* The sidebar control. As a flex item in the header it lines up with the title; with no
+   project there is no header, so `-floating` puts it in the same corner of the main area. */
+.sidebar-toggle {
+  flex: none;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.05rem;
+  line-height: 1;
+}
+
+.sidebar-toggle-floating {
+  position: absolute;
+  top: 0.85rem;
+  left: 1.1rem;
+  z-index: 20;
 }
 
 .header {
@@ -287,6 +357,15 @@ th.folder-cell {
   margin: 0;
   font-size: 1rem;
   letter-spacing: -0.01em;
+  /* A fixed box the same height as the toggle. The header wraps at different widths, and a
+     title whose height followed its own line used to step down when the actions moved onto
+     the first line; a 2rem box keeps its centre on the toggle's centre in both layouts. */
+  height: 2rem;
+  line-height: 2rem;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .header-sub {
@@ -300,10 +379,11 @@ th.folder-cell {
 }
 
 .header-actions {
-  margin-left: auto;
   display: flex;
   gap: 0.4rem;
   flex-wrap: wrap;
+  /* A row of its own now; keep its buttons where they were, at the right. */
+  justify-content: flex-end;
 }
 
 .tabs {
@@ -520,6 +600,11 @@ th.folder-cell {
   border-color: color-mix(in srgb, var(--accent) 50%, transparent);
   background: var(--accent-soft);
   color: var(--accent-text);
+}
+
+/* A number that is re-measured: tabular digits stop the badge twitching as it changes. */
+.badge-disk {
+  font-variant-numeric: tabular-nums;
 }
 
 .dot {

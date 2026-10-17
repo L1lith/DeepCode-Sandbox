@@ -135,6 +135,20 @@ impl ProjectView {
     }
 }
 
+/// How much disk the selected project's folder occupies.
+///
+/// Separate from [`ProjectView`] on purpose: measuring a large folder walks it, and the project
+/// list is read on every refresh. This is asked for once per selection, off the UI thread.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDiskUsage {
+    pub project_id: String,
+    /// Total bytes of the regular files under the project folder.
+    pub bytes: u64,
+    /// False when some entry could not be read; `bytes` is then a lower bound.
+    pub complete: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanPreview {
@@ -522,6 +536,26 @@ pub struct LiveSession {
     pub network_mode: String,
     pub warnings: Vec<String>,
     pub command_line: String,
+    /// The same handle the waiter thread holds. It is what lets an exit be matched to *this*
+    /// session rather than to whichever session the project has by the time the waiter runs.
+    pub life: Arc<SessionLife>,
+    /// When this PTY was created. An exit soon after it is a crash, not a session that did
+    /// some work and then finished, and the restart budget treats the two differently.
+    pub started_at: std::time::Instant,
+}
+
+/// The part of a session that outlives its PTY.
+///
+/// Two facts, both written by one side and read by the other:
+///
+/// * `expected` is set by `stop_session_internal` *before* the PTY is killed, so a deliberate
+///   stop is never mistaken for a crash and restarted.
+/// * `exited` is set by the waiter thread, so a process that was already gone before its
+///   session could be registered is not announced as running.
+#[derive(Default)]
+pub struct SessionLife {
+    pub exited: AtomicBool,
+    pub expected: AtomicBool,
 }
 
 /// Controls a project's broker thread.
@@ -588,6 +622,25 @@ pub struct AppState {
     /// channel and any remote SSE subscriber), so the two views cannot drift.
     pub remote_events: tokio::sync::broadcast::Sender<crate::remote_server::RemoteEvent>,
     pub startup_error: Mutex<Option<String>>,
+    /// A counter per project, bumped by every deliberate stop or replacement.
+    ///
+    /// A scheduled automatic restart remembers the value it was planned under and abandons
+    /// itself if it changed. A Stop that arrives while the restart is waiting is an answer,
+    /// and an automatic restart that overrode it would be the machine doing what the operator
+    /// just said not to.
+    pub stop_epochs: Mutex<HashMap<String, u64>>,
+    /// A counter per project, bumped by every start attempt.
+    ///
+    /// A Run that is waiting for a tools build uses it to notice that a newer start -- the
+    /// "Start now without tools" button, or another Run -- has taken over, and returns
+    /// without starting a container. Without it the first Run would start a sandbox seconds
+    /// after the operator had asked for a different one.
+    pub start_epochs: Mutex<HashMap<String, u64>>,
+    /// Consecutive unexpected exits from sessions that did not last long enough to count as
+    /// healthy. Bounds a crash loop: a sandbox that cannot stay up must not be rebuilt for ever.
+    pub early_exits: Mutex<HashMap<String, u32>>,
+    /// Set once shutdown has begun. A scheduled restart checks this before starting a container.
+    pub shutting_down: AtomicBool,
 }
 
 /// Released on drop, so a start that returns early or panics does not leave the
@@ -629,6 +682,10 @@ impl AppState {
             // told so rather than blocking the sandbox's output path.
             remote_events: tokio::sync::broadcast::channel(2048).0,
             startup_error: Mutex::new(startup_error),
+            stop_epochs: Mutex::new(HashMap::new()),
+            start_epochs: Mutex::new(HashMap::new()),
+            early_exits: Mutex::new(HashMap::new()),
+            shutting_down: AtomicBool::new(false),
         }
     }
 
@@ -686,6 +743,80 @@ impl AppState {
 
     pub fn is_running(&self, project_id: &str) -> bool {
         self.sessions.lock().unwrap().contains_key(project_id)
+    }
+
+    /// Remove a session only if it is the one whose PTY just closed.
+    ///
+    /// An exit callback runs on the waiter thread, which can wake up long after a Stop, a
+    /// restart, or another start has replaced this session. Matching the per-session
+    /// [`SessionLife`] is what keeps a stale waiter from tearing down its successor.
+    pub fn take_session_if_current(
+        &self,
+        project_id: &str,
+        life: &Arc<SessionLife>,
+    ) -> Option<LiveSession> {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        match sessions.get(project_id) {
+            Some(live) if Arc::ptr_eq(&live.life, life) => sessions.remove(project_id),
+            _ => None,
+        }
+    }
+
+    /// The deliberate-stop clock for a project; see [`AppState::stop_epochs`].
+    pub fn stop_epoch(&self, project_id: &str) -> u64 {
+        self.stop_epochs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(project_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Record that the project was stopped or replaced on purpose.
+    pub fn bump_stop_epoch(&self, project_id: &str) {
+        let mut epochs = self.stop_epochs.lock().unwrap_or_else(|p| p.into_inner());
+        let epoch = epochs.entry(project_id.to_string()).or_insert(0);
+        *epoch = epoch.wrapping_add(1);
+    }
+
+    /// The start clock for a project; see [`AppState::start_epochs`].
+    pub fn start_epoch(&self, project_id: &str) -> u64 {
+        self.start_epochs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(project_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Record a new start attempt and return the value that attempt owns.
+    pub fn bump_start_epoch(&self, project_id: &str) -> u64 {
+        let mut epochs = self.start_epochs.lock().unwrap_or_else(|p| p.into_inner());
+        let epoch = epochs.entry(project_id.to_string()).or_insert(0);
+        *epoch = epoch.wrapping_add(1);
+        *epoch
+    }
+
+    /// Count an unexpected exit, unless the session lasted long enough to be healthy.
+    ///
+    /// Returns the number of consecutive early exits, which is what bounds the restart loop.
+    pub fn note_early_exit(&self, project_id: &str, healthy: bool) -> u32 {
+        let mut counts = self.early_exits.lock().unwrap_or_else(|p| p.into_inner());
+        if healthy {
+            counts.remove(project_id);
+            return 0;
+        }
+        let count = counts.entry(project_id.to_string()).or_insert(0);
+        *count = count.saturating_add(1);
+        *count
+    }
+
+    /// An explicit start wipes the crash-loop verdict: the operator asked for this one.
+    pub fn clear_early_exits(&self, project_id: &str) {
+        self.early_exits
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(project_id);
     }
 
     pub fn broker(&self, project_id: &str) -> Broker {

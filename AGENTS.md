@@ -27,6 +27,7 @@ npm run app:dev         # app with hot reload
 | `npm run core:test` | `cargo test -p deepsand-core` — 374 tests |
 | `npm run app:test` | `cargo test -p deepsand-app` — the app crate's own tests, including the zombie guard. Part of `npm test`: it was not, and tests that never run are decoration |
 | `npm run core:check` | `cargo check --workspace` |
+| `npm run clean:dev` | `cargo clean --profile dev` — reclaims accumulated debug artifacts without touching the release build |
 | `npm run test:bridge` | 55 checks of the MCP bridge against a simulated spool |
 | `npm test` | the two suites above, in order |
 | `npm run build` | `tsc --noEmit` + `vite build` (frontend typecheck) |
@@ -388,6 +389,14 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   which is precisely what the watchdog was written to prevent. A stop is the operator's to ask
   for as well: `cancel_build` finds the build by tag in `LIVE_BUILDS` and ends it, and the
   failure says it was stopped rather than broken.
+* **A build starts a thread; its return is not the build's outcome.** `build_runtime_image_impl`
+  returns as soon as it has claimed the image and spawned the build, and that thread owns
+  `BUILD_DONE`. A caller that needs the image must wait for the image, not for that return: the
+  first Run for a tool selection treated the return as success, ran the runtime check against an
+  image that did not exist yet, and refused after printing the whole build log. A Run waiting for
+  a build also releases the start lock -- waiting is not starting -- and re-checks `start_epochs`
+  and `stop_epochs` before re-acquiring it. That is what lets "Start now without tools" take over
+  without the older Run starting a second sandbox when the build lands.
 * **A preflight is bounded by a healthy answer, not by the command timeout.** The host-sharing probe
   runs while the operator watches "Starting…", and it used to inherit `COMMAND_TIMEOUT` (120 s) for
   every step -- `create`, `cp` and two `rm`s, on up to two candidate images, per mount. On a machine
@@ -526,6 +535,13 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   is verified in the volume before `--last` is used. A grant inside a
   pre-declared `allowed_roots` entry is the exception that skips the restart
   (the core supports it; the UI does not expose it yet).
+* **Wiping a project's DeepCode data removes only its state volume.** The conversation
+  history is in `deepsand-state-<slug>`, mounted at `/home/deepcode/.deepcode`; the code is a
+  bind mount of `root_dir`. `wipe_project_deepcode_data` takes a project id, resolves the
+  volume from the store, stops the session, and refuses any name outside the
+  `deepsand-state-` prefix. It re-checks that the volume is gone before reporting success.
+  Nothing in this path receives the host project path, which is the property that makes the
+  button safe next to "Remove project".
 * **Windows specifics.** The terminal is a real ConPTY via `portable-pty`. When a
   command passes Windows-style paths or `/`-prefixed arguments through this
   shell, set `MSYS2_ARG_CONV_EXCL='*'` or msys rewrites them.
@@ -571,6 +587,15 @@ These are load-bearing. Breaking one is how this project gets a CVE.
   second in **both** profiles; touching the file covers the first. Do it before the
   first build after a move, not after: `tauri build` otherwise fails at the *end* of
   a long release build, which is where this note's second sentence comes from.
+
+* **A dev cache that never prunes is not a cache.** Cargo writes a new
+  `target/debug/incremental/<crate>-<hash>` directory whenever a unit's hash changes — a
+  version bump, a different feature set (`devtools`), a toolchain update — and never removes
+  the old ones. This workspace reached 54 GiB of dev artifacts: 24 GiB across 255 stale
+  incremental directories, and 16 GiB more in `deps`, including repeated 150 MB
+  `deepsand_app_lib-*.pdb` copies. `[profile.dev] incremental = false` is the structural fix;
+  `npm run clean:dev` reclaims what is already there and is the first thing to reach for when
+  `target/debug` grows again.
 
 ## Definition of done
 

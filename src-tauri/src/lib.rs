@@ -449,6 +449,7 @@ pub fn run() {
             commands::log_file_path,
             commands::list_projects,
             commands::get_project,
+            commands::project_disk_usage,
             commands::create_project,
             commands::move_project,
             // Clones onto the host's filesystem and can take a credential, so it is desktop-only
@@ -457,6 +458,9 @@ pub fn run() {
             commands::update_project_settings,
             commands::set_requests_enabled,
             commands::delete_project,
+            // Removes the sandbox's state volume, never the host project. Desktop-only: a
+            // remote client must not be able to destroy conversation history.
+            commands::wipe_project_deepcode_data,
             commands::path_check,
             commands::list_grants,
             commands::add_grant,

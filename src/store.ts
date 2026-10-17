@@ -433,6 +433,25 @@ export async function wireEvents(): Promise<() => void> {
     api.onTerminalExit((payload) => {
       setStore("sessionErrors", payload.projectId, "");
       void refreshProjects();
+      // A stop the operator asked for needs no announcement: the button already said it.
+      if (payload.expected) return;
+      if (payload.restarting) {
+        toast(
+          "info",
+          "Restarting DeepCode",
+          `The sandboxed process exited with code ${payload.code}. Starting it again.`,
+        );
+        return;
+      }
+      if (payload.gaveUp) {
+        toast(
+          "error",
+          "DeepCode keeps exiting",
+          "It exited unexpectedly several times in a row, so it has been left stopped. " +
+            "Start the project again once the cause is fixed.",
+        );
+        return;
+      }
       if (payload.code !== 0) {
         toast("warn", "The sandbox stopped", `DeepCode exited with code ${payload.code}.`);
       }

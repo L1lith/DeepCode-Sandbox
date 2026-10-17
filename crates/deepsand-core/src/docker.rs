@@ -876,8 +876,13 @@ impl Docker {
         .map(|_| ())
     }
 
-    pub fn volume_remove(&self, name: &str) {
-        let _ = self.try_run(&self.fmt(&["volume", "rm", name]));
+    /// Remove a volume, reporting whether Docker actually did it.
+    ///
+    /// The cleanup paths used to ignore this answer because there was nothing to say. The
+    /// wipe-data command is different: it must not tell the operator their conversation
+    /// history is gone while Docker still holds the volume, so the failure has to travel.
+    pub fn volume_remove(&self, name: &str) -> Result<()> {
+        self.run(&self.fmt(&["volume", "rm", name])).map(|_| ())
     }
 
     pub fn volume_exists(&self, name: &str) -> bool {

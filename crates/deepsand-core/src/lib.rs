@@ -19,6 +19,7 @@ pub mod allowlist;
 pub mod broker;
 pub mod covered;
 pub mod credentials;
+pub mod disk;
 pub mod docker;
 pub mod error;
 pub mod git;

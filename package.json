@@ -12,6 +12,7 @@
     "tauri": "tauri",
     "app:dev": "tauri dev",
     "app:build": "tauri build",
+    "clean:dev": "cargo clean --profile dev",
     "core:test": "cargo test -p deepsand-core",
     "core:check": "cargo check --workspace",
     "test:bridge": "node runtime/scripts/test-mcp-bridge.mjs",

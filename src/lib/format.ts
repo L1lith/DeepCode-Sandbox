@@ -48,6 +48,27 @@ export function shortPath(path: string, max = 46): string {
   return `…${tail}`;
 }
 
+/**
+ * A byte count a person can read.
+ *
+ * Binary steps with the labels people use for them: the point is a quick sense of scale, not a
+ * unit-conversion lesson. Two decimals below 10, one below 100, none above, so the badge does
+ * not jump between widths as the number grows.
+ */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "unknown";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const units = ["KB", "MB", "GB", "TB", "PB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const digits = value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(digits)} ${units[unit]}`;
+}
+
 export function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }

@@ -79,6 +79,16 @@ file *inside* the sandbox, then types the path where the CLI can read it.
 - Nothing is attached unless a sandbox is running, and a file that fails is reported on its own
   rather than losing the files that worked.
 
+## Copying and interrupting in the terminal
+
+Ctrl+C copies the terminal's selection (Ctrl+Shift+C does the same). It is no longer passed to the
+program inside the sandbox. To send the interrupt that Ctrl+C used to send, press **Ctrl+T** -- the
+escape hatch is still there for a process that needs stopping.
+
+If DeepCode exits on its own -- a crash, or `exit` typed into it -- Deepsand starts it again
+automatically and resumes the session. A session that exits again almost immediately is retried a
+few times and then left stopped with a message; use **Stop** whenever you mean to end the sandbox.
+
 ## Keeping the cached tools current
 
 Deepsand keeps the tools it builds (Rust binaries, npm globals) in a cache so a build copies them

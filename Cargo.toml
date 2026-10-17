@@ -45,6 +45,13 @@ chacha20poly1305 = "0.10"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 getrandom = "0.2"
 
+[profile.dev]
+# Cargo never prunes an incremental cache when the unit's hash changes -- a version bump, a
+# different feature set, a toolchain update -- so the directories accumulate. In this workspace
+# that reached 24 GB across 255 stale directories, on top of 16 GB in `deps`. The debug loop is
+# fast enough without it, and `npm run clean:dev` reclaims what is already there.
+incremental = false
+
 [profile.release]
 codegen-units = 1
 lto = true

@@ -688,6 +688,9 @@ export function ProjectSettingsDialog(props: { project: ProjectView; onClose: ()
    */
   const globalPrompt = () => (store.settings?.user_prompt ?? "").trim();
   const [busy, setBusy] = createSignal(false);
+  /** The wipe is a second destructive action, so it gets its own confirmation step. */
+  const [confirmWipe, setConfirmWipe] = createSignal(false);
+  const [wiping, setWiping] = createSignal(false);
 
   async function save() {
     setBusy(true);
@@ -731,6 +734,32 @@ export function ProjectSettingsDialog(props: { project: ProjectView; onClose: ()
     }
   }
 
+  /**
+   * Delete the sandbox's DeepCode data, not the project.
+   *
+   * The two are separate stores by construction: the conversation history lives in the
+   * `deepsand-state-<slug>` Docker volume, while the code is a bind mount of `rootDir`. The
+   * backend is given a project id and resolves the volume itself, so no path the operator
+   * picked is ever handed to a delete.
+   */
+  async function wipeDeepcodeData() {
+    setWiping(true);
+    try {
+      await api.wipeProjectDeepcodeData(props.project.id);
+      await refreshProjects();
+      toast(
+        "ok",
+        "DeepCode data wiped",
+        `The sandbox was stopped and its conversation history was removed. ${props.project.rootDir} was not touched.`,
+      );
+      props.onClose();
+    } catch (error) {
+      toast("error", "Could not wipe the DeepCode data", describeError(error));
+    } finally {
+      setWiping(false);
+    }
+  }
+
   return (
     <Modal
       title={`${props.project.name} settings`}
@@ -739,13 +768,21 @@ export function ProjectSettingsDialog(props: { project: ProjectView; onClose: ()
       onClose={props.onClose}
       footer={
         <>
-          <button class="btn btn-danger left" disabled={busy()} onClick={() => void remove()}>
+          <button
+            class="btn btn-danger left"
+            disabled={busy() || wiping()}
+            onClick={() => void remove()}
+          >
             Remove project
           </button>
           <button class="btn btn-ghost" onClick={props.onClose}>
             Cancel
           </button>
-          <button class="btn btn-primary" disabled={busy()} onClick={() => void save()}>
+          <button
+            class="btn btn-primary"
+            disabled={busy() || wiping()}
+            onClick={() => void save()}
+          >
             Save
           </button>
         </>
@@ -928,6 +965,59 @@ export function ProjectSettingsDialog(props: { project: ProjectView; onClose: ()
               />
             </label>
           </div>
+        </div>
+
+        <div class="field">
+          <label>DeepCode data</label>
+          <Show
+            when={!confirmWipe()}
+            fallback={
+              <div class="callout callout-danger">
+                <p>
+                  <strong>
+                    This permanently deletes this project's DeepCode conversation history and
+                    session data.
+                  </strong>
+                </p>
+                <p>
+                  DeepCode sessions, conversation history, attachments and skills stored in the
+                  sandbox will be removed. The sandbox is stopped first. The project folder{" "}
+                  <span class="mono">{props.project.rootDir}</span> is <strong>not</strong>{" "}
+                  touched; the next start recreates DeepCode's settings and credentials from this
+                  machine.
+                </p>
+                <div class="row-inline">
+                  <button
+                    class="btn btn-danger"
+                    disabled={wiping()}
+                    onClick={() => void wipeDeepcodeData()}
+                  >
+                    {wiping() ? "Wiping…" : "Yes, wipe DeepCode data"}
+                  </button>
+                  <button
+                    class="btn btn-ghost"
+                    disabled={wiping()}
+                    onClick={() => setConfirmWipe(false)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            }
+          >
+            <button
+              class="btn btn-danger"
+              disabled={busy() || wiping()}
+              onClick={() => setConfirmWipe(true)}
+            >
+              Wipe DeepCode data…
+            </button>
+            <span class="hint">
+              Deletes the sandbox's conversation history, sessions, attachments and skills. Your
+              project folder on disk is not touched. The sandbox is stopped first; DeepCode's
+              settings and credentials are reinstalled on the next start.
+            </span>
+          </Show>
         </div>
       </div>
     </Modal>

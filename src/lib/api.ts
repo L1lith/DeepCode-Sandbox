@@ -28,6 +28,7 @@ import type {
   PathCheck,
   PermissionRequestView,
   PlanPreview,
+  ProjectDiskUsage,
   ProjectView,
   RejectedRequestView,
   RemoteAccessSettings,
@@ -189,6 +190,8 @@ export const hostConfigSummary = () => call<Record<string, string>>("host_config
 
 export const listProjects = () => call<ProjectView[]>("list_projects");
 export const getProject = (projectId: string) => call<ProjectView>("get_project", { projectId });
+export const projectDiskUsage = (projectId: string) =>
+  call<ProjectDiskUsage>("project_disk_usage", { projectId });
 export const createProject = (name: string, rootDir: string) =>
   call<ProjectView>("create_project", { name, rootDir });
 
@@ -207,6 +210,13 @@ export const importGitProject = (args: {
 }) => call<GitImportResult>("import_git_project", args);
 
 export const deleteProject = (projectId: string) => call<void>("delete_project", { projectId });
+
+/**
+ * Delete DeepCode's data for a project -- conversation history, sessions, attachments and
+ * skills -- from the sandbox volume. The project folder on disk is not part of this.
+ */
+export const wipeProjectDeepcodeData = (projectId: string) =>
+  call<void>("wipe_project_deepcode_data", { projectId });
 
 /** Move a project to an index in the sidebar. The reordered list comes back. */
 export const moveProject = (projectId: string, toIndex: number) =>
@@ -365,6 +375,12 @@ export interface TerminalOutput {
 export interface TerminalExit {
   projectId: string;
   code: number;
+  /** The exit was asked for (Stop, a restart, project removal), so nothing is restarted. */
+  expected: boolean;
+  /** An automatic restart has been scheduled. */
+  restarting: boolean;
+  /** Automatic restarts were attempted and abandoned; the sandbox is staying stopped. */
+  gaveUp: boolean;
 }
 export interface SessionStatusEvent {
   projectId: string;
@@ -609,4 +625,4 @@ function subscribe<T>(
  * A tool installed as a system package cannot arrive this way and still needs a restart.
  */
 export const startSessionWithoutTools = (projectId: string, resume = true) =>
-  call<unknown>("start_session", { projectId, resume, withoutTools: true });
+  call<SessionStatus>("start_session", { projectId, resume, withoutTools: true });

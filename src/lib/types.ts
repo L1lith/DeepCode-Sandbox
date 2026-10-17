@@ -328,6 +328,20 @@ export interface ProjectView {
   pendingRequests: number;
 }
 
+/**
+ * The size of the selected project's folder on disk.
+ *
+ * Measured separately from `ProjectView`: walking a large folder is slow, and the project list
+ * is read far more often than a project is selected.
+ */
+export interface ProjectDiskUsage {
+  projectId: string;
+  /** Total bytes of the regular files under the project folder. */
+  bytes: number;
+  /** False when some entry could not be read; `bytes` is then a lower bound. */
+  complete: boolean;
+}
+
 /** What one `importGitProject` did. */
 export interface GitImportResult {
   /** The project that was created, when the clone succeeded. */

@@ -19,6 +19,32 @@ import * as api from "../lib/api";
 import { attachTerminal, describeError, restartDocker, selectedProject, sessionOperation, store, toast } from "../store";
 import { RestartDockerControl } from "./RestartDocker";
 
+/**
+ * The pane's colours.
+ *
+ * A copy is assigned on every re-attach as well as at construction. `reset()` clears the
+ * buffer and the parser but *not* the theme: `OSC 10`/`11`/`12` change the theme in place,
+ * and a default colour is not something a program resets, so a terminal that was recoloured
+ * stayed recoloured for the rest of the process. The backend now filters those sequences
+ * before they can arrive (see `TerminalGuard`), and this is what recovers a pane that was
+ * recoloured anyway -- switch project, or stop and start, and the colours come back without
+ * restarting the app.
+ */
+const TERMINAL_THEME = {
+  background: "#0a0c11",
+  foreground: "#dfe3ee",
+  cursor: "#4d6bfe",
+  selectionBackground: "#2f365080",
+  black: "#1b1f2a",
+  red: "#ff6b6b",
+  green: "#3ddc97",
+  yellow: "#ffc857",
+  blue: "#4d6bfe",
+  magenta: "#c792ea",
+  cyan: "#5ad4e6",
+  white: "#e6e9f2",
+};
+
 export function TerminalPane() {
   let host!: HTMLDivElement;
   let term: Terminal | undefined;
@@ -34,6 +60,14 @@ export function TerminalPane() {
   const [dropping, setDropping] = createSignal(false);
   /** True while something is being copied into the sandbox. */
   const [attaching, setAttaching] = createSignal(false);
+  /**
+   * True while the "start now" button is starting on the no-tools image.
+   *
+   * Local rather than `sessionBusy`, because during a build `sessionBusy` already belongs to
+   * the Run that is waiting for that build. The skip is a different operation that deliberately
+   * takes over from it.
+   */
+  const [skipping, setSkipping] = createSignal(false);
 
   onMount(() => {
     term = new Terminal({
@@ -44,20 +78,7 @@ export function TerminalPane() {
       cursorBlink: true,
       scrollback: 8000,
       allowProposedApi: true,
-      theme: {
-        background: "#0a0c11",
-        foreground: "#dfe3ee",
-        cursor: "#4d6bfe",
-        selectionBackground: "#2f365080",
-        black: "#1b1f2a",
-        red: "#ff6b6b",
-        green: "#3ddc97",
-        yellow: "#ffc857",
-        blue: "#4d6bfe",
-        magenta: "#c792ea",
-        cyan: "#5ad4e6",
-        white: "#e6e9f2",
-      },
+      theme: TERMINAL_THEME,
     });
     fit = new FitAddon();
     term.loadAddon(fit);
@@ -113,8 +134,50 @@ export function TerminalPane() {
     // copied into the sandbox and its path typed, which is what the CLI can actually read.
     // Counted rather than flagged: two pastes in quick succession are two separate waits.
     let pending = 0;
+
+    /**
+     * Copy the terminal's selection the way an ordinary application does.
+     *
+     * No selection is a no-op, not an interrupt: that is the point of taking Ctrl+C away from
+     * the PTY. The clipboard write is the same call the rest of the window uses.
+     */
+    async function copySelection() {
+      const text = term?.getSelection() ?? "";
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (error) {
+        toast("warn", "Could not copy", describeError(error));
+      }
+    }
+
     const onKeyDown = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
+
+      // Ctrl+C is copy here, never the interrupt. A terminal normally sends 0x03, which is
+      // why it stopped the running process; the operator's muscle memory for Ctrl+C is the
+      // platform's copy command, so that is what it does now. Ctrl+Shift+C is included on
+      // purpose -- it is the terminal's conventional copy shortcut and xterm does not map it
+      // to the PTY anyway.
+      if (event.ctrlKey && !event.altKey && key === "c") {
+        event.preventDefault();
+        event.stopPropagation();
+        void copySelection();
+        return;
+      }
+
+      // Ctrl+T takes Ctrl+C's old job: the current Ctrl+C behaviour is preserved here so a
+      // runaway process can still be interrupted. Only the plain keystroke, so Ctrl+Shift+T
+      // keeps whatever meaning the platform gives it.
+      if (event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey && key === "t") {
+        event.preventDefault();
+        event.stopPropagation();
+        // Through xterm's own input path, which is the one Ctrl+C used: the same onData
+        // handler writes it to the session, and bracketed-paste/mode handling stays in one place.
+        term?.input("\x03");
+        return;
+      }
+
       const isPaste =
         ((event.ctrlKey || event.metaKey) && !event.altKey && key === "v") ||
         (event.shiftKey && event.key === "Insert");
@@ -349,6 +412,11 @@ export function TerminalPane() {
   createEffect(() => {
     const current = project();
     if (!term) return;
+    // Put the theme back before the buffer is used again. `reset()` does not do it, and a
+    // pane recoloured by a sequence from before this guard existed would otherwise stay
+    // recoloured. Assigning the theme is what makes Stop/Run and a project switch a way
+    // back, rather than an app restart.
+    term.options.theme = { ...TERMINAL_THEME };
     term.reset();
     if (!current) return;
 
@@ -366,9 +434,14 @@ export function TerminalPane() {
     if (!current) return;
     await sessionOperation(current.id, async () => {
       try {
-        await api.startSession(current.id, true);
-        toast("ok", `Started ${current.name}`);
-        window.setTimeout(() => safeFit(), 120);
+        const status = await api.startSession(current.id, true);
+        // A start that was waiting for a build can be superseded by "Start now without
+        // tools". It returns the current status rather than an error; saying "Started" for
+        // a sandbox this attempt did not start would be a lie.
+        if (status.running) {
+          toast("ok", `Started ${current.name}`);
+          window.setTimeout(() => safeFit(), 120);
+        }
       } catch (error) {
         toast("error", "Could not start the sandbox", describeError(error));
       }
@@ -387,13 +460,44 @@ export function TerminalPane() {
     if (!current) return;
     await sessionOperation(current.id, async () => {
       try {
-        await api.startSessionWithoutTools(current.id);
-        toast("ok", `Starting ${current.name}`, "Installing the tools in the background.");
-        window.setTimeout(() => safeFit(), 120);
+        const status = await api.startSessionWithoutTools(current.id);
+        if (status.running) {
+          toast("ok", `Starting ${current.name}`, "Installing the tools in the background.");
+          window.setTimeout(() => safeFit(), 120);
+        }
       } catch (error) {
         toast("error", "Could not start the sandbox", describeError(error));
       }
     });
+  }
+
+  /**
+   * Keep the build, but do not make the operator wait for it.
+   *
+   * Deliberately outside `sessionOperation`: the busy state belongs to the Run that is waiting
+   * for the build, and that Run is exactly what this takes over from. The backend's start clock
+   * makes the waiting Run return without starting a second sandbox, and the build it started
+   * keeps going, so its tools are copied in when they are ready.
+   */
+  async function skipToolBuild() {
+    const current = project();
+    if (!current || skipping()) return;
+    setSkipping(true);
+    try {
+      const status = await api.startSessionWithoutTools(current.id);
+      if (status.running) {
+        toast(
+          "ok",
+          `Starting ${current.name}`,
+          "The tools will be copied in when the build finishes.",
+        );
+        window.setTimeout(() => safeFit(), 120);
+      }
+    } catch (error) {
+      toast("error", "Could not start the sandbox", describeError(error));
+    } finally {
+      setSkipping(false);
+    }
   }
 
   async function stop() {
@@ -660,10 +764,21 @@ export function TerminalPane() {
                   <Show
                     when={!store.building}
                     fallback={
-                      <p class="hint">
-                        Installing the tools this project asked for. The install is running above,
-                        in this terminal, and the project starts by itself as soon as it finishes.
-                      </p>
+                      <>
+                        <p class="hint">
+                          Installing the tools this project asked for. The install is running
+                          above, in this terminal, and the project starts by itself as soon as it
+                          finishes.
+                        </p>
+                        <button
+                          class="btn"
+                          disabled={skipping()}
+                          title="Start now on an image with no tools. The build keeps running and its tools are copied into the sandbox when they are ready; a tool installed as a system package still needs a restart."
+                          onClick={() => void skipToolBuild()}
+                        >
+                          {skipping() ? "Starting…" : "Start now without tools"}
+                        </button>
+                      </>
                     }
                   >
                     <button class="btn btn-primary" disabled={busy()} onClick={() => void run()}>

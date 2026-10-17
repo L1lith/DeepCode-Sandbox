@@ -579,6 +579,9 @@ async fn dispatch(
         "docker_status" => to_value(commands::docker_status_impl(state)?),
         "list_projects" => to_value(commands::list_projects_impl(state)?),
         "get_project" => to_value(commands::get_project_impl(state, arg(args, "projectId")?)?),
+        "project_disk_usage" => {
+            to_value(commands::project_disk_usage_impl(state, arg(args, "projectId")?).await?)
+        }
         "session_status" => to_value(commands::session_status_impl(state, arg(args, "projectId")?)?),
         "list_grants" => to_value(commands::list_grants_impl(state, arg(args, "projectId")?)?),
         "audit_log" => to_value(commands::audit_log_impl(
@@ -599,7 +602,7 @@ async fn dispatch(
 
         // --- driving a sandbox ---------------------------------------------
         "start_session" => {
-            to_value(commands::start_session_impl(
+            to_value(commands::start_session_requested(
                 app,
                 state,
                 arg(args, "projectId")?,
